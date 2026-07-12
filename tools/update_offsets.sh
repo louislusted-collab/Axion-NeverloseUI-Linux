@@ -11,9 +11,18 @@ TEMP_RESOLVED="$CACHE/linux-offsets.download.json"
 RESOLVED="$CACHE/linux-offsets.resolved.json"
 VALIDATOR="$ROOT/tools/validate_offsets.py"
 SCANNER="$ROOT/tools/dump_linux_offsets.py"
+FULL_DUMPER="$ROOT/tools/run_full_linux_dumper.sh"
 REMOTE="${AXION_OFFSETS_URL:-https://raw.githubusercontent.com/louislusted-collab/Axion-NeverloseUI-Linux/main/offsets/linux-signatures.json}"
 
 mkdir -p "$CACHE"
+
+run_full_dumper() {
+    if [ -x "$FULL_DUMPER" ]; then
+        "$FULL_DUMPER" || echo "Full dumper failed; kept the validated static cache." >&2
+    fi
+}
+
+trap run_full_dumper EXIT
 
 report_active() {
     if [ -f "$ACTIVE" ]; then

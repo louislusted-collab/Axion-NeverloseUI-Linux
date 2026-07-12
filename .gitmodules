@@ -1,0 +1,4 @@
+[submodule "tools/cs2-dumper"]
+	path = tools/cs2-dumper
+	url = https://github.com/catpetter1999/cs2-dumper.git
+	branch = linux

@@ -121,7 +121,7 @@ void UpdateFinished(GObject* source, GAsyncResult* result, gpointer user_data)
     }
 
     SetButtonsSensitive(state, true);
-    gtk_button_set_label(GTK_BUTTON(state->update_button), "Update offsets & signatures");
+    gtk_button_set_label(GTK_BUTTON(state->update_button), "Update full Linux dump");
     g_clear_error(&error);
     g_free(output);
     g_free(error_output);
@@ -152,8 +152,8 @@ void UpdateClicked(GtkButton*, gpointer user_data)
     }
 
     SetButtonsSensitive(state, false);
-    gtk_button_set_label(GTK_BUTTON(state->update_button), "Checking native Linux feed…");
-    SetStatus(state, "Downloading and validating Linux signatures…", "status-working");
+    gtk_button_set_label(GTK_BUTTON(state->update_button), "Dumping…");
+    SetStatus(state, "Updating signatures, offsets, interfaces, and schemas…", "status-working");
     g_subprocess_communicate_utf8_async(process, nullptr, nullptr, UpdateFinished, state);
 }
 
@@ -215,7 +215,7 @@ void Activate(GtkApplication* application, gpointer user_data)
     gtk_widget_set_valign(state->status, GTK_ALIGN_END);
     gtk_box_append(GTK_BOX(card), state->status);
 
-    state->update_button = gtk_button_new_with_label("Update offsets & signatures");
+    state->update_button = gtk_button_new_with_label("Update full Linux dump");
     gtk_widget_add_css_class(state->update_button, "update");
     gtk_widget_set_halign(state->update_button, GTK_ALIGN_FILL);
     g_signal_connect(state->update_button, "clicked", G_CALLBACK(UpdateClicked), state);
