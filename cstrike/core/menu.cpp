@@ -1,26 +1,34 @@
 #include "menu.h"
+
+// used: config variables
 #include "variables.h"
+// used: entity stuff for skinchanger etc
 #include "../cstrike/sdk/entity.h"
+// used: iinputsystem
 #include "interfaces.h"
 #include "../sdk/interfaces/iengineclient.h"
 #include "../sdk/interfaces/inetworkclientservice.h"
 #include "../sdk/interfaces/iglobalvars.h"
 #include "../sdk/interfaces/ienginecvar.h"
+// used: overlay's context
 #include "../features/visuals/overlay.h"
+// used: notifications
 #include "../utilities/notify.h"
 #include "gui.hpp"
+#ifdef _WIN32
+#include <d3d11.h>
+#endif
+#ifdef _WIN32
+#include <d3dcompiler.h>
+#endif
 #include "../cstrike/features/skins/ccsplayerinventory.hpp"
 #include "../cstrike/features/skins/ccsinventorymanager.hpp"
 #include "../cstrike/features/skins/skin_changer.hpp"
 #include "imgui/imgui_edited.hpp"
-#include <cmath> 
-#include <algorithm>
-
-#ifdef _WIN32
-#include <d3d11.h>
-#include <d3dcompiler.h>
+#include <cstring>
+#ifdef __linux__
+#include "../../linux/vulkan_hook.h"
 #endif
-
 #pragma region menu_array_entries
 static void RenderInventoryWindow();
 int page = 0;
@@ -83,8 +91,6 @@ enum SUBTAB : int {
 	fifth = 5,
 };
 
-#define IM_ARRAYSIZE(_ARR)          ((int)(sizeof(_ARR) / sizeof(*_ARR)))       // Size of a static C-style array. Don't use on pointers!
-
 // Function to extract the unique identifier from the itemBaseName
 std::string ExtractIdentifier(const std::string& itemBaseName, const std::string& modelName) {
 	// Find the position of the modelName
@@ -102,33 +108,23 @@ std::string ExtractIdentifier(const std::string& itemBaseName, const std::string
 	// If modelName is not found, return an empty string
 	return "";
 }
+ImTextureID CreateTextureFromMemory([[maybe_unused]] void* imageData, [[maybe_unused]] int width, [[maybe_unused]] int height) {
 #ifdef _WIN32
-ImTextureID CreateTextureFromMemory(void* imageData, int width, int height) {
 	ID3D11Texture2D* pTexture = nullptr;
-
 	D3D11_TEXTURE2D_DESC desc = {};
-	desc.Width = width;
-	desc.Height = height;
-	desc.MipLevels = 1;
-	desc.ArraySize = 1;
+	desc.Width = width; desc.Height = height;
+	desc.MipLevels = 1; desc.ArraySize = 1;
 	desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-	desc.SampleDesc.Count = 1;
-	desc.Usage = D3D11_USAGE_DEFAULT;
+	desc.SampleDesc.Count = 1; desc.Usage = D3D11_USAGE_DEFAULT;
 	desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-
 	D3D11_SUBRESOURCE_DATA initData = {};
-	initData.pSysMem = imageData;
-	initData.SysMemPitch = width * 4; // Assuming 4 channels (R8G8B8A8)
-
-	if (FAILED(I::Device->CreateTexture2D(&desc, &initData, &pTexture))) {
-		// Handle creation failure
-		return 0;
-	}
-
+	initData.pSysMem = imageData; initData.SysMemPitch = width * 4;
+	if (FAILED(I::Device->CreateTexture2D(&desc, &initData, &pTexture))) return 0;
 	return (ImTextureID)pTexture;
-}
+#else
+	return nullptr; // Vulkan texture upload handled separately
 #endif
-
+}
 enum wep_type : int {
 	PISTOL = 1,
 	 HEAVY_PISTOL = 2,
@@ -159,8 +155,10 @@ void MENU::RenderMainWindow()
 	static std::vector<DumpedItem_t> vecDumpedItems;
 	static DumpedItem_t* pSelectedItem = nullptr;
 
-	CEconItemSchema* pItemSchema =
-		I::Client->GetEconItemSystem()->GetEconItemSchema();
+	CEconItemSchema* pItemSchema = nullptr;
+#ifdef _WIN32
+	pItemSchema = I::Client->GetEconItemSystem()->GetEconItemSchema();
+#endif
 
 
 	// Render the ImGui draw data using the DirectX 11 blur shader
@@ -200,6 +198,7 @@ void MENU::RenderMainWindow()
 	c::accent = color.GetVec4(1.f) ;
 
 	ImGui::SetNextWindowSize(c::background::size* dpi);
+	ImGui::SetNextWindowPos(io.DisplaySize * 0.5f, ImGuiCond_Once, ImVec2(0.5f, 0.5f));
 
 
 	// render main window
@@ -248,7 +247,7 @@ void MENU::RenderMainWindow()
 		{
 			if (active_tab == 0)
 			{
-				edited::BeginChild(CS_XOR("##Container0"), ImVec2((c::background::size.x - 200) / 2, c::background::size.y), NULL);
+				edited::BeginChild(CS_XOR("##Container0"), ImVec2((c::background::size.x - 200) / 2, c::background::size.y), 0);
 				{
 					ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), CS_XOR("Weapons"));
 					const char* weapons[7]{ CS_XOR("Default"), CS_XOR("Pistols"), CS_XOR("Heavy Pistols"),CS_XOR("Assult Rifles"), CS_XOR("Auto"),CS_XOR("Scout"), CS_XOR("Awp") };
@@ -282,15 +281,20 @@ void MENU::RenderMainWindow()
 				edited::EndChild();
 				ImGui::SameLine(0, 0);
 
-				edited::BeginChild("##Container1", ImVec2((c::background::size.x - 200 * dpi) / 2, c::background::size.y), NULL);
+				edited::BeginChild("##Container1", ImVec2((c::background::size.x - 200 * dpi) / 2, c::background::size.y), 0);
 				{
 					ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "Hitbox System");
 
 					/* render model preview*/
 					ImGui::SetCursorPos({ 55, 75 });
-#ifdef _WIN32
+					#ifdef _WIN32
 					ImGui::Image((void*)I::Maintexture, ImVec2(278, 380));
-#endif
+					#else
+					if (g_PreviewTexture != nullptr)
+						ImGui::Image((ImTextureID)g_PreviewTexture, ImVec2(278, 380));
+					else
+						ImGui::Dummy(ImVec2(278, 380));
+					#endif
 					switch (current_weapon) {
 					case PISTOL:
 						edited::pointbox(CS_XOR("##head"), &C_GET_ARRAY(bool, 7, Vars.hitbox_head, 1), 0, 115.f, 105.f);
@@ -354,7 +358,7 @@ void MENU::RenderMainWindow()
 			}
 			else if (active_tab == 1)
 			{
-				edited::BeginChild("##Container0", ImVec2((c::background::size.x - 200) / 2, c::background::size.y), NULL);
+				edited::BeginChild("##Container0", ImVec2((c::background::size.x - 200) / 2, c::background::size.y), 0);
 				{
 					ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "Antiaim");
 					edited::Checkbox(CS_XOR("Enable"), CS_XOR("Enables Antiaim"), &C_GET(bool, Vars.bAntiAim));
@@ -367,7 +371,7 @@ void MENU::RenderMainWindow()
 				edited::EndChild();
 			}
 			else if (active_tab == 2) {
-				edited::BeginChild("##Container0", ImVec2((c::background::size.x - 200) / 2, c::background::size.y), NULL);
+				edited::BeginChild("##Container0", ImVec2((c::background::size.x - 200) / 2, c::background::size.y), 0);
 				{
 
 					ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "Players");
@@ -403,15 +407,20 @@ void MENU::RenderMainWindow()
 
 				ImGui::SameLine(0, 0);
 
-				edited::BeginChild("##Container1", ImVec2((c::background::size.x - 200 * dpi) / 2, c::background::size.y), NULL);
+				edited::BeginChild("##Container1", ImVec2((c::background::size.x - 200 * dpi) / 2, c::background::size.y), 0);
 				{
 					ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "Preview");
 
 					/* render model preview*/
 					ImGui::SetCursorPos({ 65, 75 });
-#ifdef _WIN32
+					#ifdef _WIN32
 					ImGui::Image((void*)I::Maintexture, ImVec2(278, 380));
-#endif
+					#else
+					if (g_PreviewTexture != nullptr)
+						ImGui::Image((ImTextureID)g_PreviewTexture, ImVec2(278, 380));
+					else
+						ImGui::Dummy(ImVec2(278, 380));
+					#endif
 
 					using namespace F::VISUALS::OVERLAY;
 
@@ -498,7 +507,7 @@ void MENU::RenderMainWindow()
 				edited::EndChild();
 			}
 			else if (active_tab == 4) {
-			edited::BeginChild("##Container0", ImVec2((c::background::size.x - 200) / 2, c::background::size.y), NULL);
+			edited::BeginChild("##Container0", ImVec2((c::background::size.x - 200) / 2, c::background::size.y), 0);
 			{
 
 				ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "Players");
@@ -532,7 +541,7 @@ void MENU::RenderMainWindow()
 			edited::EndChild();
 			ImGui::SameLine(0, 0);
 			ImGui::SetCursorPos(ImVec2(527, 60));
-			edited::BeginChild("##Container1", ImVec2((c::background::size.x - 200 * dpi) / 2, c::background::size.y), NULL);
+			edited::BeginChild("##Container1", ImVec2((c::background::size.x - 200 * dpi) / 2, c::background::size.y), 0);
 			{
 				ImGui::Columns(2, CS_XOR("#CONFIG"), false);
 				{
@@ -618,7 +627,7 @@ void MENU::RenderMainWindow()
 				{
 					CRT::String_t<MAX_PATH> szCurrentConfig(C::vecFileNames[nSelectedConfig]);
 
-					ImGui::Text(CS_XOR("are you sure you want to remove \"%s\" configuration?"), szCurrentConfig);
+					ImGui::Text(CS_XOR("are you sure you want to remove \"%s\" configuration?"), szCurrentConfig.Data());
 					ImGui::Spacing();
 
 					if (ImGui::Button(CS_XOR("no"), ImVec2(ImGui::GetContentRegionAvail().x / 2.f, 0)))
@@ -647,14 +656,14 @@ void MENU::RenderMainWindow()
 			}
 			else if (active_tab == 3) {
 
-				edited::BeginChild("##Container0", ImVec2((600), c::background::size.y), NULL);
+				edited::BeginChild("##Container0", ImVec2((600), c::background::size.y), 0);
 				{					
 					if (edited::Button(CS_XOR("Full update"), ImVec2(120, 50), 0)) {
 						Vars.full_update = true;
 						
 					}
 						
-					if (vecDumpedItems.empty() && edited::Button(CS_XOR("Dump items"),  ImVec2(120, 50), 0)) {
+					if (pItemSchema != nullptr && vecDumpedItems.empty() && edited::Button(CS_XOR("Dump items"),  ImVec2(120, 50), 0)) {
 
 
 						const CUtlMap<int, CEconItemDefinition*>& vecItems =
@@ -694,9 +703,7 @@ void MENU::RenderMainWindow()
 
 							// Load the image and set the texture ID.
 							if (dumpedItem.m_image) {
-#ifdef _WIN32
 								dumpedItem.m_textureID = CreateTextureFromMemory(dumpedItem.m_image, 120, 280);
-#endif
 							}
 
 							// We filter skins by guns.
@@ -980,7 +987,13 @@ void MENU::RenderWatermark()
 		if (CRT::StringString(GetCommandLineW(), CS_XOR(L"-insecure")) != nullptr)
 			ImGui::TextColored(ImVec4(1.0f, 1.0f, 0.0f, 1.0f), CS_XOR("insecure"));
 
-		if (I::Engine->IsInGame())
+		if (
+#ifdef _WIN32
+			I::Engine->IsInGame()
+#else
+			false
+#endif
+		)
 			ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), CS_XOR("in-game"));
 
 		static ImVec2 vecNameSize = ImGui::CalcTextSize(CS_XOR("cs2project | " __DATE__ " " __TIME__));
@@ -1078,12 +1091,14 @@ static void RenderInventoryWindow() {
 	static std::vector<DumpedItem_t> vecDumpedItems;
 	static DumpedItem_t* pSelectedItem = nullptr;
 
-	CEconItemSchema* pItemSchema =
-		I::Client->GetEconItemSystem()->GetEconItemSchema();
+	CEconItemSchema* pItemSchema = nullptr;
+#ifdef _WIN32
+	pItemSchema = I::Client->GetEconItemSystem()->GetEconItemSchema();
+#endif
 
 
 	if (ImGui::Begin("cs2sdk item dumper", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-		if (vecDumpedItems.empty() &&
+		if (pItemSchema != nullptr && vecDumpedItems.empty() &&
 			ImGui::Button("Dump items", { windowWidth, 0 })) {
 		
 
@@ -1100,7 +1115,8 @@ static void RenderInventoryWindow() {
 
 				const bool isWeapon = pItem->IsWeapon();
 				
-				auto isKnife = (pItem->m_pszItemTypeName != "#CSGO_Type_Knife");
+				const bool isKnife = pItem->m_pszItemTypeName != nullptr &&
+					std::strcmp(pItem->m_pszItemTypeName, "#CSGO_Type_Knife") == 0;
 			//	auto isGloves = pItem->IsGlove(true, pItem->m_pszItemTypeName);
 				 
 				if (!isWeapon && !isKnife) continue;
@@ -1434,9 +1450,9 @@ void MENU::ParticleContext_t::FindConnections(ImDrawList* pDrawList, ParticleDat
 		if (&currentParticle == &particle)
 			continue;
 
-		const float flDeltaX = particle.vecPosition.x - currentParticle.vecPosition.x;
-		const float flDeltaY = particle.vecPosition.y - currentParticle.vecPosition.y;
-		const float flDistance = std::sqrt(flDeltaX * flDeltaX + flDeltaY * flDeltaY);
+		/// @note: calculate length distance 2d
+		ImVec2 delta = ImVec2(particle.vecPosition.x - currentParticle.vecPosition.x, particle.vecPosition.y - currentParticle.vecPosition.y);
+		const float flDistance = std::sqrt(delta.x * delta.x + delta.y * delta.y);
 		if (flDistance <= flMaxDistance)
 			this->DrawConnection(pDrawList, particle, currentParticle, (flMaxDistance - flDistance) / flMaxDistance, colPrimary);
 	}
