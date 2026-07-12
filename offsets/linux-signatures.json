@@ -1,0 +1,11 @@
+{
+  "format": 1,
+  "platform": "linux-x86_64-native",
+  "channel": "stable",
+  "updated_at": "2026-07-12T00:00:00Z",
+  "schema": {
+    "mode": "runtime",
+    "fallback": "none"
+  },
+  "signatures": {}
+}

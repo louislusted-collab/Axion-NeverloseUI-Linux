@@ -63,7 +63,7 @@ void InjectionFinished(GObject* source, GAsyncResult* result, gpointer user_data
 void InjectClicked(GtkButton*, gpointer user_data)
 {
     auto* state = static_cast<LoaderState*>(user_data);
-    const auto injector = state->root / "inject.sh";
+    const auto injector = state->root / "run_inject.sh";
     const auto library = state->root / "cs2_axion.so";
 
     if (!std::filesystem::exists(injector)) {
@@ -79,7 +79,6 @@ void InjectClicked(GtkButton*, gpointer user_data)
     GSubprocess* process = g_subprocess_new(
         static_cast<GSubprocessFlags>(G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE),
         &error,
-        "pkexec",
         injector.c_str(),
         nullptr);
 

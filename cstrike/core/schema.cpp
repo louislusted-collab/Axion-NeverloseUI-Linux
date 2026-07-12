@@ -4,6 +4,8 @@
 #include <vector>
 // used: [stl] find_if
 #include <algorithm>
+#include <cstring>
+#include <string>
 
 // used: getworkingpath
 #include "../core.h"
@@ -139,6 +141,48 @@ std::uint32_t SCHEMA::GetOffset(const FNV1A_t uHashedFieldName)
 	CS_ASSERT(false); // schema field not found
 	return 0U;
 #endif
+}
+
+std::uint32_t SCHEMA::GetOffset(const char* szQualifiedFieldName)
+{
+	if (szQualifiedFieldName == nullptr)
+		return 0U;
+
+	const FNV1A_t hash = FNV1A::Hash(szQualifiedFieldName);
+	if (const auto it = std::ranges::find_if(vecSchemaData, [hash](const SchemaData_t& data)
+		{ return data.uHashedFieldName == hash; }); it != vecSchemaData.end())
+		return it->uOffset;
+
+	const char* separator = std::strstr(szQualifiedFieldName, "->");
+	if (separator == nullptr || separator == szQualifiedFieldName || separator[2] == '\0')
+		return 0U;
+
+	if (I::SchemaSystem == nullptr)
+		return 0U;
+
+	const std::string className(szQualifiedFieldName, static_cast<std::size_t>(separator - szQualifiedFieldName));
+	const char* fieldName = separator + 2;
+	CSchemaSystemTypeScope* scope = I::SchemaSystem->FindTypeScopeForModule(CLIENT_DLL);
+	if (scope == nullptr)
+		return 0U;
+
+	SchemaClassInfoData_t* classInfo = nullptr;
+	scope->FindDeclaredClass(&classInfo, className.c_str());
+	if (classInfo == nullptr || classInfo->pFields == nullptr)
+		return 0U;
+
+	for (int i = 0; i < classInfo->nFieldSize; ++i)
+	{
+		const SchemaClassFieldData_t& field = classInfo->pFields[i];
+		if (field.szName != nullptr && std::strcmp(field.szName, fieldName) == 0)
+		{
+			vecSchemaData.emplace_back(hash, field.nSingleInheritanceOffset);
+			return field.nSingleInheritanceOffset;
+		}
+	}
+
+	L_PRINT(LOG_WARNING) << CS_XOR("native schema field not found: ") << szQualifiedFieldName;
+	return 0U;
 }
 
 // @todo: optimize this, this is really poorly do and can be done much better?

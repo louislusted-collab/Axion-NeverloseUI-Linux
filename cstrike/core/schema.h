@@ -20,7 +20,11 @@
 		return reinterpret_cast<std::add_pointer_t<TYPE>>(reinterpret_cast<std::uint8_t*>(this) + (uOffset)); \
 	}
 
+#ifdef __linux__
+#define SCHEMA_ADD_FIELD_OFFSET(TYPE, NAME, FIELD, ADDITIONAL) SCHEMA_ADD_OFFSET(TYPE, NAME, SCHEMA::GetOffset(FIELD) + ADDITIONAL)
+#else
 #define SCHEMA_ADD_FIELD_OFFSET(TYPE, NAME, FIELD, ADDITIONAL) SCHEMA_ADD_OFFSET(TYPE, NAME, SCHEMA::GetOffset(FNV1A::HashConst(FIELD)) + ADDITIONAL)
+#endif
 
 #define SCHEMA_ADD_FIELD(TYPE, NAME, FIELD) SCHEMA_ADD_FIELD_OFFSET(TYPE, NAME, FIELD, 0U)
 
@@ -39,6 +43,7 @@ namespace SCHEMA
 	// get offset of the field in the class
 	// @note: only client.dll class & fields
 	[[nodiscard]] std::uint32_t GetOffset(const FNV1A_t uHashedFieldName);
+	[[nodiscard]] std::uint32_t GetOffset(const char* szQualifiedFieldName);
 
 	// get foregin offset from other .dll
 	[[nodiscard]] std::uint32_t GetForeignOffset(const char* szModulenName, const FNV1A_t uHashedClassName, const FNV1A_t uHashedFieldName);

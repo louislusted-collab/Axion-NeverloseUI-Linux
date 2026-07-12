@@ -3,10 +3,15 @@ set -e
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 LIBRARY="$SCRIPT_DIR/cs2_axion.so"
+UPDATER="$SCRIPT_DIR/tools/update_offsets.sh"
 
 if [ ! -f "$LIBRARY" ]; then
     echo "Missing $LIBRARY; run make first."
     exit 1
+fi
+
+if [ "${AXION_SKIP_UPDATE:-0}" != "1" ] && [ "${AXION_UPDATE_DONE:-0}" != "1" ] && [ -x "$UPDATER" ]; then
+    "$UPDATER"
 fi
 
 PID="$(pidof cs2 2>/dev/null || true)"
@@ -16,7 +21,7 @@ if [ -z "$PID" ]; then
 fi
 
 if [ "$EUID" -ne 0 ]; then
-    exec sudo "$0" "$@"
+    exec sudo env AXION_UPDATE_DONE=1 "$0" "$@"
 fi
 
 rm -f /tmp/cs2_vulkan_debug.log /tmp/cs2_inject_debug.log /tmp/cs2_init_debug.log /tmp/cs2_hook_debug.log

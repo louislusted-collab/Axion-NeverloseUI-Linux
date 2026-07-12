@@ -33,10 +33,17 @@ menu after injection. Renderer diagnostics are written to
 
 ## Offset updater
 
-The native-Linux updater is the next milestone. It will use runtime schema
-resolution plus a versioned Linux signature manifest with validation and a
-last-known-good fallback. Windows `client.dll` dumps are not applied to native
-Linux `libclient.so`.
+Every injection checks the public native-Linux signature manifest. Updates are
+downloaded into `.axion-cache`, validated before activation, and backed up as a
+last-known-good copy. Network or validation failures never replace the active
+manifest. Set `AXION_SKIP_UPDATE=1` to skip the check.
+
+The validator rejects Windows modules and manifests that do not require a
+unique match. Windows `client.dll` dumps are never applied to native Linux
+`libclient.so`. Schema fields now resolve directly from CS2's runtime schema,
+so they do not need static offsets. The bundled signature manifest is an empty,
+validated baseline until native Linux patterns are verified; native gameplay
+hooks are also still required before the old gameplay features work.
 
 ## Upstream
 
