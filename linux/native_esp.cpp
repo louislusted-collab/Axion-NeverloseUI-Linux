@@ -11,9 +11,13 @@
 #include "../cstrike/sdk/interfaces/iengineclient.h"
 #include "../cstrike/utilities/draw.h"
 #include "../cstrike/utilities/memory.h"
+#include "../dependencies/json.hpp"
 
 #include <cstring>
 #include <cstdio>
+#include <dlfcn.h>
+#include <filesystem>
+#include <fstream>
 
 namespace
 {
@@ -32,12 +36,50 @@ void EspLog(const char* message, const void* first = nullptr, const void* second
     std::fflush(file);
 }
 
+bool LoadResolvedOffsets()
+{
+    Dl_info library_info{};
+    if (dladdr(reinterpret_cast<void*>(&LinuxNativeEsp::Render), &library_info) == 0 || library_info.dli_fname == nullptr)
+        return false;
+
+    const std::filesystem::path manifest =
+        std::filesystem::path(library_info.dli_fname).parent_path() / ".axion-cache" / "linux-offsets.resolved.json";
+    std::ifstream input(manifest);
+    if (!input)
+        return false;
+
+    try
+    {
+        const nlohmann::json data = nlohmann::json::parse(input);
+        const auto& offsets = data.at("offsets");
+        const auto client_base = reinterpret_cast<std::uintptr_t>(MEM::GetModuleBaseHandle(CLIENT_DLL));
+        if (client_base == 0)
+            return false;
+        native_view_matrix = reinterpret_cast<ViewMatrix_t*>(
+            client_base + offsets.at("dwViewMatrixNative").at("value").get<std::uintptr_t>());
+        native_local_controller = reinterpret_cast<CCSPlayerController**>(
+            client_base + offsets.at("dwLocalPlayerControllerNative").at("value").get<std::uintptr_t>());
+        return true;
+    }
+    catch (const std::exception&)
+    {
+        return false;
+    }
+}
+
 void ResolveViewMatrix()
 {
     if (attempted_matrix_lookup)
         return;
     attempted_matrix_lookup = true;
 
+    if (LoadResolvedOffsets())
+    {
+        EspLog("[ESP] loaded updater offsets: view_matrix=%p local_controller_ptr=%p", native_view_matrix, native_local_controller);
+        return;
+    }
+
+    // Bundled fallback for first run when the updater cache is unavailable.
     // lea r8, [rip+rel32] starts seven bytes into this native-only pattern.
     std::uint8_t* match = MEM::FindPattern(CLIENT_DLL, "C6 83 ? ? 00 00 01 4C 8D 05");
     if (match != nullptr)
