@@ -1,4 +1,4 @@
-#include "features.h"
+#include "cheat_features.h"
 
 // used: draw callbacks
 #include "utilities/draw.h"
@@ -20,7 +20,9 @@
 #include "sdk/interfaces/cgameentitysystem.h"
 #include "sdk/datatypes/usercmd.h"
 #include "sdk/entity.h"
+#ifdef _WIN32
 #include <Windows.h>
+#endif
 #include "../cstrike/sdk/interfaces/iinputsystem.h"
 #include "../cstrike/utilities/inputsystem.h"
 #include "features/visuals/overlay.h"
@@ -30,6 +32,10 @@ std::vector<KeyBind_t*> g_keybinds;
 //[181.214.231.239:27042
 bool F::Setup()
 {
+#ifdef __linux__
+	L_PRINT(LOG_WARNING) << CS_XOR("[Linux] gameplay feature initialization skipped (native hooks not ported)");
+	return true;
+#else
 	if (!VISUALS::Setup())
 	{
 		L_PRINT(LOG_ERROR) << CS_XOR("failed to setup visuals");
@@ -38,6 +44,7 @@ bool F::Setup()
 	L_PRINT(LOG_NONE) << L::SetColor(LOG_COLOR_FORE_GREEN | LOG_COLOR_FORE_INTENSITY) << CS_XOR("features VISUALS completed");
 
 	return true;
+#endif
 }
 
 void F::OnKeyBindUpdate() {

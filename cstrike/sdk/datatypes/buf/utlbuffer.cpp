@@ -11,6 +11,7 @@
 #include "utlbuffer.h"
 #include "../../../utilities/log.h"
 #include "strtools.h"
+#include <climits>
 
 
 
@@ -247,11 +248,9 @@ CUtlBuffer::CUtlBuffer(const CUtlBuffer& copyFrom) :
 	m_nOffset(copyFrom.m_nOffset),
 	m_GetOverflowFunc(copyFrom.m_GetOverflowFunc),
 	m_PutOverflowFunc(copyFrom.m_PutOverflowFunc),
-	m_Byteswap(copyFrom.m_Byteswap),
-	m_Memory(copyFrom.m_Memory)
+	m_Byteswap(copyFrom.m_Byteswap)
 {
-	
-
+	m_Memory = copyFrom.m_Memory;
 }
 
 CUtlBuffer& CUtlBuffer::operator=(const CUtlBuffer& copyFrom)
@@ -1545,9 +1544,11 @@ void CUtlBuffer::PutDelimitedString(CUtlCharConversion* pConv, const char* pStri
 
 void CUtlBuffer::VaPrintf(const char* pFmt, va_list list)
 {
-	char temp[8192];
-	//size_t nLen = V_vsnprintf(temp, sizeof(temp), pFmt, list);
-	//ErrorIfNot(nLen < sizeof(temp), ("CUtlBuffer::VaPrintf: String overflowed buffer [%d]\n", sizeof(temp)));
+	char temp[8192] = {};
+	if (!pFmt)
+		return;
+	vsnprintf(temp, sizeof(temp), pFmt, list);
+	temp[sizeof(temp) - 1] = '\0';
 	PutString(temp);
 }
 
@@ -1937,10 +1938,10 @@ bool KeyValues3::load_kv3(CUtlBuffer* buf, const char* material, KV3ID_t kvid)
 inline static constexpr int k_unk_key_hash = 0x31415926;
 inline static constexpr std::uint64_t k_kv_id_unk_hash1 = 0x41B818518343427E;
 inline static constexpr std::uint64_t k_kv_id_unk_hash2 = 0xB5F447C23C0CDF8C;
-inline bool(_fastcall* LoadKv3)(c_key_values*, void*, c_ult_buffer*, kv3_id_t*, void*, void*, void*, void*, const char*) = nullptr;
-inline void(__fastcall* utlbuf)(c_ult_buffer*, int, int, int) = nullptr;
-inline void(__fastcall* putstring)(c_ult_buffer*, const char*) = nullptr;
-inline c_key_values*(__fastcall* settype)(c_key_values*, std::uint8_t, std::uint8_t) = nullptr;
+inline bool (*LoadKv3)(c_key_values*, void*, c_ult_buffer*, kv3_id_t*, void*, void*, void*, void*, const char*) = nullptr;
+inline void (*utlbuf)(c_ult_buffer*, int, int, int) = nullptr;
+inline void (*putstring)(c_ult_buffer*, const char*) = nullptr;
+inline c_key_values* (*settype)(c_key_values*, std::uint8_t, std::uint8_t) = nullptr;
 
 c_ult_buffer::c_ult_buffer(int a1, int size, int a3) {
 

@@ -42,12 +42,16 @@ namespace EASING
 
 	CS_INLINE double OutCubic(double t)
 	{
-		return 1 + (--t) * t * t;
+		t -= 1.0;
+		return 1 + t * t * t;
 	}
 
 	CS_INLINE double InOutCubic(double t)
 	{
-		return t < 0.5 ? 4 * t * t * t : 1 + (--t) * (2 * (--t)) * (2 * t);
+		if (t < 0.5)
+			return 4 * t * t * t;
+		t = 2 * t - 2;
+		return 1 + 0.5 * t * t * t;
 	}
 
 	CS_INLINE double InQuart(double t)
@@ -58,7 +62,8 @@ namespace EASING
 
 	CS_INLINE double OutQuart(double t)
 	{
-		t = (--t) * t;
+		t -= 1.0;
+		t *= t;
 		return 1 - t * t;
 	}
 
@@ -71,7 +76,8 @@ namespace EASING
 		}
 		else
 		{
-			t = (--t) * t;
+			t -= 1.0;
+			t *= t;
 			return 1 - 8 * t * t;
 		}
 	}
@@ -84,7 +90,8 @@ namespace EASING
 
 	CS_INLINE double OutQuint(double t)
 	{
-		const double t2 = (--t) * t;
+		t -= 1.0;
+		const double t2 = t * t;
 		return 1 + t * t2 * t2;
 	}
 
@@ -98,7 +105,8 @@ namespace EASING
 		}
 		else
 		{
-			t2 = (--t) * t;
+			t -= 1.0;
+			t2 = t * t;
 			return 1 + 16 * t * t2 * t2;
 		}
 	}
@@ -154,7 +162,8 @@ namespace EASING
 
 	CS_INLINE double OutBack(double t)
 	{
-		return 1 + (--t) * t * (2.70158 * t + 1.70158);
+		t -= 1.0;
+		return 1 + t * t * (2.70158 * t + 1.70158);
 	}
 
 	CS_INLINE double InOutBack(double t)
@@ -165,7 +174,8 @@ namespace EASING
 		}
 		else
 		{
-			return 1 + (--t) * t * 2 * (7 * t + 2.5);
+			t -= 1.0;
+			return 1 + t * t * 2 * (7 * t + 2.5);
 		}
 	}
 

@@ -85,6 +85,9 @@ namespace MEM
 	/// @param[in] wszModuleName module name to search base handle for, null means current process
 	/// @returns: base handle of module with given name if it exist, null otherwise
 	[[nodiscard]] void* GetModuleBaseHandle(const wchar_t* wszModuleName);
+#ifdef __linux__
+	[[nodiscard]] void* GetModuleBaseHandle(const char* szModuleName);
+#endif
 	/// alternative of 'GetModuleFileName()'
 	/// @param[in] hModuleBase module base to search filename for, null means current process
 	/// @returns: name of given module if it's valid, null otherwise
@@ -107,6 +110,7 @@ namespace MEM
 	template <typename T = std::uint8_t>
 	[[nodiscard]] T* GetAbsoluteAddress(T* pRelativeAddress, int nPreOffset = 0x0, int nPostOffset = 0x0)
 	{
+		if (pRelativeAddress == nullptr) return nullptr;
 		pRelativeAddress += nPreOffset;
 		pRelativeAddress += sizeof(std::int32_t) + *reinterpret_cast<std::int32_t*>(pRelativeAddress);
 		pRelativeAddress += nPostOffset;
@@ -117,8 +121,9 @@ namespace MEM
 	/// @param[in] nRVAOffset offset of the relative address
 	/// @param[in] nRIPOffset offset of the instruction pointer
 	/// @returns: pointer to resolved address
-	[[nodiscard]] CS_INLINE std::uint8_t* ResolveRelativeAddress(std::uint8_t* nAddressBytes, std::uint32_t nRVAOffset, std::uint32_t nRIPOffset)
+	[[nodiscard]] CS_INLINE std::uint8_t* ResolveRelativeAddress(std::uint8_t* nAddressBytes, std::uint32_t nRVAOffset, std::uint32_t nRIPOffset) noexcept
 	{
+		if (nAddressBytes == nullptr) return nullptr;
 		std::uint32_t nRVA = *reinterpret_cast<std::uint32_t*>(nAddressBytes + nRVAOffset);
 		std::uint64_t nRIP = reinterpret_cast<std::uint64_t>(nAddressBytes) + nRIPOffset;
 
@@ -156,6 +161,13 @@ namespace MEM
 	/// @param[in] szByteMask wildcard mask for byte array, e.g. "xxx?x", should always correspond to bytes count
 	/// @returns: pointer to address of the first found occurrence with equal byte sequence on success, null otherwise
 	[[nodiscard]] std::uint8_t* FindPattern(const wchar_t* wszModuleName, const char* szBytePattern, const char* szByteMask);
+
+#ifdef __linux__
+	// Linux overloads: module name is a narrow string (e.g. "libclient.so")
+	[[nodiscard]] std::uint8_t* FindPattern(const char* szModuleName, const char* szPattern);
+	[[nodiscard]] UTILPtr FindPatterns(const char* szModuleName, const char* szPattern);
+	[[nodiscard]] std::uint8_t* FindPattern(const char* szModuleName, const char* szBytePattern, const char* szByteMask);
+#endif
 	/// pattern byte comparison in the specific region
 	/// @param[in] arrByteBuffer byte sequence to search
 	/// @param[in] nByteCount count of search bytes

@@ -14,7 +14,6 @@ struct RepeatedPtrField_t
 	int m_nTotalSize; // 0x1C
 	Rep_t* m_pRep; // 0x20
 
-	template<class T>
 	inline T* add(T* element)
 	{
 		static const auto sub_C92EF0 = MEM::FindPattern(CLIENT_DLL, CS_XOR("48 89 5C 24 ? 57 48 83 EC ? 48 8B D9 48 8B FA 48 8B 49 ? 48 85 C9 74 ? 8B 01"));

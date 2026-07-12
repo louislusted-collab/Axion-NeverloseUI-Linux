@@ -1,26 +1,26 @@
 #include "menu.h"
-
-// used: config variables
 #include "variables.h"
-// used: entity stuff for skinchanger etc
 #include "../cstrike/sdk/entity.h"
-// used: iinputsystem
 #include "interfaces.h"
 #include "../sdk/interfaces/iengineclient.h"
 #include "../sdk/interfaces/inetworkclientservice.h"
 #include "../sdk/interfaces/iglobalvars.h"
 #include "../sdk/interfaces/ienginecvar.h"
-// used: overlay's context
 #include "../features/visuals/overlay.h"
-// used: notifications
 #include "../utilities/notify.h"
 #include "gui.hpp"
-#include <d3d11.h>
-#include <d3dcompiler.h>
 #include "../cstrike/features/skins/ccsplayerinventory.hpp"
 #include "../cstrike/features/skins/ccsinventorymanager.hpp"
 #include "../cstrike/features/skins/skin_changer.hpp"
 #include "imgui/imgui_edited.hpp"
+#include <cmath> 
+#include <algorithm>
+
+#ifdef _WIN32
+#include <d3d11.h>
+#include <d3dcompiler.h>
+#endif
+
 #pragma region menu_array_entries
 static void RenderInventoryWindow();
 int page = 0;
@@ -102,6 +102,7 @@ std::string ExtractIdentifier(const std::string& itemBaseName, const std::string
 	// If modelName is not found, return an empty string
 	return "";
 }
+#ifdef _WIN32
 ImTextureID CreateTextureFromMemory(void* imageData, int width, int height) {
 	ID3D11Texture2D* pTexture = nullptr;
 
@@ -126,6 +127,8 @@ ImTextureID CreateTextureFromMemory(void* imageData, int width, int height) {
 
 	return (ImTextureID)pTexture;
 }
+#endif
+
 enum wep_type : int {
 	PISTOL = 1,
 	 HEAVY_PISTOL = 2,
@@ -285,7 +288,9 @@ void MENU::RenderMainWindow()
 
 					/* render model preview*/
 					ImGui::SetCursorPos({ 55, 75 });
+#ifdef _WIN32
 					ImGui::Image((void*)I::Maintexture, ImVec2(278, 380));
+#endif
 					switch (current_weapon) {
 					case PISTOL:
 						edited::pointbox(CS_XOR("##head"), &C_GET_ARRAY(bool, 7, Vars.hitbox_head, 1), 0, 115.f, 105.f);
@@ -404,7 +409,9 @@ void MENU::RenderMainWindow()
 
 					/* render model preview*/
 					ImGui::SetCursorPos({ 65, 75 });
+#ifdef _WIN32
 					ImGui::Image((void*)I::Maintexture, ImVec2(278, 380));
+#endif
 
 					using namespace F::VISUALS::OVERLAY;
 
@@ -687,7 +694,9 @@ void MENU::RenderMainWindow()
 
 							// Load the image and set the texture ID.
 							if (dumpedItem.m_image) {
+#ifdef _WIN32
 								dumpedItem.m_textureID = CreateTextureFromMemory(dumpedItem.m_image, 120, 280);
+#endif
 							}
 
 							// We filter skins by guns.
@@ -1425,8 +1434,9 @@ void MENU::ParticleContext_t::FindConnections(ImDrawList* pDrawList, ParticleDat
 		if (&currentParticle == &particle)
 			continue;
 
-		/// @note: calcuate length distance 2d, return FLT_MAX if failed
-		const float flDistance = ImLength(particle.vecPosition - currentParticle.vecPosition, FLT_MAX);
+		const float flDeltaX = particle.vecPosition.x - currentParticle.vecPosition.x;
+		const float flDeltaY = particle.vecPosition.y - currentParticle.vecPosition.y;
+		const float flDistance = std::sqrt(flDeltaX * flDeltaX + flDeltaY * flDeltaY);
 		if (flDistance <= flMaxDistance)
 			this->DrawConnection(pDrawList, particle, currentParticle, (flMaxDistance - flDistance) / flMaxDistance, colPrimary);
 	}

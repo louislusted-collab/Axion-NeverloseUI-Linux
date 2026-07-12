@@ -1,0 +1,325 @@
+#ifdef __linux__
+#include "linux_compat.h"
+#include "vulkan_hook.h"
+
+#include <vulkan/vulkan.h>
+#include <SDL3/SDL.h>
+#include <dlfcn.h>
+#include <sys/mman.h>
+#include <cstring>
+#include <cstdio>
+#include <vector>
+#include <mutex>
+#include <atomic>
+
+#include "../dependencies/imgui/imgui.h"
+#include "../dependencies/imgui/backends/imgui_impl_sdl3.h"
+#include "../dependencies/imgui/backends/imgui_impl_vulkan.h"
+
+#include "../cstrike/utilities/inputsystem.h"
+#include "../cstrike/utilities/log.h"
+#include "../cstrike/core/menu.h"
+#include "../cstrike/cheat_features.h"
+#include "../cstrike/features/visuals/overlay.h"
+
+void* g_SDLWindow = nullptr;
+bool  g_MenuOpen  = false;
+static std::atomic<bool> g_MenuReady{false};
+
+static VkDevice          vk_device          = VK_NULL_HANDLE;
+static VkPhysicalDevice  vk_physical_device = VK_NULL_HANDLE;
+static VkInstance        vk_instance        = VK_NULL_HANDLE;
+static VkQueue           vk_queue           = VK_NULL_HANDLE;
+static uint32_t          vk_queue_family    = (uint32_t)-1;
+static VkRenderPass      vk_render_pass     = VK_NULL_HANDLE;
+static VkDescriptorPool  vk_descriptor_pool = VK_NULL_HANDLE;
+static VkExtent2D        vk_extent          = {};
+static VkFormat          vk_format          = VK_FORMAT_B8G8R8A8_UNORM;
+static uint32_t          vk_min_image_count = 2;
+static bool              vk_imgui_inited    = false;
+static bool              vk_sdl_inited      = false;
+
+struct QueueRecord {
+    VkQueue queue = VK_NULL_HANDLE;
+    uint32_t family = UINT32_MAX;
+};
+static QueueRecord queue_records[32] = {};
+static std::mutex queue_records_mutex;
+
+static ImGui_ImplVulkanH_Frame          frames[8]          = {};
+static ImGui_ImplVulkanH_FrameSemaphores frame_sems[8]     = {};
+
+static VkResult (*orig_vkQueuePresentKHR)(VkQueue, const VkPresentInfoKHR*) = nullptr;
+static VkResult (*orig_vkCreateSwapchainKHR)(VkDevice, const VkSwapchainCreateInfoKHR*,
+                                             const VkAllocationCallbacks*, VkSwapchainKHR*) = nullptr;
+static bool (*orig_SDL_PollEvent)(SDL_Event*) = nullptr;
+static int (*orig_SDL_PeepEvents)(SDL_Event*, int, SDL_EventAction, Uint32, Uint32) = nullptr;
+
+extern "C" PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance instance, const char* pName);
+extern "C" PFN_vkVoidFunction vkGetDeviceProcAddr(VkDevice device, const char* pName);
+
+static void VulkanDebug(const char* message)
+{
+    FILE* file = fopen("/tmp/cs2_vulkan_debug.log", "a");
+    if (!file)
+        return;
+    fprintf(file, "%s\n", message);
+    fclose(file);
+}
+
+static void RecordQueue(VkQueue queue, uint32_t family)
+{
+    if (!queue)
+        return;
+    std::lock_guard<std::mutex> lock(queue_records_mutex);
+    for (auto& record : queue_records) {
+        if (record.queue == queue || record.queue == VK_NULL_HANDLE) {
+            record.queue = queue;
+            record.family = family;
+            return;
+        }
+    }
+}
+
+static uint32_t FindQueueFamily(VkQueue queue)
+{
+    std::lock_guard<std::mutex> lock(queue_records_mutex);
+    for (const auto& record : queue_records) {
+        if (record.queue == queue)
+            return record.family;
+    }
+    return UINT32_MAX;
+}
+
+static unsigned int SDLKeycodeToVK(SDL_Keycode key)
+{
+    if (key >= SDLK_A && key <= SDLK_Z) return 'A' + (key - SDLK_A);
+    if (key >= SDLK_0 && key <= SDLK_9) return '0' + (key - SDLK_0);
+    switch (key) {
+    case SDLK_RETURN:    return VK_RETURN;
+    case SDLK_ESCAPE:    return VK_ESCAPE;
+    case SDLK_BACKSPACE: return VK_BACK;
+    case SDLK_TAB:       return VK_TAB;
+    case SDLK_SPACE:     return VK_SPACE;
+    case SDLK_INSERT:    return VK_INSERT;
+    case SDLK_DELETE:    return VK_DELETE;
+    case SDLK_HOME:      return VK_HOME;
+    case SDLK_END:       return VK_END;
+    case SDLK_PAGEUP:    return VK_PRIOR;
+    case SDLK_PAGEDOWN:  return VK_NEXT;
+    case SDLK_LEFT:      return VK_LEFT;
+    case SDLK_RIGHT:     return VK_RIGHT;
+    case SDLK_UP:        return VK_UP;
+    case SDLK_DOWN:      return VK_DOWN;
+    case SDLK_LSHIFT:    return VK_LSHIFT;
+    case SDLK_RSHIFT:    return VK_RSHIFT;
+    case SDLK_LCTRL:     return VK_LCONTROL;
+    case SDLK_RCTRL:     return VK_RCONTROL;
+    case SDLK_LALT:      return VK_MENU;
+    case SDLK_RALT:      return VK_MENU;
+    case SDLK_F1 ... SDLK_F12: return VK_F1 + (key - SDLK_F1);
+    default:             return 0;
+    }
+}
+
+            unsigned int vk = SDLMouseButtonToVK(event->button.button);
+            if (vk < 256)
+                IPT::arrKeyState[vk] = (event->type == SDL_EVENT_MOUSE_BUTTON_DOWN) ? IPT::KEY_STATE_DOWN : IPT::KEY_STATE_RELEASED;
+            break;
+        }
+        default: break;
+        }
+
+        if (ImGui::GetCurrentContext() && g_SDLWindow)
+            ImGui_ImplSDL3_ProcessEvent(event);
+
+        if (g_MenuOpen) {
+            switch (event->type) {
+            case SDL_EVENT_MOUSE_BUTTON_DOWN: case SDL_EVENT_MOUSE_BUTTON_UP:
+            case SDL_EVENT_MOUSE_MOTION:      case SDL_EVENT_MOUSE_WHEEL:
+            case SDL_EVENT_KEY_DOWN:          case SDL_EVENT_KEY_UP:
+                event->type = (SDL_EventType)0;
+            default: break;
+            }
+        }
+    }
+}
+
+static bool Hooked_SDL_PollEvent(SDL_Event* event)
+{
+    bool result = orig_SDL_PollEvent(event);
+    if (result)
+        ProcessSDLEvent(event);
+    return result;
+}
+
+extern "C" bool SDL_PollEvent(SDL_Event* event)
+{
+    if (!orig_SDL_PollEvent)
+        orig_SDL_PollEvent = reinterpret_cast<decltype(orig_SDL_PollEvent)>(dlsym(RTLD_NEXT, "SDL_PollEvent"));
+    return orig_SDL_PollEvent ? Hooked_SDL_PollEvent(event) : false;
+}
+
+extern "C" int SDL_PeepEvents(SDL_Event* events, int numevents,
+                                SDL_EventAction action, Uint32 minType, Uint32 maxType)
+{
+    if (!orig_SDL_PeepEvents) {
+        orig_SDL_PeepEvents = reinterpret_cast<decltype(orig_SDL_PeepEvents)>(
+            dlsym(RTLD_NEXT, "SDL_PeepEvents"));
+        VulkanDebug("[SDL] SDL_PeepEvents intercepted");
+    }
+    if (!orig_SDL_PeepEvents)
+        return -1;
+
+    const int result = orig_SDL_PeepEvents(events, numevents, action, minType, maxType);
+    if (result > 0 && events && action != SDL_ADDEVENT) {
+        for (int i = 0; i < result; ++i)
+            ProcessSDLEvent(&events[i]);
+    }
+    return result;
+}
+
+extern "C" VkResult vkCreateInstance(const VkInstanceCreateInfo* create_info,
+                                       const VkAllocationCallbacks* allocator,
+                                       VkInstance* instance)
+{
+    static auto real = reinterpret_cast<PFN_vkCreateInstance>(dlsym(RTLD_NEXT, "vkCreateInstance"));
+    if (!real)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    const VkResult result = real(create_info, allocator, instance);
+    if (result == VK_SUCCESS && instance) {
+        vk_instance = *instance;
+        VulkanDebug("[VULKAN] vkCreateInstance intercepted");
+    }
+    return result;
+}
+
+extern "C" VkResult vkCreateDevice(VkPhysicalDevice physical_device,
+                                     const VkDeviceCreateInfo* create_info,
+                                     const VkAllocationCallbacks* allocator,
+                                     VkDevice* device)
+{
+    static auto real = reinterpret_cast<PFN_vkCreateDevice>(dlsym(RTLD_NEXT, "vkCreateDevice"));
+    if (!real)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    const VkResult result = real(physical_device, create_info, allocator, device);
+    if (result == VK_SUCCESS && device) {
+        vk_physical_device = physical_device;
+        vk_device = *device;
+        if (create_info && create_info->queueCreateInfoCount > 0)
+            vk_queue_family = create_info->pQueueCreateInfos[0].queueFamilyIndex;
+        VulkanDebug("[VULKAN] vkCreateDevice intercepted");
+    }
+    return result;
+}
+
+extern "C" void vkGetDeviceQueue(VkDevice device, uint32_t family, uint32_t index, VkQueue* queue)
+{
+    static auto real = reinterpret_cast<PFN_vkGetDeviceQueue>(dlsym(RTLD_NEXT, "vkGetDeviceQueue"));
+    if (!real)
+        return;
+    real(device, family, index, queue);
+    if (queue && *queue) {
+        vk_device = device;
+        vk_queue_family = family;
+        vk_queue = *queue;
+        RecordQueue(*queue, family);
+    }
+}
+
+extern "C" void vkGetDeviceQueue2(VkDevice device, const VkDeviceQueueInfo2* info, VkQueue* queue)
+{
+    static auto real = reinterpret_cast<PFN_vkGetDeviceQueue2>(dlsym(RTLD_NEXT, "vkGetDeviceQueue2"));
+    if (!real)
+        return;
+    real(device, info, queue);
+    if (info && queue && *queue) {
+        vk_device = device;
+        vk_queue_family = info->queueFamilyIndex;
+        vk_queue = *queue;
+        RecordQueue(*queue, info->queueFamilyIndex);
+    }
+}
+
+extern "C" VkResult vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* info)
+{
+    if (!orig_vkQueuePresentKHR)
+        orig_vkQueuePresentKHR = reinterpret_cast<decltype(orig_vkQueuePresentKHR)>(dlsym(RTLD_NEXT, "vkQueuePresentKHR"));
+    return orig_vkQueuePresentKHR ? Hooked_QueuePresentKHR(queue, info) : VK_ERROR_INITIALIZATION_FAILED;
+}
+
+extern "C" VkResult vkCreateSwapchainKHR(VkDevice device,
+                                           const VkSwapchainCreateInfoKHR* info,
+                                           const VkAllocationCallbacks* allocator,
+                                           VkSwapchainKHR* swapchain)
+{
+    if (!orig_vkCreateSwapchainKHR)
+        orig_vkCreateSwapchainKHR = reinterpret_cast<decltype(orig_vkCreateSwapchainKHR)>(dlsym(RTLD_NEXT, "vkCreateSwapchainKHR"));
+    return orig_vkCreateSwapchainKHR
+        ? Hooked_CreateSwapchainKHR(device, info, allocator, swapchain)
+        : VK_ERROR_INITIALIZATION_FAILED;
+}
+
+extern "C" PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance instance, const char* pName)
+{
+    static auto real = reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(RTLD_NEXT, "vkGetInstanceProcAddr"));
+    if (!real || !pName)
+        return real ? real(instance, pName) : nullptr;
+    if (instance)
+        vk_instance = instance;
+    if (!strcmp(pName, "vkCreateInstance")) return reinterpret_cast<PFN_vkVoidFunction>(vkCreateInstance);
+    if (!strcmp(pName, "vkCreateDevice")) return reinterpret_cast<PFN_vkVoidFunction>(vkCreateDevice);
+    if (!strcmp(pName, "vkGetDeviceQueue")) return reinterpret_cast<PFN_vkVoidFunction>(vkGetDeviceQueue);
+    if (!strcmp(pName, "vkGetDeviceQueue2")) return reinterpret_cast<PFN_vkVoidFunction>(vkGetDeviceQueue2);
+    if (!strcmp(pName, "vkGetDeviceProcAddr")) return reinterpret_cast<PFN_vkVoidFunction>(vkGetDeviceProcAddr);
+    return real(instance, pName);
+}
+
+extern "C" PFN_vkVoidFunction vkGetDeviceProcAddr(VkDevice device, const char* pName)
+{
+    static auto real_vkGetDeviceProcAddr = reinterpret_cast<PFN_vkVoidFunction(*)(VkDevice, const char*)>(
+        dlsym(RTLD_NEXT, "vkGetDeviceProcAddr"));
+    if (!real_vkGetDeviceProcAddr) return nullptr;
+    if (!pName) return real_vkGetDeviceProcAddr(device, pName);
+
+    if (device != VK_NULL_HANDLE)
+        vk_device = device;
+
+    if (!strcmp(pName, "vkGetDeviceQueue"))
+        return reinterpret_cast<PFN_vkVoidFunction>(vkGetDeviceQueue);
+    if (!strcmp(pName, "vkGetDeviceQueue2"))
+        return reinterpret_cast<PFN_vkVoidFunction>(vkGetDeviceQueue2);
+
+    if (!strcmp(pName, "vkQueuePresentKHR")) {
+        if (!orig_vkQueuePresentKHR)
+            orig_vkQueuePresentKHR = reinterpret_cast<decltype(orig_vkQueuePresentKHR)>(real_vkGetDeviceProcAddr(device, pName));
+        return reinterpret_cast<PFN_vkVoidFunction>(vkQueuePresentKHR);
+    }
+    if (!strcmp(pName, "vkCreateSwapchainKHR")) {
+        if (!orig_vkCreateSwapchainKHR)
+            orig_vkCreateSwapchainKHR = reinterpret_cast<decltype(orig_vkCreateSwapchainKHR)>(real_vkGetDeviceProcAddr(device, pName));
+        return reinterpret_cast<PFN_vkVoidFunction>(vkCreateSwapchainKHR);
+    }
+
+    return real_vkGetDeviceProcAddr(device, pName);
+}
+
+void InstallVulkanHook()
+{
+    L_PRINT(LOG_INFO) << "[VULKAN] InstallVulkanHook called";
+
+    if (vk_device != VK_NULL_HANDLE && orig_vkQueuePresentKHR != nullptr) {
+        L_PRINT(LOG_INFO) << "[VULKAN] Preload interception active; skipping inline SDL patch";
+        return;
+    }
+
+    L_PRINT(LOG_WARNING) << "[VULKAN] Renderer interception was not active at startup; use launch_preload.sh";
+}
+
+void EnableVulkanMenu()
+{
+    g_MenuReady.store(true);
+    L_PRINT(LOG_INFO) << "[VULKAN] Menu rendering enabled";
+}
+
+#endif // __linux__

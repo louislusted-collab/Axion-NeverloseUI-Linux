@@ -24,7 +24,7 @@ namespace detail {
     template<std::size_t N>
     constexpr auto find_first_of_start(std::array<char, N> const& data, std::size_t start, char ch) noexcept {
         std::size_t idx = start;
-        while (data[idx] != ch && idx < N)
+        while (idx < N && data[idx] != ch)
             ++idx;
 
         return idx;
@@ -36,7 +36,7 @@ namespace detail {
             return start;
 
         std::size_t idx = start;
-        while (data[idx] == ch && idx < N)
+        while (idx < N && data[idx] == ch)
             ++idx;
 
         return idx;
@@ -44,20 +44,26 @@ namespace detail {
 
     template<std::size_t N>
     constexpr auto find_last_of(std::array<char, N> const& data, char ch) noexcept {
-        std::size_t idx = data.size() - 2;
-        while (data[idx] != ch && idx >= 0)
+        std::size_t idx = data.size() - 1;
+        while (idx > 0) {
             --idx;
+            if (data[idx] == ch)
+                return idx;
+        }
 
-        return idx;
+        return std::size_t{0};
     }
 
     template<std::size_t N>
     constexpr auto find_last_not_of(std::array<char, N> const& data, char ch) noexcept {
-        std::size_t idx = data.size() - 2;
-        while (data[idx] == ch && idx >= 0)
+        std::size_t idx = data.size() - 1;
+        while (idx > 0) {
             --idx;
+            if (data[idx] != ch)
+                return idx;
+        }
 
-        return idx;
+        return std::size_t{0};
     }
 
     constexpr auto char_to_hex(char ch) noexcept {

@@ -15,21 +15,38 @@
 #include "inputsystem.h"
 
 // used: [ext] imgui
+#ifdef _WIN32
 #include "../../dependencies/imgui/imgui_freetype.h"
 #include "../../dependencies/imgui/imgui_impl_dx11.h"
 #include "../../dependencies/imgui/imgui_impl_win32.h"
+#else
+// ImGuiFreeType flag stubs for Linux (freetype handled differently)
+enum ImGuiFreeTypeBuilderFlags_ {
+	ImGuiFreeTypeBuilderFlags_NoHinting      = 1 << 0,
+	ImGuiFreeTypeBuilderFlags_NoAutoHint     = 1 << 1,
+	ImGuiFreeTypeBuilderFlags_ForceAutoHint  = 1 << 2,
+	ImGuiFreeTypeBuilderFlags_LightHinting   = 1 << 3,
+	ImGuiFreeTypeBuilderFlags_MonoHinting    = 1 << 4,
+	ImGuiFreeTypeBuilderFlags_Bold           = 1 << 5,
+	ImGuiFreeTypeBuilderFlags_Oblique        = 1 << 6,
+};
 
-// used: [resouces] font awesome
-#include "../../resources/fa_solid_900.h"
-#include "../../resources/font_awesome_5.h"
-#include "../core/ImFont.h"
+// thread-safe draw data mutex
+#include <mutex>
+// DirectX-specific includes and declarations
+#ifdef _WIN32
+#include <d3dcompiler.h>
+void ImGui_ImplDX11_RenderDrawData(ImDrawData* draw_data);
+void ImGui_ImplDX11_SetupRenderState(ImDrawData* draw_data, ID3D11DeviceContext* ctx);
+#endif
 #include "../core/imfonts.h"
 #include "../core/Bgs.h"
 #include "../core/Header.h"
 #include "../core/gui.hpp"
+#ifdef _WIN32
 #include "../cstrike/font.h"
+#endif
 #include "../cstrike/texture.h"
-#include "../dependencies/imgui/imgui_settings.h"
 // used: engine/engineclient
 #include "../sdk/interfaces/iengineclient.h"
 
@@ -43,6 +60,8 @@
 // used: bMainWindowOpened
 #include "../core/menu.h"
 #include "../core/ui_icons.hpp"
+
+#endif
 
 #pragma region imgui_extended
 static constexpr const char* arrKeyNames[] = {
@@ -87,6 +106,7 @@ void ImGui::HelpMarker(const char* szDescription)
 
 bool ImGui::HotKey(const char* szLabel, unsigned int* pValue)
 {
+#ifdef _WIN32
 	ImGuiContext& g = *GImGui;
 	ImGuiWindow* pWindow = g.CurrentWindow;
 
@@ -204,6 +224,11 @@ bool ImGui::HotKey(const char* szLabel, unsigned int* pValue)
 
 	PopStyleVar();
 	return bValueChanged;
+#else
+	IM_UNUSED(szLabel);
+	IM_UNUSED(pValue);
+	return false;
+#endif
 }
 
 bool ImGui::HotKey(const char* szLabel, KeyBind_t* pKeyBind, const bool bAllowSwitch)
@@ -339,14 +364,15 @@ bool ImGui::ColorEdit4(const char* szLabel, ColorPickerVar_t* pColorVar, ImGuiCo
 #pragma endregion
 
 
-#include <d3dcompiler.h>
-
 // Forward declaration of the ImGui render function.
+#ifdef _WIN32
+#include <d3dcompiler.h>
 void ImGui_ImplDX11_RenderDrawData(ImDrawData* draw_data);
 void ImGui_ImplDX11_SetupRenderState(ImDrawData* draw_data, ID3D11DeviceContext* ctx);
+#endif
 
 // thread-safe draw data mutex
-static SRWLOCK drawLock = {};
+static std::mutex drawLock;
 
 static void* __cdecl ImGuiAllocWrapper(const std::size_t nSize, [[maybe_unused]] void* pUserData = nullptr)
 {
@@ -358,7 +384,8 @@ static void __cdecl ImGuiFreeWrapper(void* pMemory, [[maybe_unused]] void* pUser
 	MEM::HeapFree(pMemory);
 }
 
-// Function to load a texture from memory
+// Windows-only function to load a texture from memory
+#ifdef _WIN32
 HRESULT LoadTextureFromMemory(ID3D11Device* device, const void* data, size_t dataSize, ID3D11ShaderResourceView** textureView)
 {
 	D3D11_TEXTURE2D_DESC desc;
@@ -400,11 +427,13 @@ HRESULT LoadTextureFromMemory(ID3D11Device* device, const void* data, size_t dat
 
 	return hr;
 }
+#endif
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 #include "../core/hooks.h"
 
-// Simple helper function to load an image into a DX11 texture with common settings
+// Windows-only helper function to load an image into a DX11 texture with common settings
+#ifdef _WIN32
 bool LoadTextureFromFile(const char* filename, ID3D11ShaderResourceView** out_srv, int* out_width, int* out_height)
 {
 	// Load from disk into a raw RGBA buffer
@@ -450,6 +479,9 @@ bool LoadTextureFromFile(const char* filename, ID3D11ShaderResourceView** out_sr
 
 	return true;
 }
+#endif
+//#include "../icons/iconscs2.c"
+#ifdef _WIN32
 #include "../icons/iconscs2.c"
 int my_image_width = 170;
 int my_image_height = 295;
@@ -665,6 +697,34 @@ bool D::OnWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
 
 #pragma endregion
+#else // _WIN32 — Linux stubs; actual rendering is in vulkan_hook.cpp
+
+bool D::InitImGui()
+{
+	bInitialized = true;
+	return true;
+}
+
+void D::Destroy()
+{
+	bInitialized = false;
+}
+
+void D::Render()
+{
+	// Handled by Vulkan hook in Hooked_QueuePresentKHR
+}
+
+bool D::OnWndProc(void* hWnd, unsigned int uMsg, uintptr_t wParam, intptr_t lParam)
+{
+	IM_UNUSED(hWnd);
+	IM_UNUSED(uMsg);
+	IM_UNUSED(wParam);
+	IM_UNUSED(lParam);
+	return false;
+}
+
+#endif // _WIN32
 
 #pragma region draw_main
 
@@ -673,10 +733,10 @@ void D::RenderDrawData(ImDrawData* pDrawData)
 	if (!pDrawData)
 		return;
 
-	if (TryAcquireSRWLockExclusive(&drawLock))
+    if (drawLock.try_lock())
 	{
 		*pDrawListRender = *pDrawListSafe;
-		ReleaseSRWLockExclusive(&drawLock);
+		drawLock.unlock();
 	}
 
 	if (pDrawListRender->CmdBuffer.empty())
@@ -694,11 +754,12 @@ void D::RenderDrawData(ImDrawData* pDrawData)
 
 	ImGuiContext* pContext = ImGui::GetCurrentContext();
 	ImGuiViewportP* pViewport = pContext->Viewports[0];
-	ImVector<ImDrawList*>* vecDrawLists = pViewport->DrawDataBuilder.Layers[0];
-	vecDrawLists->push_front(pDrawListRender); // this one being most background
+	ImVector<ImDrawList*>& vecDrawLists = pViewport->DrawDataBuilder.Layers[0];
+	vecDrawLists.insert(vecDrawLists.begin(), pDrawListRender); // insert at front
 
-	pDrawData->CmdLists.push_front(pDrawListRender);
-	pDrawData->CmdListsCount = vecDrawLists->Size;
+	// Fill ImDrawData expected fields (modern ImGui expects raw array pointer)
+	pDrawData->CmdLists = vecDrawLists.Data;
+	pDrawData->CmdListsCount = vecDrawLists.Size;
 	pDrawData->TotalVtxCount += pDrawListRender->VtxBuffer.Size;
 	pDrawData->TotalIdxCount += pDrawListRender->IdxBuffer.Size;
 }
@@ -712,12 +773,9 @@ void D::ResetDrawData()
 
 void D::SwapDrawData()
 {
-	::AcquireSRWLockExclusive(&drawLock);
-
+	std::lock_guard<std::mutex> lock(drawLock);
 
 	*pDrawListSafe = *pDrawListActive;
-
-	::ReleaseSRWLockExclusive(&drawLock);
 }
 
 #pragma endregion

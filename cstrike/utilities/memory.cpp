@@ -1,7 +1,14 @@
 // used: __readfsdword
+#ifdef _WIN32
 #include <intrin.h>
-// used: d3d11
 #include <d3d11.h>
+#else
+#include <dlfcn.h>
+#include <link.h>
+#include <elf.h>
+#include <stdio.h>
+#include <string.h>
+#endif
 
 #include "memory.h"
 
@@ -18,33 +25,102 @@ bool MEM::Setup()
 {
 	bool bSuccess = true;
 
+#ifdef __linux__
+	// Dump all loaded .so names so we can verify module names
+	{
+		FILE* f = fopen("/proc/self/maps", "r");
+		FILE* out = fopen("/tmp/cs2_modules.txt", "w");
+		if (f && out) {
+			char line[512]; char prev[256] = {};
+			while (fgets(line, sizeof(line), f)) {
+				char* p = strrchr(line, '/');
+				if (p && strstr(p, ".so")) {
+					char* nl = strchr(p, '\n'); if (nl) *nl = 0;
+					if (strcmp(p, prev) != 0) {
+						fprintf(out, "%s\n", p);
+						strncpy(prev, p, sizeof(prev)-1);
+					}
+				}
+			}
+			fclose(f); fclose(out);
+		}
+	}
+#endif
+
 	const void* hSDL3 = spoof_call<void*>(_fake_addr, &GetModuleBaseHandle, SDL3_DLL);
 	const void* hDbgHelp = spoof_call<void*>(_fake_addr, &GetModuleBaseHandle, DBGHELP_DLL);
 	const void* hTier0 = GetModuleBaseHandle(TIER0_DLL);
 
+	L_PRINT(LOG_INFO) << CS_XOR("[MEM] hSDL3=") << (std::uintptr_t)hSDL3
+	                  << CS_XOR(" hDbgHelp=") << (std::uintptr_t)hDbgHelp
+	                  << CS_XOR(" hTier0=") << (std::uintptr_t)hTier0;
+
+#ifdef _WIN32
 	if (hSDL3 == nullptr || hDbgHelp == nullptr)
 		return false;
-	
+#else
+	// On Linux dbghelp is actually libtier0, SDL3 is libSDL3 — don't hard-fail here
+	if (hSDL3 == nullptr) {
+		L_PRINT(LOG_ERROR) << CS_XOR("[MEM] SDL3 not found");
+		return false;
+	}
+#endif
+
+#ifdef _WIN32
 	fnUnDecorateSymbolName = reinterpret_cast<decltype(fnUnDecorateSymbolName)>(GetExportAddress(hDbgHelp, CS_XOR("UnDecorateSymbolName")));
 	bSuccess &= (fnUnDecorateSymbolName != nullptr);
+#else
+	// Linux: use abi::__cxa_demangle from <cxxabi.h> instead — set via separate setup
+	fnUnDecorateSymbolName = nullptr; // not needed, schema uses cxa_demangle directly
+#endif
 
 	fnSetRelativeMouseMode = reinterpret_cast<decltype(fnSetRelativeMouseMode)>(GetExportAddress(hSDL3, "SDL_SetRelativeMouseMode"));
+	if (!fnSetRelativeMouseMode) // SDL3 renamed it
+		fnSetRelativeMouseMode = reinterpret_cast<decltype(fnSetRelativeMouseMode)>(GetExportAddress(hSDL3, "SDL_SetWindowRelativeMouseMode"));
+#ifdef _WIN32
 	bSuccess &= (fnSetRelativeMouseMode != nullptr);
+#else
+	if (!fnSetRelativeMouseMode) L_PRINT(LOG_WARNING) << CS_XOR("[MEM] SDL_SetRelativeMouseMode not found (non-fatal)");
+#endif
 
 	fnSetWindowGrab = reinterpret_cast<decltype(fnSetWindowGrab)>(GetExportAddress(hSDL3, "SDL_SetWindowGrab"));
+	if (!fnSetWindowGrab)
+		fnSetWindowGrab = reinterpret_cast<decltype(fnSetWindowGrab)>(GetExportAddress(hSDL3, "SDL_SetWindowMouseGrab"));
+#ifdef _WIN32
 	bSuccess &= (fnSetWindowGrab != nullptr);
+#else
+	if (!fnSetWindowGrab) L_PRINT(LOG_WARNING) << CS_XOR("[MEM] SDL_SetWindowGrab not found (non-fatal)");
+#endif
 
 	fnWarpMouseInWindow = reinterpret_cast<decltype(fnWarpMouseInWindow)>(GetExportAddress(hSDL3, "SDL_WarpMouseInWindow"));
+#ifdef _WIN32
 	bSuccess &= (fnWarpMouseInWindow != nullptr);
-	L_PRINT(LOG_INFO) << CS_XOR("[Memory] Loaded fnWarpMouseInWindow");
+#else
+	if (!fnWarpMouseInWindow) L_PRINT(LOG_WARNING) << CS_XOR("[MEM] SDL_WarpMouseInWindow not found (non-fatal)");
+#endif
+	L_PRINT(LOG_INFO) << CS_XOR("[Memory] SDL3 functions done");
 
+#ifdef _WIN32
 	fnCreateMaterial = reinterpret_cast<decltype(fnCreateMaterial)>(FindPattern(MATERIAL_SYSTEM2_DLL, CS_XOR("48 89 5C 24 ? 48 89 6C 24 ? 56 57 41 56 48 81 EC ? ? ? ? 48 8D 0D")));
 	bSuccess &= (fnCreateMaterial != nullptr);
 	L_PRINT(LOG_INFO) << CS_XOR("[Memory] Loaded fnCreateMaterial");
+#else
+	// Windows-only byte pattern — skip on Linux, find via other means later
+	fnCreateMaterial = nullptr;
+	L_PRINT(LOG_WARNING) << CS_XOR("[MEM] fnCreateMaterial skipped on Linux");
+#endif
 
+#ifdef _WIN32
 	load_key_value = reinterpret_cast<decltype(load_key_value)>(GetExportAddress(hTier0, CS_XOR("?LoadKV3@@YA_NPEAVKeyValues3@@PEAVCUtlString@@PEBDAEBUKV3ID_t@@2@Z")));
 	bSuccess &= (load_key_value != nullptr);
 	L_PRINT(LOG_INFO) << CS_XOR("[Memory] Loaded load_key_value");
+#else
+	// Linux mangled name for LoadKV3 — look up via nm/dlsym; non-fatal if missing
+	load_key_value = reinterpret_cast<decltype(load_key_value)>(
+	    hTier0 ? dlsym(RTLD_DEFAULT, "_Z7LoadKV3P11KeyValues3PV10CUtlStringPKcRK8KV3ID_tS6_") : nullptr);
+	if (!load_key_value)
+		L_PRINT(LOG_WARNING) << CS_XOR("[Memory] load_key_value not found on Linux (non-fatal)");
+#endif
 
 	return bSuccess;
 }
@@ -55,6 +131,7 @@ bool MEM::Setup()
  * overload global new/delete operators with our allocators
  * - @note: ensure that all sdk classes that can be instantiated have an overloaded constructor and/or game allocator, otherwise marked as non-constructible
  */
+#ifdef _WIN32
 void* __cdecl operator new(const std::size_t nSize)
 {
 	return MEM::HeapAlloc(nSize);
@@ -74,7 +151,9 @@ void __cdecl operator delete[](void* pMemory) noexcept
 {
 	MEM::HeapFree(pMemory);
 }
+#endif
 
+#ifdef _WIN32
 void* MEM::HeapAlloc(const std::size_t nSize)
 {
 	const HANDLE hHeap = ::GetProcessHeap();
@@ -104,12 +183,23 @@ void* MEM::HeapRealloc(void* pMemory, const std::size_t nNewSize)
 	const HANDLE hHeap = ::GetProcessHeap();
 	return ::HeapReAlloc(hHeap, 0UL, pMemory, nNewSize);
 }
+#else // __linux__
+void* MEM::HeapAlloc(const std::size_t nSize) { return malloc(nSize); }
+void  MEM::HeapFree(void* pMemory) { if (pMemory) free(pMemory); }
+void* MEM::HeapRealloc(void* pMemory, const std::size_t nNewSize)
+{
+	if (pMemory == nullptr) return malloc(nNewSize);
+	if (nNewSize == 0UL) { free(pMemory); return nullptr; }
+	return realloc(pMemory, nNewSize);
+}
+#endif
 
 #pragma endregion
 
 // @todo: move to win.cpp (or platform.cpp?) except getsectioninfo
 #pragma region memory_get
 
+#ifdef _WIN32
 void* MEM::GetModuleBaseHandle(const wchar_t* wszModuleName)
 {
 	const _PEB* pPEB = reinterpret_cast<_PEB*>(__readgsqword(0x60));
@@ -160,7 +250,126 @@ const wchar_t* MEM::GetModuleBaseFileName(const void* hModuleBase)
 
 	return wszModuleName;
 }
+#else // __linux__
+#include <link.h>
+#include <elf.h>
+#include <string.h>
 
+static const char* _linux_basename(const char* path)
+{
+	const char* slash = strrchr(path, '/');
+	return slash ? slash + 1 : path;
+}
+
+static bool _linux_module_name_matches(const char* szModuleName, const char* candidate)
+{
+	if (!szModuleName || !candidate)
+		return false;
+
+	const char* candidateBase = _linux_basename(candidate);
+	size_t expectedLen = strlen(szModuleName);
+
+	if (strcmp(candidateBase, szModuleName) == 0)
+		return true;
+
+	// allow versioned sonames like libtier0.so.1, libclient.so.2, libfoo.so.0.0.0
+	if (strncmp(candidateBase, szModuleName, expectedLen) == 0)
+	{
+		const char* suffix = candidateBase + expectedLen;
+		if (*suffix == '.' || *suffix == '\0')
+			return true;
+	}
+
+	return false;
+}
+
+static void* _linux_find_module_base(const char* szModuleName)
+{
+	struct ModuleSearchContext
+	{
+		const char* name;
+		void* base;
+	};
+	ModuleSearchContext ctx{ szModuleName, nullptr };
+
+	auto callback = [](struct dl_phdr_info* info, size_t, void* data) -> int {
+		auto* ctx = reinterpret_cast<ModuleSearchContext*>(data);
+		if (info->dlpi_name && info->dlpi_name[0] != '\0' && _linux_module_name_matches(ctx->name, info->dlpi_name))
+		{
+			ctx->base = reinterpret_cast<void*>(info->dlpi_addr);
+			return 1;
+		}
+		return 0;
+	};
+
+	dl_iterate_phdr(callback, &ctx);
+	return ctx.base;
+}
+
+void* MEM::GetModuleBaseHandle(const wchar_t* wszModuleName)
+{
+	if (wszModuleName == nullptr)
+	{
+		return nullptr;
+	}
+
+	char nbuf[512];
+	int i = 0;
+	while (wszModuleName[i] && i < 511)
+	{
+		nbuf[i] = static_cast<char>(static_cast<unsigned char>(wszModuleName[i]));
+		i++;
+	}
+	nbuf[i] = '\0';
+
+	return MEM::GetModuleBaseHandle(nbuf);
+}
+
+void* MEM::GetModuleBaseHandle(const char* szModuleName)
+{
+	if (!szModuleName)
+		return nullptr;
+
+	return _linux_find_module_base(szModuleName);
+}
+
+const wchar_t* MEM::GetModuleBaseFileName(const void* hModuleBase)
+{
+	if (hModuleBase == nullptr)
+		return nullptr;
+
+	static thread_local wchar_t moduleName[512];
+	moduleName[0] = L'\0';
+
+	struct ModuleNameContext
+	{
+		const void* base;
+		wchar_t* buffer;
+		size_t capacity;
+	};
+
+	auto callback = [](struct dl_phdr_info* info, size_t, void* data) -> int {
+		auto* ctx = reinterpret_cast<ModuleNameContext*>(data);
+		if (reinterpret_cast<const void*>(info->dlpi_addr) != ctx->base)
+			return 0;
+
+		const char* name = _linux_basename(info->dlpi_name);
+		size_t length = strlen(name);
+		size_t i = 0;
+		for (; i + 1 < ctx->capacity && i < length; ++i)
+			ctx->buffer[i] = static_cast<wchar_t>(static_cast<unsigned char>(name[i]));
+		ctx->buffer[i] = L'\0';
+		return 1;
+	};
+
+	ModuleNameContext ctx{ hModuleBase, moduleName, static_cast<size_t>(std::size(moduleName)) };
+	dl_iterate_phdr(callback, &ctx);
+
+	return moduleName[0] != L'\0' ? moduleName : nullptr;
+}
+#endif
+
+#ifdef _WIN32
 void* MEM::GetExportAddress(const void* hModuleBase, const char* szProcedureName)
 {
 	const auto pBaseAddress = static_cast<const std::uint8_t*>(hModuleBase);
@@ -227,7 +436,48 @@ void* MEM::GetExportAddress(const void* hModuleBase, const char* szProcedureName
 	// Export not found
 	return nullptr;
 }
+#else // __linux__
+void* MEM::GetExportAddress(const void* hModuleBase, const char* szProcedureName)
+{
+	if (!hModuleBase || !szProcedureName)
+		return nullptr;
 
+	struct ExportSearchContext
+	{
+		const void* moduleBase;
+		const char* procName;
+		void* result;
+	};
+	ExportSearchContext ctx{ hModuleBase, szProcedureName, nullptr };
+
+	auto callback = [](struct dl_phdr_info* info, size_t, void* data) -> int {
+		auto* ctx = reinterpret_cast<ExportSearchContext*>(data);
+		if (reinterpret_cast<const void*>(info->dlpi_addr) != ctx->moduleBase)
+			return 0;
+
+		if (!info->dlpi_name || info->dlpi_name[0] == '\0')
+			return 0;
+
+		void* handle = dlopen(info->dlpi_name, RTLD_LAZY | RTLD_NOLOAD);
+		if (!handle)
+			return 0;
+
+		ctx->result = dlsym(handle, ctx->procName);
+		dlclose(handle);
+		return ctx->result ? 1 : 0;
+	};
+
+	dl_iterate_phdr(callback, &ctx);
+
+	if (ctx.result)
+		return ctx.result;
+
+	// Try global symbol table as fallback.
+	return dlsym(RTLD_DEFAULT, szProcedureName);
+}
+#endif // _WIN32
+
+#ifdef _WIN32
 bool MEM::GetSectionInfo(const void* hModuleBase, const char* szSectionName, std::uint8_t** ppSectionStart, std::size_t* pnSectionSize)
 {
 	const auto pBaseAddress = static_cast<const std::uint8_t*>(hModuleBase);
@@ -261,6 +511,9 @@ bool MEM::GetSectionInfo(const void* hModuleBase, const char* szSectionName, std
 	L_PRINT(LOG_ERROR) << CS_XOR("code section not found: \"") << szSectionName << CS_XOR("\"");
 	return false;
 }
+#else // __linux__
+bool MEM::GetSectionInfo(const void*, const char*, std::uint8_t**, std::size_t*) { return false; }
+#endif // _WIN32
 
 #pragma endregion
 
@@ -287,6 +540,7 @@ std::uint8_t* MEM::FindPattern(const wchar_t* wszModuleName, const char* szPatte
 	// @test: use search with straight in-place conversion? do not think it will be faster, cuz of bunch of new checks that gonna be performed for each iteration
 	return FindPattern(wszModuleName, reinterpret_cast<const char*>(arrByteBuffer), szMaskBuffer);
 }
+#ifdef _WIN32
 std::uint8_t* MEM::FindPattern(const wchar_t* wszModuleName, const char* szBytePattern, const char* szByteMask)
 {
 	const void* hModuleBase = spoof_call<void*>(_fake_addr, &GetModuleBaseHandle, wszModuleName);
@@ -317,93 +571,121 @@ std::uint8_t* MEM::FindPattern(const wchar_t* wszModuleName, const char* szByteP
 	const std::size_t nByteCount = CRT::StringLength(szByteMask);
 
 	std::uint8_t* pFoundAddress = nullptr;
-
-	// perform little overhead to keep all patterns unique
-#ifdef CS_PARANOID_PATTERN_UNIQUENESS 
-	const std::vector<std::uint8_t*> vecFoundOccurrences =  FindPatternAllOccurrencesEx(pBaseAddress, pINH->OptionalHeader.SizeOfImage, arrByteBuffer, nByteCount, szByteMask);
-
-	// notify user about non-unique pattern
-	if (!vecFoundOccurrences.empty())
-	{
-		// notify user about non-unique pattern
-		if (vecFoundOccurrences.size() > 1U)
-		{
-			char* szPattern = static_cast<char*>(MEM_STACKALLOC((nByteCount << 1U) + nByteCount));
-			[[maybe_unused]] const std::size_t nConvertedPatternLength = BytesToPattern(arrByteBuffer, nByteCount, szPattern);
-
-			L_PRINT(LOG_WARNING) << CS_XOR("found more than one occurrence with \"") << szPattern << CS_XOR("\" pattern, consider updating it!");
-
-			MEM_STACKFREE(szPattern);
-		}
-
-		// return first found occurrence
-		pFoundAddress = vecFoundOccurrences[0];
-	}
-#else
-	// @todo: we also can go through code sections and skip noexec pages, but will it really improve performance? / or at least for all occurrences search
-	// https://docs.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-image_section_header
-#if 0
-	IMAGE_SECTION_HEADER* pCurrentSection = IMAGE_FIRST_SECTION(pINH);
-	for (WORD i = 0U; i != pINH->FileHeader.NumberOfSections; i++)
-	{
-		// check does page have executable code
-		if (pCurrentSection->Characteristics & IMAGE_SCN_CNT_CODE || pCurrentSection->Characteristics & IMAGE_SCN_MEM_EXECUTE)
-		{
-			pFoundAddress = FindPatternEx(pBaseAddress + pCurrentSection->VirtualAddress, pCurrentSection->SizeOfRawData, arrByteBuffer, nByteCount, szByteMask);
-
-			if (pFoundAddress != nullptr)
-				break;
-		}
-
-		++pCurrentSection;
-	}
-#else
 	pFoundAddress = FindPatternEx(pBaseAddress, pINH->OptionalHeader.SizeOfImage, arrByteBuffer, nByteCount, szByteMask);
-#endif
-#endif
 
 	if (pFoundAddress == nullptr)
 	{
 		char* szPattern = static_cast<char*>(MEM_STACKALLOC((nByteCount << 1U) + nByteCount));
 		[[maybe_unused]] const std::size_t nConvertedPatternLength = BytesToPattern(arrByteBuffer, nByteCount, szPattern);
-
 		L_PRINT(LOG_ERROR) << CS_XOR("pattern not found: \"") << szPattern << CS_XOR("\"");
-
 		MEM_STACKFREE(szPattern);
 	}
-
 	return pFoundAddress;
 }
+#else // __linux__
+static std::vector<std::pair<const std::uint8_t*, std::size_t>> _linux_get_module_ranges(const char* moduleName)
+{
+	struct ModuleRangesContext
+	{
+		const char* name;
+		std::vector<std::pair<const std::uint8_t*, std::size_t>> ranges;
+	};
+
+	auto callback = [](struct dl_phdr_info* info, size_t, void* data) -> int {
+		auto* ctx = reinterpret_cast<ModuleRangesContext*>(data);
+		if (!info->dlpi_name || info->dlpi_name[0] == '\0')
+			return 0;
+
+		if (!_linux_module_name_matches(ctx->name, info->dlpi_name))
+			return 0;
+
+		for (size_t idx = 0; idx < info->dlpi_phnum; ++idx)
+		{
+			const ElfW(Phdr)& phdr = info->dlpi_phdr[idx];
+			if (phdr.p_type != PT_LOAD)
+				continue;
+			if (!(phdr.p_flags & PF_R))
+				continue;
+
+			const std::uint8_t* segmentStart = reinterpret_cast<const std::uint8_t*>(info->dlpi_addr + phdr.p_vaddr);
+			const std::size_t segmentSize = static_cast<std::size_t>(phdr.p_memsz);
+			if (segmentSize == 0)
+				continue;
+
+			ctx->ranges.emplace_back(segmentStart, segmentSize);
+		}
+
+		return 1; // stop after module found
+	};
+
+	ModuleRangesContext ctx{ moduleName, {} };
+	dl_iterate_phdr(callback, &ctx);
+	return ctx.ranges;
+}
+
+static std::uint8_t* _linux_search_module_segments(const void* moduleBase, const char* moduleName, const std::uint8_t* arrByteBuffer, const std::size_t nByteCount, const char* szByteMask)
+{
+	if (!moduleBase || !moduleName || !arrByteBuffer || nByteCount == 0)
+		return nullptr;
+
+	std::vector<std::pair<const std::uint8_t*, std::size_t>> ranges = _linux_get_module_ranges(moduleName);
+	if (ranges.empty())
+		return nullptr;
+
+	for (const auto& range : ranges)
+	{
+		const std::uint8_t* segmentStart = range.first;
+		std::size_t segmentSize = range.second;
+		if (segmentSize < nByteCount)
+			continue;
+
+		std::uint8_t* found = MEM::FindPatternEx(segmentStart, segmentSize, arrByteBuffer, nByteCount, szByteMask);
+		if (found)
+			return found;
+	}
+
+	return nullptr;
+}
+
+std::uint8_t* MEM::FindPattern(const wchar_t* wszModuleName, const char* szBytePattern, const char* szByteMask)
+{
+	char nbuf[512]; int i = 0;
+	while (wszModuleName[i] && i < 511) { nbuf[i] = static_cast<char>(static_cast<unsigned char>(wszModuleName[i])); i++; }
+	nbuf[i] = '\0';
+	const void* hModuleBase = MEM::GetModuleBaseHandle(nbuf);
+	if (!hModuleBase) return nullptr;
+
+	const std::uint8_t* arrByteBuffer = reinterpret_cast<const std::uint8_t*>(szBytePattern);
+	const std::size_t nByteCount = CRT::StringLength(szByteMask);
+	return _linux_search_module_segments(hModuleBase, nbuf, arrByteBuffer, nByteCount, szByteMask);
+}
+#endif
 
 // @todo: msvc poorly optimizes this, it looks even better w/o optimization at all
 std::uint8_t* MEM::FindPatternEx(const std::uint8_t* pRegionStart, const std::size_t nRegionSize, const std::uint8_t* arrByteBuffer, const std::size_t nByteCount, const char* szByteMask)
 {
-	std::uint8_t* pCurrentAddress = const_cast<std::uint8_t*>(pRegionStart);
-	const std::uint8_t* pRegionEnd = pRegionStart + nRegionSize - nByteCount;
+	if (pRegionStart == nullptr || arrByteBuffer == nullptr || nRegionSize == 0 || nByteCount == 0)
+		return nullptr;
+
+	const std::uint8_t* const pRegionEnd = pRegionStart + nRegionSize;
 	const bool bIsMaskUsed = (szByteMask != nullptr);
 
-	while (pCurrentAddress < pRegionEnd)
+	for (const std::uint8_t* pCurrentAddress = pRegionStart; pCurrentAddress + nByteCount <= pRegionEnd; ++pCurrentAddress)
 	{
-		// check the first byte before entering the loop, otherwise if there two consecutive bytes of first byte in the buffer, we may skip both and fail the search
-		if ((bIsMaskUsed && *szByteMask == '?') || *pCurrentAddress == *arrByteBuffer)
+		if ((bIsMaskUsed && szByteMask[0] == '?') || *pCurrentAddress == arrByteBuffer[0])
 		{
-			if (nByteCount == 1)
-				return pCurrentAddress;
-
-			// compare the least byte sequence and continue on wildcard or skip forward on first mismatched byte
-			std::size_t nComparedBytes = 0U;
-			while ((bIsMaskUsed && szByteMask[nComparedBytes + 1U] == '?') || pCurrentAddress[nComparedBytes + 1U] == arrByteBuffer[nComparedBytes + 1U])
+			std::size_t nComparedBytes = 1U;
+			for (; nComparedBytes < nByteCount; ++nComparedBytes)
 			{
-				// check does byte sequence match
-				if (++nComparedBytes == nByteCount - 1U)
-					return pCurrentAddress;
+				if (bIsMaskUsed && szByteMask[nComparedBytes] == '?')
+					continue;
+				if (pCurrentAddress[nComparedBytes] != arrByteBuffer[nComparedBytes])
+					break;
 			}
 
-			// skip non suitable bytes
-			pCurrentAddress += nComparedBytes;
+			if (nComparedBytes == nByteCount)
+				return const_cast<std::uint8_t*>(pCurrentAddress);
 		}
-
-		++pCurrentAddress;
 	}
 
 	return nullptr;
@@ -411,7 +693,10 @@ std::uint8_t* MEM::FindPatternEx(const std::uint8_t* pRegionStart, const std::si
 
 std::vector<std::uint8_t*> MEM::FindPatternAllOccurrencesEx(const std::uint8_t* pRegionStart, const std::size_t nRegionSize, const std::uint8_t* arrByteBuffer, const std::size_t nByteCount, const char* szByteMask)
 {
-	const std::uint8_t* pRegionEnd = pRegionStart + nRegionSize - nByteCount;
+	if (pRegionStart == nullptr || arrByteBuffer == nullptr || nRegionSize == 0 || nByteCount == 0 || nRegionSize < nByteCount)
+		return {};
+
+	const std::uint8_t* const pRegionEnd = pRegionStart + nRegionSize;
 	const bool bIsMaskUsed = (szByteMask != nullptr);
 
 	// container for addresses of the all found occurrences
@@ -513,3 +798,22 @@ std::size_t MEM::BytesToPattern(const std::uint8_t* pByteBuffer, const std::size
 }
 
 #pragma endregion
+
+#ifdef __linux__
+static wchar_t _mw[512];
+static const wchar_t* _n2w(const char* s) {
+    size_t i = 0;
+    while (s[i] && i + 1 < 512) { _mw[i] = (wchar_t)(unsigned char)s[i]; i++; }
+    _mw[i] = L'\0';
+    return _mw;
+}
+std::uint8_t* MEM::FindPattern(const char* szModuleName, const char* szPattern) {
+    return MEM::FindPattern(_n2w(szModuleName), szPattern);
+}
+UTILPtr MEM::FindPatterns(const char* szModuleName, const char* szPattern) {
+    return MEM::FindPatterns(_n2w(szModuleName), szPattern);
+}
+std::uint8_t* MEM::FindPattern(const char* szModuleName, const char* szBytePattern, const char* szByteMask) {
+    return MEM::FindPattern(_n2w(szModuleName), szBytePattern, szByteMask);
+}
+#endif

@@ -1,0 +1,24 @@
+
+# Compiled/build files
+obj/
+*.o
+*.so
+*.a
+
+# Logs and crash dumps
+*.log
+*.dmp
+core
+core.*
+
+# Secrets and local settings
+.env
+.env.*
+*.pem
+*.key
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*~

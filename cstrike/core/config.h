@@ -3,8 +3,9 @@
 #include <vector>
 // used: [stl] type_info
 #include <typeinfo>
-// used: [win] undname_no_arguments
+#ifdef _WIN32
 #include <dbghelp.h>
+#endif
 
 #include "../common.h"
 #include "../sdk/datatypes/color.h"
@@ -67,7 +68,7 @@ struct ColorPickerVar_t
 
 	// 8-bit array color constructor (in: [0.0 .. 1.0])
 	explicit constexpr ColorPickerVar_t(const std::uint8_t arrColor[4]) :
-		colValue(arrColor), bRainbow(false), flRainbowSpeed(0.5f) { }
+		colValue(arrColor[0], arrColor[1], arrColor[2], arrColor[3]), bRainbow(false), flRainbowSpeed(0.5f) { }
 
 	// 32-bit packed color constructor (in: 0x00000000 - 0xFFFFFFFF)
 	explicit constexpr ColorPickerVar_t(const ImU32 uPackedColor) :
@@ -118,7 +119,7 @@ struct FrameOverlayVar_t
 struct BarOverlayVar_t
 {
 	constexpr BarOverlayVar_t(const bool bEnable, const bool bGradient = false, const bool bUseFactorColor = false, const float flThickness = 1.f, const Color_t& colPrimary = Color_t(255, 255, 255), const Color_t& colSecondary = Color_t(255, 255, 255), const Color_t& colBackground = Color_t(), const Color_t& colOutline = Color_t(), const bool background = true, const bool outline = true) :
-		bEnable(bEnable), bGradient(bGradient), bUseFactorColor(bUseFactorColor), flThickness(flThickness), colPrimary(colPrimary), colSecondary(colSecondary), colBackground(colBackground), colOutline(colOutline), bBackground(background), bOutline(outline) { }
+		bEnable(bEnable), bGradient(bGradient), bOutline(outline), bBackground(background), bUseFactorColor(bUseFactorColor), flThickness(flThickness), colPrimary(colPrimary), colSecondary(colSecondary), colBackground(colBackground), colOutline(colOutline) { }
 
 	bool bEnable = false;
 	bool bGradient = false;

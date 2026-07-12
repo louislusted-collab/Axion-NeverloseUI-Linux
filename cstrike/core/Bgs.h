@@ -1,4 +1,8 @@
+#ifdef _WIN32
 #include <minwindef.h>
+#else
+#include "../../linux/linux_compat.h"
+#endif
 
 BYTE main_texture[] =
 {

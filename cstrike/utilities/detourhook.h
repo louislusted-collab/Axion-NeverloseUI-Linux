@@ -1,7 +1,23 @@
 #pragma once
+
+#ifdef __linux__
+// Linux: pull in compat layer first so VOID/WINAPI/LPVOID are defined
+#include "../common.h"
+// Stub out minhook types and functions — hooks are done via Vulkan on Linux
+typedef enum { MH_OK = 0, MH_UNKNOWN = -1 } MH_STATUS;
+inline const char* MH_StatusToString(MH_STATUS) { return "linux-stub"; }
+inline MH_STATUS MH_Initialize()       { return MH_OK; }
+inline MH_STATUS MH_Uninitialize()     { return MH_OK; }
+inline MH_STATUS MH_CreateHook(void*, void*, void**) { return MH_OK; }
+inline MH_STATUS MH_EnableHook(void*)  { return MH_OK; }
+inline MH_STATUS MH_DisableHook(void*) { return MH_OK; }
+inline MH_STATUS MH_RemoveHook(void*)  { return MH_OK; }
+#define MH_ALL_HOOKS nullptr
+#else
 // used: [ext] minhook
 // @credits: https://github.com/TsudaKageyu/minhook
 #include "../../dependencies/minhook/minhook.h"
+#endif
 
 // used: l_print
 #include "log.h"

@@ -1,7 +1,18 @@
 #include "qangle.h"
 
+#ifdef _WIN32
 // used: [d3d] xmscalarsincos
 #include <directxmath.h>
+#else
+#include <cmath>
+namespace DirectX {
+    inline void XMScalarSinCos(float* pSin, float* pCos, float Value)
+    {
+        *pSin = std::sin(Value);
+        *pCos = std::cos(Value);
+    }
+}
+#endif
 
 #include "matrix.h"
 

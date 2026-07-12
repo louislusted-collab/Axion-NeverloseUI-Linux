@@ -1,7 +1,7 @@
 #pragma once
 
 #include "config.h"
-#include "../features.h"
+#include "../cheat_features.h"
 
 #pragma region variables_combo_entries
 using VisualOverlayBox_t = int;

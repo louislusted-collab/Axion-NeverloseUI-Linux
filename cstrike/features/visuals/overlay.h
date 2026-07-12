@@ -36,6 +36,7 @@ namespace F::VISUALS::OVERLAY
 	class CBaseComponent
 	{
 	public:
+		virtual ~CBaseComponent() = default;
 		[[nodiscard]] virtual ImVec2 GetBasePosition(const ImVec4& box) const;
 
 		[[nodiscard]] virtual bool IsDirectional() const
@@ -134,6 +135,11 @@ namespace F::VISUALS::OVERLAY
 	 */
 	struct Context_t
 	{
+		Context_t() = default;
+		~Context_t();
+		Context_t(const Context_t&) = delete;
+		Context_t& operator=(const Context_t&) = delete;
+
 		/* @section: special case components */
 		/// add the box component to overlay
 		/// @remarks: current implementation expects this to be first component, it's an immediate rendering component
@@ -175,7 +181,7 @@ namespace F::VISUALS::OVERLAY
 
 	void Render();
 	void CalculateBoundingBoxes();
-	void CalculateSkeleton(Context_t ctx, CCSPlayerController* pPlayerController, C_CSPlayerPawn* pPlayer, const ImVec4& out);
+	void CalculateSkeleton(Context_t& ctx, CCSPlayerController* pPlayerController, C_CSPlayerPawn* pPlayer, const ImVec4& out);
 	void OnPlayer(CCSPlayerController* pEntity, const ImVec4& out);
 	bool IsValid(CCSPlayerController* pEntity);
 

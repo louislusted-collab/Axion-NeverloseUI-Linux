@@ -18,7 +18,9 @@
 #include "../cstrike/sdk/interfaces/itrace.h"
 #include "../cstrike/core/spoofcall/syscall.h"
 #include <iostream>
+#ifdef _WIN32
 #include <memoryapi.h>
+#endif
 #include <mutex>
 #include <array>
 #include "../../core/spoofcall/virtualization/VirtualizerSDK64.h"
@@ -33,7 +35,7 @@ struct LegitTarget {
     Vector_t finalPoint;
     int hitgroup;
     LegitTarget(C_CSPlayerPawn* player, const QAngle_t& finalAngle, const int hitroup)
-        : player(player), finalPoint(finalPoint), hitgroup(hitroup) {}
+        : player(player), finalPoint{}, hitgroup(hitroup) { (void)finalAngle; }
 };
 
 
@@ -78,7 +80,7 @@ void F::LEGIT::impl::SetupTarget(C_CSPlayerPawn* pLocal)
         if (hEntity != it.m_handle) continue;
 
         switch (it.m_type) {
-        case CachedEntity_t::PLAYER_CONTROLLER:
+        case CachedEntity_t::PLAYER_CONTROLLER: {
             CCSPlayerController* CPlayer = I::GameResourceService->pGameEntitySystem->Get<CCSPlayerController>(hEntity);
             if (CPlayer == nullptr)
                 break;
@@ -93,6 +95,9 @@ void F::LEGIT::impl::SetupTarget(C_CSPlayerPawn* pLocal)
             validTargets.push_back(player);
 
             continue;
+        }
+        default:
+            break;
         }
     }
     VIRTUALIZER_DOLPHIN_BLACK_END
@@ -319,6 +324,8 @@ void F::LEGIT::impl::Reset(reset type) {
         break;
     case reset::aimbot:
         e_hitboxes.clear();
+        break;
+    case reset::recoil:
         break;
     }
     return;

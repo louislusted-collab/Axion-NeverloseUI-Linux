@@ -24,7 +24,9 @@
 #include "../cstrike/sdk/interfaces/itrace.h"
 #include "../cstrike/core/spoofcall/syscall.h"
 #include <iostream>
+#ifdef _WIN32
 #include <memoryapi.h>
+#endif
 #include <mutex>
 #include <array>
 #include "../cstrike/sdk/interfaces/iengineclient.h"

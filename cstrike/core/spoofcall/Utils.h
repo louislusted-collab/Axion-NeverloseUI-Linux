@@ -2,7 +2,9 @@
 
 namespace detail
 {
+#ifdef _WIN32
 	extern "C" void* _spoofer_stub();
+#endif
 
 	template <typename Ret, typename... Args>
 	static inline auto shellcode_stub_helper(
@@ -107,6 +109,7 @@ static inline auto spoof_call(
 	Args... args
 ) -> Ret
 {
+	#ifdef _WIN32
 	struct shell_params
 	{
 		const void* trampoline;
@@ -117,4 +120,7 @@ static inline auto spoof_call(
 	shell_params p{ trampoline, reinterpret_cast<void*>(fn) };
 	using mapper = detail::argument_remapper<sizeof...(Args), void>;
 	return mapper::template do_call<Ret, Args...>((const void*)&detail::_spoofer_stub, &p, args...);
+#else
+	return fn(args...);
+#endif
 }

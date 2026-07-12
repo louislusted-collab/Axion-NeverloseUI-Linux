@@ -17,6 +17,7 @@ static HANDLE hFileStream = INVALID_HANDLE_VALUE;
 #pragma region log_main
 bool L::AttachConsole(const wchar_t* wszWindowTitle)
 {
+#ifdef _WIN32
 	// allocate memory for console
 	if (::AllocConsole() != TRUE)
 		return false;
@@ -25,28 +26,29 @@ bool L::AttachConsole(const wchar_t* wszWindowTitle)
 	if (hConsoleStream = ::CreateFileW(L"CONOUT$", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr); hConsoleStream == INVALID_HANDLE_VALUE)
 		return false;
 
-	// @test: unnecessary as fas as we don't use std::cout etc
 	if (::SetStdHandle(STD_OUTPUT_HANDLE, hConsoleStream) != TRUE)
 		return false;
 
-	// set console window title
 	if (::SetConsoleTitleW(wszWindowTitle) != TRUE)
 		return false;
-
+#else
+	(void)wszWindowTitle;
+	hConsoleStream = (HANDLE)stdout; // Linux: use stdout directly
+#endif
 	return true;
 }
 
 void L::DetachConsole()
 {
+#ifdef _WIN32
 	::CloseHandle(hConsoleStream);
-
-	// free allocated memory for console
 	if (::FreeConsole() != TRUE)
 		return;
-
-	// close console window
 	if (const HWND hConsoleWindow = ::GetConsoleWindow(); hConsoleWindow != nullptr)
 		::PostMessageW(hConsoleWindow, WM_CLOSE, 0U, 0L);
+#else
+	hConsoleStream = INVALID_HANDLE_VALUE;
+#endif
 }
 
 bool L::OpenFile(const wchar_t* wszFileName)
@@ -76,7 +78,12 @@ void L::CloseFile()
 void L::WriteMessage(const char* szMessage, const std::size_t nMessageLength)
 {
 #ifdef CS_LOG_CONSOLE
+#ifdef _WIN32
 	::WriteConsoleA(hConsoleStream, szMessage, nMessageLength, nullptr, nullptr);
+#else
+	fwrite(szMessage, 1, nMessageLength, (FILE*)hConsoleStream);
+	fflush((FILE*)hConsoleStream);
+#endif
 #endif
 #ifdef CS_LOG_FILE
 	::WriteFile(hFileStream, szMessage, nMessageLength, nullptr, nullptr);
@@ -135,13 +142,18 @@ L::Stream_t& L::Stream_t::operator()(const ELogLevel nLevel, const char* szFileB
 
 	const std::time_t time = std::time(nullptr);
 	std::tm timePoint;
+#ifdef _WIN32
 	localtime_s(&timePoint, &time);
+#else
+	localtime_r(&time, &timePoint);
+#endif
 
 	// @todo: no new line at first use / ghetto af but cheap enough but still ghetto uhhh
 	char szTimeBuffer[32];
 	const std::size_t nTimeSize = CRT::TimeToString(szTimeBuffer, sizeof(szTimeBuffer), "\n[%d-%m-%Y %T] ", &timePoint) - bFirstPrint;
 
 #ifdef CS_LOG_CONSOLE
+#ifdef _WIN32
 	::SetConsoleTextAttribute(hConsoleStream, FOREGROUND_GREEN | FOREGROUND_INTENSITY);
 	::WriteConsoleA(hConsoleStream, szTimeBuffer + bFirstPrint, nTimeSize, nullptr, nullptr);
 
@@ -158,6 +170,23 @@ L::Stream_t& L::Stream_t::operator()(const ELogLevel nLevel, const char* szFileB
 	}
 
 	::SetConsoleTextAttribute(hConsoleStream, FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE);
+#else // Linux — use ANSI escape codes
+	FILE* out = (FILE*)hConsoleStream;
+	if (!out) out = stdout;
+	fprintf(out, "\033[1;32m"); // bright green for timestamp
+	fwrite(szTimeBuffer + bFirstPrint, 1, nTimeSize, out);
+	if (szFileBlock) { fprintf(out, "\033[1m"); fwrite(szFileBlock, 1, CRT::StringLength(szFileBlock), out); }
+	if (szTypeBlock) {
+		// pick color by level
+		const char* ansi = "\033[0m";
+		if (nLevel == LOG_INFO)    ansi = "\033[1;36m";
+		else if (nLevel == LOG_WARNING) ansi = "\033[1;33m";
+		else if (nLevel == LOG_ERROR)   ansi = "\033[1;31m";
+		fprintf(out, "%s", ansi);
+		fwrite(szTypeBlock, 1, CRT::StringLength(szTypeBlock), out);
+	}
+	fprintf(out, "\033[0m"); // reset
+#endif
 #endif
 #ifdef CS_LOG_FILE
 	::WriteFile(hFileStream, szTimeBuffer + bFirstPrint, nTimeSize, nullptr, nullptr);
@@ -183,7 +212,11 @@ L::Stream_t& L::Stream_t::operator()(const ELogLevel nLevel, const char* szFileB
 L::Stream_t& L::Stream_t::operator<<(const ColorMarker_t colorMarker)
 {
 #ifdef CS_LOG_CONSOLE
+#ifdef _WIN32
 	::SetConsoleTextAttribute(hConsoleStream, static_cast<WORD>(colorMarker.nColorFlags));
+#else
+	(void)colorMarker;
+#endif
 #endif
 	return *this;
 }

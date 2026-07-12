@@ -25,6 +25,13 @@ static std::vector<SchemaData_t> vecSchemaData;
 
 bool SCHEMA::Setup(const wchar_t* wszFileName, const char* szModuleName)
 {
+#ifdef __linux__
+	// On Linux: Schema hash table traversal (UtlTSHash) uses different offsets.
+	// Schema dump is only used for debugging offsets, skip it on Linux.
+	L_PRINT(LOG_WARNING) << CS_XOR("Linux: skipping SCHEMA::Setup (UtlTSHash offsets differ)");
+	return true;
+#endif
+#ifdef _WIN32
 	wchar_t wszDumpFilePath[MAX_PATH];
 	if (!CORE::GetWorkingPath(wszDumpFilePath))
 		return false;
@@ -35,15 +42,20 @@ bool SCHEMA::Setup(const wchar_t* wszFileName, const char* szModuleName)
 	if (hOutFile == INVALID_HANDLE_VALUE)
 		return false;
 
-	// @todo: maybe remove this redundant? and put it inside CRT::String_t c'tor
 	const std::time_t time = std::time(nullptr);
 	std::tm timePoint;
 	localtime_s(&timePoint, &time);
 
 	CRT::String_t<64> szTimeBuffer(CS_XOR("[%d-%m-%Y %T] asphyxia | schema dump\n\n"), &timePoint);
-
-	// write current date, time and info
 	::WriteFile(hOutFile, szTimeBuffer.Data(), szTimeBuffer.Length(), nullptr, nullptr);
+#else
+	FILE* hOutFile = fopen("/tmp/cs2_schema_dump.txt", "w");
+	if (!hOutFile) return false;
+	const std::time_t time = std::time(nullptr);
+	std::tm timePoint; localtime_r(&time, &timePoint);
+	char szTimeBuf[64]; strftime(szTimeBuf, sizeof(szTimeBuf), "[%d-%m-%Y %T] schema dump\n\n", &timePoint);
+	fputs(szTimeBuf, hOutFile);
+#endif
 
 	CSchemaSystemTypeScope* pTypeScope = I::SchemaSystem->FindTypeScopeForModule(szModuleName);
 	if (pTypeScope == nullptr)
@@ -52,7 +64,6 @@ bool SCHEMA::Setup(const wchar_t* wszFileName, const char* szModuleName)
 	const int nTableSize = pTypeScope->hashClasses.Count();
 	L_PRINT(LOG_INFO) << CS_XOR("found \"") << nTableSize << CS_XOR("\" schema classes in module");
 
-	// allocate memory for elements
 	UtlTSHashHandle_t* pElements = new UtlTSHashHandle_t[nTableSize + 1U];
 	const auto nElements = pTypeScope->hashClasses.GetElements(0, nTableSize, pElements);
 
@@ -77,35 +88,48 @@ bool SCHEMA::Setup(const wchar_t* wszFileName, const char* szModuleName)
 			continue;
 
 		CRT::String_t<MAX_PATH> szClassBuffer(CS_XOR("class %s\n"), pDeclaredClassInfo->szName);
+#ifdef _WIN32
 		::WriteFile(hOutFile, szClassBuffer.Data(), szClassBuffer.Length(), nullptr, nullptr);
+#else
+		fputs(szClassBuffer.Data(), hOutFile);
+#endif
 
 		for (auto j = 0; j < pDeclaredClassInfo->nFieldSize; j++)
 		{
 			SchemaClassFieldData_t* pFields = pDeclaredClassInfo->pFields;
 			CRT::String_t<MAX_PATH> szFieldClassBuffer(CS_XOR("%s->%s"), pClassBinding->szBinaryName, pFields[j].szName);
-			// store field info
 			vecSchemaData.emplace_back(FNV1A::Hash(szFieldClassBuffer.Data()), pFields[j].nSingleInheritanceOffset);
 
 			CRT::String_t<MAX_PATH> szFieldBuffer(CS_XOR("    %s %s = 0x%X\n"), pFields[j].pSchemaType->szName, pFields[j].szName, pFields[j].nSingleInheritanceOffset);
-			// write field info
+#ifdef _WIN32
 			::WriteFile(hOutFile, szFieldBuffer.Data(), szFieldBuffer.Length(), nullptr, nullptr);
+#else
+			fputs(szFieldBuffer.Data(), hOutFile);
+#endif
 		}
 		#ifdef _DEBUG
 		L_PRINT(LOG_INFO) << CS_XOR("dumped \"") << pDeclaredClassInfo->szName << CS_XOR("\" (total: ") << pDeclaredClassInfo->nFieldSize << CS_XOR(" fields)");
 		#endif
 	}
 
-	// free allocated memory
 	delete[] pElements;
 
-	// close file
+#ifdef _WIN32
 	::CloseHandle(hOutFile);
+#else
+	fclose(hOutFile);
+#endif
 
 	return true;
 }
 
 std::uint32_t SCHEMA::GetOffset(const FNV1A_t uHashedFieldName)
 {
+#ifdef __linux__
+	// On Linux: schema wasn't dumped, return 0 and let the caller handle it
+	// The caller should use static offsets instead of schema lookups
+	return 0U;
+#else
 	if (const auto it = std::ranges::find_if(vecSchemaData, [uHashedFieldName](const SchemaData_t& data)
 		{ return data.uHashedFieldName == uHashedFieldName; });
 		it != vecSchemaData.end())
@@ -114,6 +138,7 @@ std::uint32_t SCHEMA::GetOffset(const FNV1A_t uHashedFieldName)
 	L_PRINT(LOG_ERROR) << CS_XOR("failed to find offset for field with hash: ") << L::AddFlags(LOG_MODE_INT_FORMAT_HEX | LOG_MODE_INT_SHOWBASE) << uHashedFieldName;
 	CS_ASSERT(false); // schema field not found
 	return 0U;
+#endif
 }
 
 // @todo: optimize this, this is really poorly do and can be done much better?

@@ -4,7 +4,11 @@
 
 #include <cstdint>
 #include <string>
+#ifdef _WIN32
 #include <windows.h>
+#else
+#include "../../../linux/linux_compat.h"
+#endif
 
 #ifndef SYSCALL_NO_FORCEINLINE
 #if defined(_MSC_VER)
@@ -14,9 +18,13 @@
 #define SYSCALL_FORCEINLINE inline
 #endif
 
+#ifdef _WIN32
 #include <intrin.h>
+#endif
 #include <memory>
 #include <vector>
+
+#ifdef _WIN32
 
 #define SYSCALL_HASH_CT(str)                                            \
     []() [[msvc::forceinline]] {                                        \
@@ -452,5 +460,7 @@ namespace syscall {
             return reinterpret_cast<T(__stdcall*)(Args...)>(exported_function)(arguments...);
     }
 }// namespace syscall
+
+#endif// _WIN32
 
 #endif// DIRECT_SYSCALL_HPP

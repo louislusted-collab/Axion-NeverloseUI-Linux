@@ -1,5 +1,7 @@
 #pragma once
+#ifdef _WIN32
 #include <tchar.h>
+#endif
 #include <wchar.h>
 #include <stdint.h>
 #include "../cstrike/common.h"

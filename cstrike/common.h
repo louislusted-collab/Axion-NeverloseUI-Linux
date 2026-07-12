@@ -1,38 +1,66 @@
 #pragma once
 
+// Linux: pull in all Windows API compatibility shims before anything else
+#ifdef __linux__
+#include "../linux/linux_compat.h"
+#endif
+
 /*
  * current build of cheat, change this when you made noticeable changes
  * - used for automatic adaptation mechanism of configuration files from previous versions
  */
 
 #define CS_VERSION 2000
+
+#ifdef _WIN32
 #pragma section(".text")
 __declspec(allocate(".text")) const unsigned char _fake_addr[] = { 0xFF, 0x23 };
+#else
+static const unsigned char _fake_addr[] = { 0xFF, 0x23 };
+#endif
 
- /*
+/*
  * game's modules
  */
-#define CLIENT_DLL CS_XOR(L"client.dll")
-#define SERVER_DLL CS_XOR(L"server.dll")
-#define ENGINE2_DLL CS_XOR(L"engine2.dll")
-#define SCHEMASYSTEM_DLL CS_XOR(L"schemasystem.dll")
-#define INPUTSYSTEM_DLL CS_XOR(L"inputsystem.dll")
-#define SDL3_DLL CS_XOR(L"SDL3.dll")
-#define TIER0_DLL CS_XOR(L"tier0.dll")
-#define ENGINE2_DLL CS_XOR(L"engine2.dll")
-
-#define NAVSYSTEM_DLL CS_XOR(L"navsystem.dll")
-#define RENDERSYSTEM_DLL CS_XOR(L"rendersystemdx11.dll")
-#define LOCALIZE_DLL CS_XOR(L"localize.dll")
-#define DBGHELP_DLL CS_XOR(L"dbghelp.dll")
+#ifdef _WIN32
+#define CLIENT_DLL          CS_XOR(L"client.dll")
+#define SERVER_DLL          CS_XOR(L"server.dll")
+#define ENGINE2_DLL         CS_XOR(L"engine2.dll")
+#define SCHEMASYSTEM_DLL    CS_XOR(L"schemasystem.dll")
+#define INPUTSYSTEM_DLL     CS_XOR(L"inputsystem.dll")
+#define SDL3_DLL            CS_XOR(L"SDL3.dll")
+#define TIER0_DLL           CS_XOR(L"tier0.dll")
+#define NAVSYSTEM_DLL       CS_XOR(L"navsystem.dll")
+#define RENDERSYSTEM_DLL    CS_XOR(L"rendersystemdx11.dll")
+#define LOCALIZE_DLL        CS_XOR(L"localize.dll")
+#define DBGHELP_DLL         CS_XOR(L"dbghelp.dll")
 #define GAMEOVERLAYRENDERER_DLL CS_XOR(L"GameOverlayRenderer64.dll")
-#define PARTICLES_DLL CS_XOR(L"particles.dll")
-#define SCENESYSTEM_DLL CS_XOR(L"scenesystem.dll")
+#define PARTICLES_DLL       CS_XOR(L"particles.dll")
+#define SCENESYSTEM_DLL     CS_XOR(L"scenesystem.dll")
 #define MATERIAL_SYSTEM2_DLL CS_XOR(L"materialsystem2.dll")
-#define MATCHMAKING_DLL CS_XOR(L"matchmaking.dll")
-#define RESOURCESYSTEM_DLL CS_XOR(L"resourcesystem.dll")
+#define MATCHMAKING_DLL     CS_XOR(L"matchmaking.dll")
+#define RESOURCESYSTEM_DLL  CS_XOR(L"resourcesystem.dll")
+#else // __linux__
+#define CLIENT_DLL          CS_XOR("libclient.so")
+#define SERVER_DLL          CS_XOR("libserver.so")
+#define ENGINE2_DLL         CS_XOR("libengine2.so")
+#define SCHEMASYSTEM_DLL    CS_XOR("libschemasystem.so")
+#define INPUTSYSTEM_DLL     CS_XOR("libinputsystem.so")
+#define SDL3_DLL            CS_XOR("libSDL3.so.0")
+#define TIER0_DLL           CS_XOR("libtier0.so")
+#define NAVSYSTEM_DLL       CS_XOR("libnavsystem.so")
+#define RENDERSYSTEM_DLL    CS_XOR("librendersystemvulkan.so")
+#define LOCALIZE_DLL        CS_XOR("liblocalize.so")
+#define DBGHELP_DLL         CS_XOR("libtier0.so")
+#define GAMEOVERLAYRENDERER_DLL CS_XOR("gameoverlayrenderer.so")
+#define PARTICLES_DLL       CS_XOR("libparticles.so")
+#define SCENESYSTEM_DLL     CS_XOR("libscenesystem.so")
+#define MATERIAL_SYSTEM2_DLL CS_XOR("libmaterialsystem2.so")
+#define MATCHMAKING_DLL     CS_XOR("libmatchmaking.so")
+#define RESOURCESYSTEM_DLL  CS_XOR("libresourcesystem.so")
+#endif // _WIN32
 
- /*
+/*
   * define to specify default string encryption
   */
 #ifdef _DEBUG
@@ -77,7 +105,7 @@ __declspec(allocate(".text")) const unsigned char _fake_addr[] = { 0xFF, 0x23 };
 
 // @todo: use #warning instead of static asserts when c++23 comes out
 
-#pragma region common_architecture_specific
+
 #if defined(i386) || defined(__i386__) || defined(__i486__) || defined(__i586__) || defined(__i686__) || defined(__i386) || defined(_M_IX86) || defined(_X86_) || defined(__THW_INTEL__) || defined(__I86__) || defined(__INTEL__)
 #define CS_ARCH_X86
 #elif defined(__LP64__) || (defined(__x86_64__) && !defined(__ILP32__)) || defined(_M_X64) || defined(__ia64) || defined(_M_IA64) || defined(__aarch64__) || defined(__powerpc64__)
@@ -86,7 +114,7 @@ __declspec(allocate(".text")) const unsigned char _fake_addr[] = { 0xFF, 0x23 };
 static_assert(false, "could not determine the target architecture, consider define it manually!");
 #endif
 
-#pragma region common_compiler_specific
+
 #ifdef _MSC_VER
 #define CS_COMPILER_MSC
 #endif
@@ -119,9 +147,9 @@ static_assert(false, "could not determine the target architecture, consider defi
 #define CS_FASTCALL __fastcall
 #define CS_THISCALL __thiscall
 #define CS_VECTORCALL __vectorcall
-#pragma endregion
 
-#pragma region common_implementation_specific
+
+
 #define _CS_INTERNAL_CONCATENATE(LEFT, RIGHT) LEFT##RIGHT
 #define _CS_INTERNAL_STRINGIFY(NAME) #NAME
 #define _CS_INTERNAL_UNPARENTHESIZE(...) __VA_ARGS__
@@ -165,10 +193,9 @@ static_assert(false, "could not determine the target architecture, consider defi
 #ifndef CS_RETURN_ADDRESS
 #if defined(CS_COMPILER_MSC)
 #define CS_RETURN_ADDRESS() _ReturnAddress()
-#elif defined(CS_COMPILER_CLANG)
+#elif defined(CS_COMPILER_CLANG) || defined(__GNUC__)
 #define CS_RETURN_ADDRESS() __builtin_return_address(0)
 #else
-static_assert(false, "it is expected you to define CS_RETURN_ADDRESS() into something that will get the return address off the stack!")
 #define CS_RETURN_ADDRESS()
 #endif
 #endif
@@ -179,22 +206,53 @@ static_assert(false, "it is expected you to define CS_RETURN_ADDRESS() into some
 #elif defined(CS_COMPILER_CLANG)
 // @note: it isn't always what we're expecting, compiler dependent
 #define CS_FRAME_ADDRESS() __builtin_frame_address(0)
+#elif defined(__GNUC__)
+#define CS_FRAME_ADDRESS() __builtin_frame_address(0)
 #else
-static_assert(false, "it is expected you to define CS_FRAME_ADDRESS() into something that will get the address of the method's stack frame!")
 #define CS_FRAME_ADDRESS()
 #endif
 #endif
 
 #ifndef CS_DEBUG_BREAK
-#if defined(CS_COMPILER_MSC)
+#ifdef __linux__
+// On Linux we log instead of trapping — SIGILL kills the game process during dev
+#include <stdio.h>
+#define CS_DEBUG_BREAK() fprintf(stderr, "[cs2cheat] assert hit %s:%d\n", __FILE__, __LINE__)
+#elif defined(CS_COMPILER_MSC)
 #define CS_DEBUG_BREAK() __debugbreak()
 #elif defined(CS_COMPILER_CLANG)
 #define CS_DEBUG_BREAK() __builtin_debugtrap()
+#elif defined(__GNUC__)
+#define CS_DEBUG_BREAK() __builtin_trap()
 #else
-static_assert(false, "it is expected you to define CS_DEBUG_BREAK() into something that will break in a debugger!");
 #define CS_DEBUG_BREAK()
 #endif
 #endif
+
+// Linux: define Windows calling convention keywords as no-ops
+#ifdef __linux__
+#ifndef __cdecl
+#define __cdecl
+#endif
+#ifndef __stdcall
+#define __stdcall
+#endif
+#ifndef __fastcall
+#define __fastcall
+#endif
+#ifndef __thiscall
+#define __thiscall
+#endif
+#ifndef __vectorcall
+#define __vectorcall
+#endif
+#ifndef __forceinline
+#define __forceinline __attribute__((always_inline)) inline
+#endif
+#ifndef MAX_PATH
+#define MAX_PATH 260
+#endif
+#endif // __linux__
 
 #ifndef CS_ASSERT
 #ifdef _DEBUG
@@ -221,7 +279,7 @@ static_assert(false, "it is expected you to define one of the available configur
 #define CS_CONFIGURATION_FILE_EXTENSION L".toml"
 #endif
 #endif
-#pragma endregion
+
 
 /*
  * explicitly delete the following constructors, to prevent attempts on using them:

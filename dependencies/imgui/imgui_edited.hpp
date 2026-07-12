@@ -1,4 +1,6 @@
+#ifndef IMGUI_DEFINE_MATH_OPERATORS
 #define IMGUI_DEFINE_MATH_OPERATORS
+#endif
 
 #include "imgui_internal.h"
 #include "imgui_settings.h"
@@ -10,8 +12,15 @@
 #include <map>
 
 #include <string>
+#ifdef _WIN32
 #include <wtypes.h>
+#endif
 #include "../cstrike/sdk/datatypes/color.h"
+
+#ifndef ImGuiChildFlags
+#define ImGuiChildFlags int
+#endif
+
 namespace edited
 { 
     bool            BeginChild(ImGuiID id, const ImVec2& size = ImVec2(0, 0), ImGuiChildFlags child_flags = 0, ImGuiWindowFlags window_flags = 0);

@@ -1,7 +1,9 @@
 #pragma once
 
 // used: [d3d]
+#ifdef _WIN32
 #include <d3d11.h>
+#endif
 
 #include "../common.h"
 
@@ -87,7 +89,7 @@ struct AnimationHandler_t
 {
 	// default: ease::in/outsine
 	AnimationHandler_t(EasingFunction_t fnIn = nullptr, EasingFunction_t fnOut = nullptr) :
-		fnEaseIn(fnIn), fnEaseOut(fnOut), bSwitch(false), bLastSwitch(false), flElapsedTime(0.f), flValue(0.1f){};
+		bSwitch(false), bLastSwitch(false), flElapsedTime(0.f), flValue(0.1f), fnEaseIn(fnIn), fnEaseOut(fnOut){};
 	~AnimationHandler_t() = default;
 
 	// Has to be called every frame
@@ -200,7 +202,11 @@ inline std::recursive_mutex    input_mutex{ };
 namespace D
 {
 	// initialize rendering engine, create fonts, set styles etc
+#ifdef _WIN32
 	bool Setup(HWND hWnd, ID3D11Device* pDevice, ID3D11DeviceContext* pContext);
+#else
+	bool Setup();
+#endif
 	// shutdown rendering engine
 	void Destroy();
 
@@ -208,7 +214,11 @@ namespace D
 	void Render();
 	/* @section: callbacks */
 	// handle input window message and save keys states in array
+#ifdef _WIN32
 	bool OnWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+#else
+	bool OnWndProc(void* hWnd, unsigned int uMsg, uintptr_t wParam, intptr_t lParam);
+#endif
 
 	/* @section: get */
 	/// convert world space to screen space coordinates by game's conversion matrix

@@ -1,9 +1,11 @@
 #pragma once
 // used: [win] winapi
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#endif
 
 #include "../common.h"
 // used: keybind_t
@@ -51,12 +53,14 @@ namespace IPT
 	/// @returns: true if key is being held, false otherwise
 	[[nodiscard]] CS_INLINE bool IsKeyDown(const std::uint32_t uButtonCode)
 	{
-		return arrKeyState[uButtonCode] == KEY_STATE_DOWN;
+		return uButtonCode < CS_ARRAYSIZE(arrKeyState) && arrKeyState[uButtonCode] == KEY_STATE_DOWN;
 	}
 
 	/// @returns: true if key has been just released, false otherwise
 	[[nodiscard]] CS_INLINE bool IsKeyReleased(const std::uint32_t uButtonCode)
 	{
+		if (uButtonCode >= CS_ARRAYSIZE(arrKeyState))
+			return false;
 		if (arrKeyState[uButtonCode] == KEY_STATE_RELEASED)
 		{
 			arrKeyState[uButtonCode] = KEY_STATE_UP;

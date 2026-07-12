@@ -43,7 +43,9 @@
 #endif
 #endif
 
+#ifdef _WIN32
 #include <intrin.h>
+#endif
 
 #ifndef LAZY_IMPORTER_NO_FORCEINLINE
 #if defined(_MSC_VER)

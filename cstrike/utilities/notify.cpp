@@ -28,7 +28,7 @@ NOTIFY::NotificationData_t::NotificationData_t(ENotificationType nType, const ch
 	va_end(args);
 }
 
-const Color_t& NOTIFY::NotificationData_t::GetTypeColor() const
+Color_t NOTIFY::NotificationData_t::GetTypeColor() const
 {
 	switch (nType)
 	{

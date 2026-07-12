@@ -14,128 +14,145 @@
 // used: getworkingpath
 #include "../core.h"
 
+#ifdef _WIN32
 inline static void WriteConVarType(HANDLE hFile, const uint32_t nType)
 {
 	switch ((EConVarType)nType)
 	{
-	case EConVarType_Bool:
-		::WriteFile(hFile, CS_XOR("[bool] "), CRT::StringLength(CS_XOR("[bool] ")), nullptr, nullptr);
-		break;
-	case EConVarType_Int16:
-		::WriteFile(hFile, CS_XOR("[int16] "), CRT::StringLength(CS_XOR("[int16] ")), nullptr, nullptr);
-		break;
-	case EConVarType_UInt16:
-		::WriteFile(hFile, CS_XOR("[uint16] "), CRT::StringLength(CS_XOR("[uint16] ")), nullptr, nullptr);
-		break;
-	case EConVarType_Int32:
-		::WriteFile(hFile, CS_XOR("[int32] "), CRT::StringLength(CS_XOR("[int32] ")), nullptr, nullptr);
-		break;
-	case EConVarType_UInt32:
-		::WriteFile(hFile, CS_XOR("[uint32] "), CRT::StringLength(CS_XOR("[uint32] ")), nullptr, nullptr);
-		break;
-	case EConVarType_Int64:
-		::WriteFile(hFile, CS_XOR("[int64] "), CRT::StringLength(CS_XOR("[int64] ")), nullptr, nullptr);
-		break;
-	case EConVarType_UInt64:
-		::WriteFile(hFile, CS_XOR("[uint64] "), CRT::StringLength(CS_XOR("[uint64] ")), nullptr, nullptr);
-		break;
-	case EConVarType_Float32:
-		::WriteFile(hFile, CS_XOR("[float32] "), CRT::StringLength(CS_XOR("[float32] ")), nullptr, nullptr);
-		break;
-	case EConVarType_Float64:
-		::WriteFile(hFile, CS_XOR("[float64] "), CRT::StringLength(CS_XOR("[float64] ")), nullptr, nullptr);
-		break;
-	case EConVarType_String:
-		::WriteFile(hFile, CS_XOR("[string] "), CRT::StringLength(CS_XOR("[string] ")), nullptr, nullptr);
-		break;
-	case EConVarType_Color:
-		::WriteFile(hFile, CS_XOR("[color] "), CRT::StringLength(CS_XOR("[color] ")), nullptr, nullptr);
-		break;
-	case EConVarType_Vector2:
-		::WriteFile(hFile, CS_XOR("[vector2] "), CRT::StringLength(CS_XOR("[vector2] ")), nullptr, nullptr);
-		break;
-	case EConVarType_Vector3:
-		::WriteFile(hFile, CS_XOR("[vector3] "), CRT::StringLength(CS_XOR("[vector3] ")), nullptr, nullptr);
-		break;
-	case EConVarType_Vector4:
-		::WriteFile(hFile, CS_XOR("[vector4] "), CRT::StringLength(CS_XOR("[vector4] ")), nullptr, nullptr);
-		break;
-	case EConVarType_Qangle:
-		::WriteFile(hFile, CS_XOR("[qangle] "), CRT::StringLength(CS_XOR("[qangle] ")), nullptr, nullptr);
-		break;
-	default:
-		::WriteFile(hFile, CS_XOR("[unknown-type] "), CRT::StringLength(CS_XOR("[unknown-type] ")), nullptr, nullptr);
-		break;
+	case EConVarType_Bool:      ::WriteFile(hFile, "[bool] ",        7,  nullptr, nullptr); break;
+	case EConVarType_Int16:     ::WriteFile(hFile, "[int16] ",       8,  nullptr, nullptr); break;
+	case EConVarType_UInt16:    ::WriteFile(hFile, "[uint16] ",      9,  nullptr, nullptr); break;
+	case EConVarType_Int32:     ::WriteFile(hFile, "[int32] ",       8,  nullptr, nullptr); break;
+	case EConVarType_UInt32:    ::WriteFile(hFile, "[uint32] ",      9,  nullptr, nullptr); break;
+	case EConVarType_Int64:     ::WriteFile(hFile, "[int64] ",       8,  nullptr, nullptr); break;
+	case EConVarType_UInt64:    ::WriteFile(hFile, "[uint64] ",      9,  nullptr, nullptr); break;
+	case EConVarType_Float32:   ::WriteFile(hFile, "[float32] ",     10, nullptr, nullptr); break;
+	case EConVarType_Float64:   ::WriteFile(hFile, "[float64] ",     10, nullptr, nullptr); break;
+	case EConVarType_String:    ::WriteFile(hFile, "[string] ",      9,  nullptr, nullptr); break;
+	case EConVarType_Color:     ::WriteFile(hFile, "[color] ",       8,  nullptr, nullptr); break;
+	case EConVarType_Vector2:   ::WriteFile(hFile, "[vector2] ",     10, nullptr, nullptr); break;
+	case EConVarType_Vector3:   ::WriteFile(hFile, "[vector3] ",     10, nullptr, nullptr); break;
+	case EConVarType_Vector4:   ::WriteFile(hFile, "[vector4] ",     10, nullptr, nullptr); break;
+	case EConVarType_Qangle:    ::WriteFile(hFile, "[qangle] ",      9,  nullptr, nullptr); break;
+	default:                    ::WriteFile(hFile, "[unknown-type] ", 15, nullptr, nullptr); break;
 	}
 }
-
 inline static void WriteConVarFlags(HANDLE hFile, const uint32_t nFlags)
 {
-	if (nFlags & FCVAR_CLIENTDLL)
-		::WriteFile(hFile, CS_XOR("[client.dll] "), CRT::StringLength(CS_XOR("[client.dll] ")), nullptr, nullptr);
-	else if (nFlags & FCVAR_GAMEDLL)
-		::WriteFile(hFile, CS_XOR("[games's dll] "), CRT::StringLength(CS_XOR("[games's dll] ")), nullptr, nullptr);
-
-	if (nFlags & FCVAR_PROTECTED)
-		::WriteFile(hFile, CS_XOR("[protected] "), CRT::StringLength(CS_XOR("[protected] ")), nullptr, nullptr);
-
-	if (nFlags & FCVAR_CHEAT)
-		::WriteFile(hFile, CS_XOR("[cheat] "), CRT::StringLength(CS_XOR("[cheat] ")), nullptr, nullptr);
-
-	if (nFlags & FCVAR_HIDDEN)
-		::WriteFile(hFile, CS_XOR("[hidden] "), CRT::StringLength(CS_XOR("[hidden] ")), nullptr, nullptr);
-
-	if (nFlags & FCVAR_DEVELOPMENTONLY)
-		::WriteFile(hFile, CS_XOR("[devonly] "), CRT::StringLength(CS_XOR("[devonly] ")), nullptr, nullptr);
-
-	::WriteFile(hFile, CS_XOR("\n"), CRT::StringLength(CS_XOR("\n")), nullptr, nullptr);
+	if (nFlags & FCVAR_CLIENTDLL)    ::WriteFile(hFile, "[client.dll] ",  13, nullptr, nullptr);
+	else if (nFlags & FCVAR_GAMEDLL) ::WriteFile(hFile, "[game's dll] ",  13, nullptr, nullptr);
+	if (nFlags & FCVAR_PROTECTED)    ::WriteFile(hFile, "[protected] ",   12, nullptr, nullptr);
+	if (nFlags & FCVAR_CHEAT)        ::WriteFile(hFile, "[cheat] ",        8, nullptr, nullptr);
+	if (nFlags & FCVAR_HIDDEN)       ::WriteFile(hFile, "[hidden] ",       9, nullptr, nullptr);
+	if (nFlags & FCVAR_DEVELOPMENTONLY) ::WriteFile(hFile, "[devonly] ",  10, nullptr, nullptr);
+	::WriteFile(hFile, "\n", 1, nullptr, nullptr);
 }
+#else
+inline static void WriteConVarType(FILE* hFile, const uint32_t nType)
+{
+	switch ((EConVarType)nType)
+	{
+	case EConVarType_Bool:      fputs("[bool] ",        hFile); break;
+	case EConVarType_Int16:     fputs("[int16] ",       hFile); break;
+	case EConVarType_UInt16:    fputs("[uint16] ",      hFile); break;
+	case EConVarType_Int32:     fputs("[int32] ",       hFile); break;
+	case EConVarType_UInt32:    fputs("[uint32] ",      hFile); break;
+	case EConVarType_Int64:     fputs("[int64] ",       hFile); break;
+	case EConVarType_UInt64:    fputs("[uint64] ",      hFile); break;
+	case EConVarType_Float32:   fputs("[float32] ",     hFile); break;
+	case EConVarType_Float64:   fputs("[float64] ",     hFile); break;
+	case EConVarType_String:    fputs("[string] ",      hFile); break;
+	case EConVarType_Color:     fputs("[color] ",       hFile); break;
+	case EConVarType_Vector2:   fputs("[vector2] ",     hFile); break;
+	case EConVarType_Vector3:   fputs("[vector3] ",     hFile); break;
+	case EConVarType_Vector4:   fputs("[vector4] ",     hFile); break;
+	case EConVarType_Qangle:    fputs("[qangle] ",      hFile); break;
+	default:                    fputs("[unknown-type] ", hFile); break;
+	}
+}
+inline static void WriteConVarFlags(FILE* hFile, const uint32_t nFlags)
+{
+	if (nFlags & FCVAR_CLIENTDLL)    fputs("[client.dll] ",  hFile);
+	else if (nFlags & FCVAR_GAMEDLL) fputs("[game's dll] ",  hFile);
+	if (nFlags & FCVAR_PROTECTED)    fputs("[protected] ",   hFile);
+	if (nFlags & FCVAR_CHEAT)        fputs("[cheat] ",       hFile);
+	if (nFlags & FCVAR_HIDDEN)       fputs("[hidden] ",      hFile);
+	if (nFlags & FCVAR_DEVELOPMENTONLY) fputs("[devonly] ",  hFile);
+	fputs("\n", hFile);
+}
+#endif
 
 bool CONVAR::Dump(const wchar_t* wszFileName)
 {
+#ifdef __linux__
+	return true;
+#endif
+#ifdef __linux__
+	// @todo: fix listConvars offset for Linux, skip dump for now
+	return true;
+#endif
+#ifdef _WIN32
 	wchar_t wszDumpFilePath[MAX_PATH];
 	if (!CORE::GetWorkingPath(wszDumpFilePath))
 		return false;
-
 	CRT::StringCat(wszDumpFilePath, wszFileName);
-
 	HANDLE hOutFile = ::CreateFileW(wszDumpFilePath, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
 	if (hOutFile == INVALID_HANDLE_VALUE)
 		return false;
-
-	// @todo: maybe remove this redundant? and put it inside CRT::String_t c'tor
 	const std::time_t time = std::time(nullptr);
 	std::tm timePoint;
 	localtime_s(&timePoint, &time);
-
 	CRT::String_t<64> szTimeBuffer(CS_XOR("[%d-%m-%Y %T] asphyxia | convars dump\n\n"), &timePoint);
-
-	// write current date, time and info
 	::WriteFile(hOutFile, szTimeBuffer.Data(), szTimeBuffer.Length(), nullptr, nullptr);
+#else
+	FILE* hOutFile = fopen("/tmp/cs2_convars_dump.txt", "w");
+	if (!hOutFile) return false;
+	const std::time_t time = std::time(nullptr);
+	std::tm timePoint; localtime_r(&time, &timePoint);
+	char szTimeBuf[64]; strftime(szTimeBuf, sizeof(szTimeBuf), "[%d-%m-%Y %T] convars dump\n\n", &timePoint);
+	fputs(szTimeBuf, hOutFile);
+#endif
 
 	for (int i = I::Cvar->listConvars.Head(); i != I::Cvar->listConvars.InvalidIndex(); i = I::Cvar->listConvars.Next(i))
 	{
 		CConVar* pConVar = I::Cvar->listConvars.Element(i);
 		if (pConVar != nullptr)
 		{
-			// dump to file
 			WriteConVarType(hOutFile, pConVar->nType);
-
 			CRT::String_t<526> szBuffer(CS_XOR("%s : \"%s\" "), pConVar->szName, pConVar->szDescription[0] == '\0' ? CS_XOR("no description") : pConVar->szDescription);
+#ifdef _WIN32
 			::WriteFile(hOutFile, szBuffer.Data(), szBuffer.Length(), nullptr, nullptr);
-
-			// write flags
+#else
+			fputs(szBuffer.Data(), hOutFile);
+#endif
 			WriteConVarFlags(hOutFile, pConVar->nFlags);
 		}
 	}
 
+#ifdef _WIN32
 	::CloseHandle(hOutFile);
-
+#else
+	fclose(hOutFile);
+#endif
 	return true;
 }
 
 bool CONVAR::Setup()
 {
+#ifdef __linux__
+	L_PRINT(LOG_WARNING) << CS_XOR("Linux: skipping CONVAR::Setup - IEngineCVar offsets differ");
+	return true;
+#endif
+#ifdef __linux__
+	// @todo: fix IEngineCVar::Find hash table offsets for Linux
+	L_PRINT(LOG_WARNING) << CS_XOR("Linux: skipping CONVAR::Setup, convars unavailable");
+	return true;
+#endif
+#ifdef __linux__
+	// @todo: fix IEngineCVar::Find for Linux (hash table traversal uses different offsets)
+	// For now, skip convar capture. Features that use these will need null checks.
+	return true;
+#endif
 	bool bSuccess = true;
 
 	m_pitch = I::Cvar->Find(FNV1A::HashConst("m_pitch"));

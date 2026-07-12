@@ -74,7 +74,7 @@ public:
 		pMemory(pMemory), nAllocationCount(nElements), nGrowSize(EXTERNAL_BUFFER_MARKER) { }
 
 	CUtlMemory(T* pMemory, const void* pElements, size_t size) :
-		pMemory(pMemory), nAllocationCount(static_cast<N>(pElements / sizeof(T))), nGrowSize(size) // You may need to set nGrowSize appropriately
+		pMemory(pMemory), nAllocationCount(static_cast<N>(reinterpret_cast<uintptr_t>(pElements) / sizeof(T))), nGrowSize(static_cast<N>(size)) // You may need to set nGrowSize appropriately
 	{
 		// Assuming nElements points to the start of the memory block to be copied
 		if (pElements != nullptr)
@@ -87,7 +87,6 @@ public:
 	{
 		Purge();
 	}
-	template<class T, class N>
 	inline CUtlMemory(CUtlMemory&& moveFrom)
 	{
 		moveFrom.pMemory = nullptr;
@@ -95,7 +94,6 @@ public:
 		moveFrom.nGrowSize = 0;
 	}
 
-	template<class T, class N>
 	inline CUtlMemory& operator=(CUtlMemory&& moveFrom)
 	{
 		// copy member variables to locals before purge to handle self-assignment
@@ -412,10 +410,10 @@ void* CUtlMemory<T, N>::DetachMemory()
 	if (IsExternallyAllocated())
 		return NULL;
 
-	void* pMemory = pMemory;
-	pMemory = 0;
+	void* detachedMemory = this->pMemory;
+	this->pMemory = nullptr;
 	nAllocationCount = 0;
-	return pMemory;
+	return detachedMemory;
 }
 
 template< class T, class N >

@@ -1,5 +1,7 @@
 // used: [d3d] api
+#ifdef _WIN32
 #include <d3d11.h>
+#endif
 
 #include "interfaces.h"
 
@@ -41,8 +43,35 @@ static const CInterfaceRegister* GetRegisterList(const wchar_t* wszModuleName)
 		return nullptr;
 	}
 
+#ifdef _WIN32
+	// Windows: CreateInterface starts with  mov rax,[rip+X]  at offset 0 (7-byte insn)
 	return *reinterpret_cast<CInterfaceRegister**>(MEM::ResolveRelativeAddress(pCreateInterface, 0x3, 0x7));
+#else
+	// Native builds have a normal compiler-generated prologue. Locate the
+	// RIP-relative `mov rbx, [rip + list]` instead of relying on one fixed
+	// prologue length, which changes between game updates and build types.
+	for (std::size_t offset = 0; offset + 7 <= 48; ++offset) {
+		if (pCreateInterface[offset] == 0x48 && pCreateInterface[offset + 1] == 0x8B &&
+			pCreateInterface[offset + 2] == 0x1D) {
+			return *reinterpret_cast<CInterfaceRegister**>(
+				MEM::ResolveRelativeAddress(pCreateInterface + offset, 0x3, 0x7));
+		}
+	}
+	L_PRINT(LOG_ERROR) << CS_XOR("failed to locate native CreateInterface register list");
+	return nullptr;
+#endif
 }
+
+#ifdef __linux__
+static wchar_t _irl_wbuf[512];
+static const CInterfaceRegister* GetRegisterList(const char* szModuleName)
+{
+	size_t i = 0;
+	while (szModuleName[i] && i + 1 < 512) { _irl_wbuf[i] = (wchar_t)(unsigned char)szModuleName[i]; i++; }
+	_irl_wbuf[i] = L'\0';
+	return GetRegisterList(_irl_wbuf);
+}
+#endif
 
 template <typename T = void*>
 T* Capture(const CInterfaceRegister* pModuleRegister, const char* szInterfaceName)
@@ -162,42 +191,95 @@ bool I::Setup()
 	bSuccess &= (RenderGameSystem != nullptr);*/
 #pragma endregion
 
+#ifdef _WIN32
 	Trace = *reinterpret_cast<i_trace**>(MEM::GetAbsoluteAddress(MEM::FindPattern(CLIENT_DLL, CS_XOR("4C 8B 3D ? ? ? ? 24 C9 0C 49 66 0F 7F 45 ?")), 0x3));
 	bSuccess &= (Trace != nullptr);
-	L_PRINT(LOG_INFO) << CS_XOR("captured Trace \"") << CS_XOR("\" interface at address: ") << L::AddFlags(LOG_MODE_INT_SHOWBASE | LOG_MODE_INT_FORMAT_HEX) << reinterpret_cast<std::uintptr_t>(Trace);
+	L_PRINT(LOG_INFO) << CS_XOR("captured Trace interface at address: ") << L::AddFlags(LOG_MODE_INT_SHOWBASE | LOG_MODE_INT_FORMAT_HEX) << reinterpret_cast<std::uintptr_t>(Trace);
 
-	GameEvent = *reinterpret_cast<IGameEventManager2**>(MEM::ResolveRelativeAddress(MEM::GetVFunc<std::uint8_t*>(Client, 14U) + 0x3E, 0x3, 0x7));
+	if (auto* pGameEventBase = MEM::GetVFunc<std::uint8_t*>(Client, 14U))
+		GameEvent = *reinterpret_cast<IGameEventManager2**>(MEM::ResolveRelativeAddress(pGameEventBase + 0x3E, 0x3, 0x7));
 	bSuccess &= (GameEvent != nullptr);
-	
-	// @ida:  #STR: "r_gpu_mem_stats", "-threads", "CTSListBase: Misaligned list\n", "CTSQueue: Misaligned queue\n", "Display GPU memory usage.", "-r_max_device_threads"
+
 	SwapChain = **reinterpret_cast<ISwapChainDx11***>(MEM::ResolveRelativeAddress(MEM::FindPattern(RENDERSYSTEM_DLL, CS_XOR("66 0F 7F 05 ? ? ? ? 66 0F 7F 0D ? ? ? ? 48 89 35")), 0x4, 0x8));
 	bSuccess &= (SwapChain != nullptr);
-
-	// grab's d3d11 interfaces for later use
 	if (SwapChain != nullptr)
-	{ 
+	{
 		if (FAILED(SwapChain->pDXGISwapChain->GetDevice(__uuidof(ID3D11Device), (void**)&Device)))
 		{
 			L_PRINT(LOG_ERROR) << CS_XOR("failed to get device from swapchain");
-			CS_ASSERT(false);
 			return false;
 		}
 		else
-			// we successfully got device, so we can get immediate context
 			Device->GetImmediateContext(&DeviceContext);
 	}
 	bSuccess &= (Device != nullptr && DeviceContext != nullptr);
 
 	Input = *reinterpret_cast<CCSGOInput**>(MEM::ResolveRelativeAddress(MEM::FindPattern(CLIENT_DLL, CS_XOR("48 8B 0D ? ? ? ? E8 ? ? ? ? 8B BE ? ? ? ? 44 8B F0 85 FF 78 04 FF C7 EB 03")), 0x3, 0x7));
-	bSuccess &= (Input != nullptr);
+	// Optional in native menu-only mode. Gameplay input hooks stay disabled until
+	// the Linux class layout and vtable indices are verified.
 
-	// @ida: STR '%s:  %f tick(%d) curtime(%f) OnSequenceCycleChanged: %s : %d=[%s]'
 	GlobalVars = *reinterpret_cast<IGlobalVars**>(MEM::ResolveRelativeAddress(MEM::FindPattern(CLIENT_DLL, CS_XOR("48 89 0D ? ? ? ? 48 89 41")), 0x3, 0x7));
 	bSuccess &= (GlobalVars != nullptr);
+#else
+	// Linux: capture via sig scans and CreateInterface
+	L_PRINT(LOG_INFO) << CS_XOR("[I::Setup] Linux: capturing remaining interfaces via patterns");
+
+	// Input (CCSGOInput*) - sig scan in libclient.so
+	// Pattern from known working Linux internal: 48 8D 05 ? ? ? ? C3 CC CC CC CC CC CC CC CC 55 48 89 E5 41 55
+	{
+		auto addr = MEM::FindPattern(CLIENT_DLL, CS_XOR("48 8D 05 ? ? ? ? C3 CC CC CC CC CC CC CC CC 55 48 89 E5 41 55"));
+		if (addr != nullptr) {
+			// Native Linux uses a tiny accessor which returns the CCSGOInput object
+			// itself: lea rax, [rip + displacement]; ret.  The resolved LEA target
+			// is therefore the object, not a CCSGOInput* storage slot.
+			Input = reinterpret_cast<CCSGOInput*>(MEM::ResolveRelativeAddress(addr, 0x3, 0x7));
+		}
+		if (Input == nullptr) {
+			// Fallback: sig from OLD project
+			addr = MEM::FindPattern(CLIENT_DLL, CS_XOR("48 8B 0D ? ? ? ? E8 ? ? ? ? 8B BE ? ? ? ? 44 8B F0 85 FF 78 04 FF C7 EB 03"));
+			if (addr != nullptr)
+				Input = *reinterpret_cast<CCSGOInput**>(MEM::ResolveRelativeAddress(addr, 0x3, 0x7));
+		}
+	}
+	bSuccess &= (Input != nullptr);
+	if (Input != nullptr)
+		L_PRINT(LOG_INFO) << CS_XOR("captured Input at: ") << L::AddFlags(LOG_MODE_INT_SHOWBASE | LOG_MODE_INT_FORMAT_HEX) << reinterpret_cast<std::uintptr_t>(Input);
+	else
+		L_PRINT(LOG_WARNING) << CS_XOR("[I::Setup] Linux: Input not captured, some features may crash");
+
+	// GlobalVars - the Windows engine vfunc index is not valid on native Linux.
+	// Only accept a verified native pattern result; this interface is optional for
+	// menu-only mode.
+	{
+		auto addr = MEM::FindPattern(CLIENT_DLL, CS_XOR("48 89 0D ? ? ? ? 48 89 41"));
+		if (addr != nullptr)
+			GlobalVars = *reinterpret_cast<IGlobalVars**>(MEM::ResolveRelativeAddress(addr, 0x3, 0x7));
+	}
+	if (GlobalVars != nullptr)
+		L_PRINT(LOG_INFO) << CS_XOR("captured GlobalVars at: ") << L::AddFlags(LOG_MODE_INT_SHOWBASE | LOG_MODE_INT_FORMAT_HEX) << reinterpret_cast<std::uintptr_t>(GlobalVars);
+	else
+		L_PRINT(LOG_WARNING) << CS_XOR("[I::Setup] Linux: GlobalVars not captured, will retry at LevelInit");
+
+	// Trace
+	{
+		auto addr = MEM::FindPattern(CLIENT_DLL, CS_XOR("4C 8B 3D ? ? ? ? 24 C9 0C 49 66 0F 7F 45"));
+		if (addr != nullptr)
+			Trace = *reinterpret_cast<i_trace**>(MEM::GetAbsoluteAddress(addr, 0x3));
+	}
+	if (Trace != nullptr)
+		L_PRINT(LOG_INFO) << CS_XOR("captured Trace at: ") << L::AddFlags(LOG_MODE_INT_SHOWBASE | LOG_MODE_INT_FORMAT_HEX) << reinterpret_cast<std::uintptr_t>(Trace);
+	else
+		L_PRINT(LOG_WARNING) << CS_XOR("[I::Setup] Linux: Trace not captured");
+
+	// GameEvent - disabled on Linux, offset 0x3E is wrong
+	// @todo: find correct offset for Linux
+	L_PRINT(LOG_WARNING) << CS_XOR("[I::Setup] Linux: GameEvent not captured (needs offset fix)");
+#endif
 
 	return bSuccess;
 }
 
+#ifdef _WIN32
 bool I::CreateRenderTarget(IDXGISwapChain* pSwapChain)  {
 	SwapChain->pDXGISwapChain = pSwapChain;
 
@@ -241,3 +323,4 @@ void I::DestroyRenderTarget()
 		RenderTargetView = nullptr;
 	}
 }
+#endif

@@ -14,7 +14,7 @@
 #include "../core/csig/sigscan.hpp"
 #include "../core/pointer/pointer.hpp"
 #include <array>
-#include "../features.h"
+#include "../cheat_features.h"
 #include "../cstrike/features/visuals/overlay.h"
 #include "../cstrike/features/legit/legit.h"
 #include "interfaces/iglobalvars.h"
@@ -578,7 +578,7 @@ bool C_CSPlayerPawn::Visible(C_CSPlayerPawn* local, int type, bool v)
 
         I::Trace->TraceShape(ray, &start_eye, &end_eye, filter, trace);
 
-        return trace.HitEntity && trace.HitEntity->GetRefEHandle().GetEntryIndex() == this->GetRefEHandle().GetEntryIndex() || trace.Fraction > 0.97f;
+        return (trace.HitEntity && trace.HitEntity->GetRefEHandle().GetEntryIndex() == this->GetRefEHandle().GetEntryIndex()) || trace.Fraction > 0.97f;
     }
     else if (type == TRACE_TYPE::AIMBOT) {
         if (v) {
@@ -593,7 +593,7 @@ bool C_CSPlayerPawn::Visible(C_CSPlayerPawn* local, int type, bool v)
 
             I::Trace->TraceShape(ray, &start_eye, &end_eye, filter, trace);
 
-            return trace.HitEntity && trace.HitEntity->GetRefEHandle().GetEntryIndex() == this->GetRefEHandle().GetEntryIndex() || trace.Fraction > 0.97f;
+            return (trace.HitEntity && trace.HitEntity->GetRefEHandle().GetEntryIndex() == this->GetRefEHandle().GetEntryIndex()) || trace.Fraction > 0.97f;
         }
         else
             return true;
@@ -734,8 +734,8 @@ void CSkeletonInstance::get_bone_data(bone_data& data, int index)
 void CS_FASTCALL CSkeletonInstance::calc_world_space_bones(uint32_t parent, uint32_t mask)
 {	// cHoca
 
-    using fnNewCalcWSsBones = void(CS_FASTCALL)(void*, uint32_t);
-    static auto bone_new = reinterpret_cast<fnNewCalcWSsBones*>(MEM::FindPattern(CLIENT_DLL, CS_XOR("40 55 56 57 41 54 41 55 41 56 41 57 48 81 EC D0")));
+    using fnNewCalcWSsBones = void(*)(void*, uint32_t);
+    static auto bone_new = reinterpret_cast<fnNewCalcWSsBones>(MEM::FindPattern(CLIENT_DLL, CS_XOR("40 55 56 57 41 54 41 55 41 56 41 57 48 81 EC D0")));
     return bone_new(this, mask);
 }
 
@@ -893,7 +893,7 @@ bool CEconItemDefinition::IsGlove(bool excludeDefault, const char* name) {
     auto Type_Hands = FNV1A::Hash("#Type_Hands");
 
     bool valid = FNV1A::Hash(this->m_pszItemBaseName) == Type_Hands;
-    bool defaultGlove = valid && m_nDefIndex == 5028 || m_nDefIndex == 5029;
+    bool defaultGlove = valid && (m_nDefIndex == 5028 || m_nDefIndex == 5029);
 
     return excludeDefault ? !defaultGlove : valid;
 }

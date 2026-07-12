@@ -1,8 +1,9 @@
-// used: [win] winapi
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#endif
 
 #include "config.h"
 // used: getworkingpath
@@ -394,9 +395,9 @@ void ColorPickerVar_t::UpdateRainbow()
 		const float flTime = static_cast<float>(ImGui::GetTime());
 		// create a rainbow color with copied alpha
 		float arrRainbowColors[] = {
-			sin(flTime * this->flRainbowSpeed) * 0.5f + 0.5f,
-			sin(flTime * this->flRainbowSpeed * MATH::_PI / 3) * 0.5f + 0.5f,
-			sin(flTime * this->flRainbowSpeed * MATH::_PI / 3) * 0.5f + 0.5f,
+			static_cast<float>(sin(flTime * this->flRainbowSpeed) * 0.5 + 0.5),
+			static_cast<float>(sin(flTime * this->flRainbowSpeed * MATH::_PI / 3) * 0.5 + 0.5),
+			static_cast<float>(sin(flTime * this->flRainbowSpeed * MATH::_PI / 3) * 0.5 + 0.5),
 			this->colValue.Base<COLOR_A>()
 		};
 

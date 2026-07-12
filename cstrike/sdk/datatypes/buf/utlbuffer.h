@@ -159,15 +159,15 @@ enum kv_field_type_t : uint8_t
 typedef unsigned short ushort;
 
 template < class A >
-static const char* GetFmtStr(int nRadix = 10, bool bPrint = true) { return ""; }
+const char* GetFmtStr(int nRadix = 10, bool bPrint = true) { return ""; }
 
-template <> static const char* GetFmtStr< short >(int nRadix, bool bPrint) { return "%hd"; }
-template <> static const char* GetFmtStr< ushort >(int nRadix, bool bPrint) {  return "%hu"; }
-template <> static const char* GetFmtStr< int >(int nRadix, bool bPrint) {  return "%d"; }
-template <> static const char* GetFmtStr< UINT >(int nRadix, bool bPrint) {  return nRadix == 16 ? "%x" : "%u"; }
-template <> static const char* GetFmtStr< int64_t >(int nRadix, bool bPrint) { return "%lld"; }
-template <> static const char* GetFmtStr< float >(int nRadix, bool bPrint) { return "%f"; }
-template <> static const char* GetFmtStr< double >(int nRadix, bool bPrint) {return bPrint ? "%.15lf" : "%lf"; } // force Printf to print DBL_DIG=15 digits of precision for doubles - defaults to FLT_DIG=6
+template <> inline const char* GetFmtStr< short >(int nRadix, bool bPrint) { return "%hd"; }
+template <> inline const char* GetFmtStr< ushort >(int nRadix, bool bPrint) {  return "%hu"; }
+template <> inline const char* GetFmtStr< int >(int nRadix, bool bPrint) {  return "%d"; }
+template <> inline const char* GetFmtStr< UINT >(int nRadix, bool bPrint) {  return nRadix == 16 ? "%x" : "%u"; }
+template <> inline const char* GetFmtStr< int64_t >(int nRadix, bool bPrint) { return "%lld"; }
+template <> inline const char* GetFmtStr< float >(int nRadix, bool bPrint) { return "%f"; }
+template <> inline const char* GetFmtStr< double >(int nRadix, bool bPrint) {return bPrint ? "%.15lf" : "%lf"; } // force Printf to print DBL_DIG=15 digits of precision for doubles
 //-----------------------------------------------------------------------------
 // Command parsing..
 //-----------------------------------------------------------------------------
@@ -819,7 +819,11 @@ template <>
 inline int64_t StringToNumber(char* pString, char** ppEnd, int nRadix)
 {
 
+#ifdef _WIN32
 	return (int64_t)_strtoi64(pString, ppEnd, nRadix);
+#else
+	return (int64_t)strtoll(pString, ppEnd, nRadix);
+#endif
 }
 
 template <>
@@ -1387,7 +1391,13 @@ inline void* CUtlBuffer::AccessForDirectRead(size_t nBytes)
 
 inline void* CUtlBuffer::Detach()
 {
-	Clear();
+	void* detachedMemory = m_Memory.Detach();
+	m_Get = 0;
+	m_Put = 0;
+	m_Error = 0;
+	m_nOffset = 0;
+	m_nMaxPut = 0;
+	return detachedMemory;
 }
 
 //-----------------------------------------------------------------------------

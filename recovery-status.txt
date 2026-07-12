@@ -1,0 +1,103 @@
+ M cstrike/common.h
+ M cstrike/core.cpp
+ M cstrike/core/Bgs.h
+ M cstrike/core/Header.h
+ M cstrike/core/config.cpp
+ M cstrike/core/config.h
+ M cstrike/core/convars.cpp
+ M cstrike/core/gui.hpp
+ M cstrike/core/hooks.cpp
+ M cstrike/core/hooks.h
+ M cstrike/core/interfaces.cpp
+ M cstrike/core/interfaces.h
+ M cstrike/core/memory/cmodule.cpp
+ M cstrike/core/menu.cpp
+ M cstrike/core/pointer/pointer.hpp
+ M cstrike/core/schema.cpp
+ M cstrike/core/sdk.cpp
+ M cstrike/core/silentvmt/InlineHook.cpp
+ M cstrike/core/silentvmt/InlineHook.h
+ M cstrike/core/silentvmt/ShadowVMT.cpp
+ M cstrike/core/silentvmt/ShadowVMT.h
+ M cstrike/core/spoofcall/Utils.h
+ M cstrike/core/spoofcall/invoker.h
+ M cstrike/core/spoofcall/lazy_importer.hpp
+ M cstrike/core/spoofcall/syscall.h
+ M cstrike/core/spoofcall/virtualization/VirtualizerSDK64.h
+ M cstrike/core/stb.hh
+ M cstrike/core/variables.h
+ M cstrike/features.cpp
+ D cstrike/features.h
+ M cstrike/features/legit/legit.cpp
+ M cstrike/features/misc/movement.cpp
+ M cstrike/features/post_processing.hpp
+ M cstrike/features/rage/rage.cpp
+ M cstrike/features/skins/skin_changer.cpp
+ M cstrike/features/skins/skin_changer.hpp
+ M cstrike/features/visuals/chams.cpp
+ M cstrike/features/visuals/overlay.cpp
+ M cstrike/features/visuals/overlay.h
+ M cstrike/sdk/datatypes/K3V.cpp
+ M cstrike/sdk/datatypes/K3V.h
+ M cstrike/sdk/datatypes/buf/strtools.cpp
+ M cstrike/sdk/datatypes/buf/strtools.h
+ M cstrike/sdk/datatypes/buf/utlbuffer.cpp
+ M cstrike/sdk/datatypes/buf/utlbuffer.h
+ M cstrike/sdk/datatypes/cinterlockedint.hpp
+ M cstrike/sdk/datatypes/qangle.cpp
+ M cstrike/sdk/datatypes/qangle.h
+ M cstrike/sdk/datatypes/usercmd.h
+ M cstrike/sdk/datatypes/utlmemory.h
+ M cstrike/sdk/datatypes/vector.h
+ M cstrike/sdk/entity.cpp
+ M cstrike/sdk/entity.h
+ M cstrike/sdk/interfaces/igameresourceservice.h
+ M cstrike/sdk/interfaces/itrace.h
+ M cstrike/utilities/crt.h
+ M cstrike/utilities/detourhook.h
+ M cstrike/utilities/draw.cpp
+ M cstrike/utilities/draw.h
+ M cstrike/utilities/easing.h
+ M cstrike/utilities/inputsystem.cpp
+ M cstrike/utilities/inputsystem.h
+ M cstrike/utilities/log.cpp
+ M cstrike/utilities/log.h
+ M cstrike/utilities/math.h
+ M cstrike/utilities/memory.cpp
+ M cstrike/utilities/memory.h
+ M cstrike/utilities/notify.cpp
+ M cstrike/utilities/notify.h
+ M cstrike/utilities/pe64.h
+ M dependencies/imgui/imconfig.h
+ M dependencies/imgui/imgui.cpp
+ M dependencies/imgui/imgui.h
+ M dependencies/imgui/imgui_demo.cpp
+ M dependencies/imgui/imgui_draw.cpp
+ M dependencies/imgui/imgui_edited.cpp
+ M dependencies/imgui/imgui_edited.hpp
+ M dependencies/imgui/imgui_internal.h
+ M dependencies/imgui/imgui_settings.h
+ M dependencies/imgui/imgui_tables.cpp
+ M dependencies/imgui/imgui_widgets.cpp
+ M dependencies/minhook/minhook.h
+ M extensions/binary.h
+?? Makefile
+?? build-errors.txt
+?? cstrike/cheat_features.h
+?? dependencies/imgui/.editorconfig
+?? dependencies/imgui/.gitattributes
+?? dependencies/imgui/.github/
+?? dependencies/imgui/.gitignore
+?? dependencies/imgui/LICENSE.txt
+?? dependencies/imgui/backends/
+?? dependencies/imgui/docs/
+?? dependencies/imgui/examples/
+?? dependencies/imgui/imgui/
+?? dependencies/imgui/misc/
+?? inject.sh
+?? launch_preload.sh
+?? linux/
+?? recovery-status.txt
+?? vulkan_hook_disassembly.txt
+?? vulkan_readelf_symbols.txt
+?? vulkan_symbols.txt

@@ -1,6 +1,11 @@
 #pragma once
 
+#ifdef _WIN32
 #include <Windows.h>
+#else
+#include "../../../linux/linux_compat.h"
+#define PAGE_READWRITE (PROT_READ|PROT_WRITE)
+#endif
 #include <vector>
 #include <map>
 #include <unordered_map>
@@ -21,19 +26,21 @@
 #include <cmath>
 #include <fstream>
 #include <cassert>
+#ifdef _WIN32
 #include <process.h>
 #include <DbgHelp.h>
-#include <filesystem>
 #include <libloaderapi.h>
 #include <Psapi.h>
 #include <corecrt_math_defines.h>
+#include <TlHelp32.h>
+#endif
+#include <filesystem>
 #include <numbers>
 #include <iomanip>
 #include <iosfwd>
 #include <set>
 #include <unordered_set>
 #include <list>
-#include <TlHelp32.h>
 #include <cstring>
 class ShadowVMT
 {
@@ -47,11 +54,13 @@ public:
 	template<typename T>
 	void HookIndex(int index, T fun)
 	{
-		new_vftbl[index + 1] = reinterpret_cast<std::uintptr_t>(fun);
+		if (new_vftbl != nullptr && index >= 0 && static_cast<std::size_t>(index) < vftbl_len)
+			new_vftbl[index + 1] = reinterpret_cast<std::uintptr_t>(fun);
 	}
 	void UnhookIndex(int index)
 	{
-		new_vftbl[index] = old_vftbl[index];
+		if (new_vftbl != nullptr && old_vftbl != nullptr && index >= 0 && static_cast<std::size_t>(index) < vftbl_len)
+			new_vftbl[index + 1] = old_vftbl[index];
 	}
 	void UnhookAll()
 	{

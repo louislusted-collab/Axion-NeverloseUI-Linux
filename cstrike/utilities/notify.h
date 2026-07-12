@@ -45,7 +45,7 @@ namespace NOTIFY
 		NotificationData_t(ENotificationType nType, const char* szFormat, ...);
 
 		/// @return color of notification type
-		const Color_t& GetTypeColor() const;
+		Color_t GetTypeColor() const;
 		/// @return c-type string of notification text
 		const char* Data() const;
 		/// @return icon of notification type

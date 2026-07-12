@@ -4,6 +4,9 @@
 // used: [crt] isfinite, fmodf, sqrtf
 #include <cmath>
 #include <algorithm>
+#ifndef __forceinline
+#define __forceinline __attribute__((always_inline)) inline
+#endif
 
 // forward declarations
 struct QAngle_t;
@@ -52,6 +55,7 @@ struct Vector_t
 
 	constexpr Vector_t(const Vector2D_t& vecBase2D) :
 		x(vecBase2D.x), y(vecBase2D.y) { }
+	constexpr Vector_t(const Vector_t&) = default;
 
 #pragma region vector_array_operators
 
@@ -188,12 +192,12 @@ struct Vector_t
 
 #pragma region vector_arithmetic_ternary_operators
 
-	Vector_t operator+(const Vector_t& vecAdd) const
+	constexpr Vector_t operator+(const Vector_t& vecAdd) const
 	{
 		return { this->x + vecAdd.x, this->y + vecAdd.y, this->z + vecAdd.z };
 	}
 
-	Vector_t operator-(const Vector_t& vecSubtract) const
+	constexpr Vector_t operator-(const Vector_t& vecSubtract) const
 	{
 		return { this->x - vecSubtract.x, this->y - vecSubtract.y, this->z - vecSubtract.z };
 	}
@@ -360,14 +364,14 @@ struct Vector_t
 		vecOut.NormalizeInPlace();
 		return vecOut;
 	}
-	[[nodiscarrd]] inline float Dot(const Vector_t& vOther) const
+	[[nodiscard]] inline float Dot(const Vector_t& vOther) const
 	{
 		const Vector_t& a = *this;
 
 		return (a.x * vOther.x + a.y * vOther.y + a.z * vOther.z);
 	}
 
-	[[nodiscarrd]] inline float Dot(const float* fOther) const
+	[[nodiscard]] inline float Dot(const float* fOther) const
 	{
 		const Vector_t& a = *this;
 
@@ -476,5 +480,4 @@ struct alignas(16) VectorAligned_t : Vector_t
 };
 
 static_assert(alignof(VectorAligned_t) == 16);
-
 

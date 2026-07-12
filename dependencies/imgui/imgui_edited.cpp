@@ -1,10 +1,20 @@
 #include "imgui_edited.hpp"
 #include <vector>
+#include <cstdio>
+#include <cstring>
 
 using namespace ImGui;
 
 namespace edited
 {
+
+    // Preserve the original widget palette while making its alpha helper
+    // independent of the removed Windows renderer extensions.
+    static ImU32 VGetColorU32(ImVec4 color, float alpha)
+    {
+        color.w *= alpha > 1.f ? alpha / 255.f : alpha;
+        return ImGui::GetColorU32(color);
+    }
 
     const char* keys[] =
     {
@@ -180,6 +190,8 @@ namespace edited
 
     void RenderTextColor(ImFont* font, const ImVec2& p_min, const ImVec2& p_max, ImU32 col, const char* text, const ImVec2& align)
     {
+        if (font == nullptr)
+            font = ImGui::GetFont();
         PushFont(font);
         PushStyleColor(ImGuiCol_Text, col);
         RenderTextClipped(p_min, p_max, text, NULL, NULL, align, NULL);
@@ -223,15 +235,15 @@ namespace edited
         active_key += keys[*key];
 
         if (*key != 0 && g.ActiveId != id) {
-            strcpy_s(buf_display, active_key.c_str());
+            std::snprintf(buf_display, sizeof(buf_display), "%s", active_key.c_str());
         }
         else if (g.ActiveId == id) {
-            strcpy_s(buf_display, "...");
+            std::snprintf(buf_display, sizeof(buf_display), "%s", "...");
         }
 
         const ImVec2 label_size = CalcTextSize(buf_display, NULL, true);
 
-        bool hovered = ItemHoverable(rect, id, NULL);
+        bool hovered = ItemHoverable(rect, id);
 
         static std::map<ImGuiID, key_state> anim;
         auto it_anim = anim.find(id);
@@ -345,7 +357,7 @@ namespace edited
         ItemSize(size, 0.f);
         if (!ItemAdd(bb, id)) return false;
 
-        bool hovered, held, pressed = ButtonBehavior(bb, id, &hovered, &held, NULL);
+        bool hovered, held, pressed = ButtonBehavior(bb, id, &hovered, &held, 0);
         if (IsItemClicked())
         {
             *v = !(*v);
@@ -372,7 +384,7 @@ namespace edited
         float bg_alpha;
     };
 
-    bool edited::Tab(bool selected, const char* icon, const char* label, const char* description, const ImVec2& size_arg)
+    bool Tab(bool selected, const char* icon, const char* label, const char* description, const ImVec2& size_arg)
     {
         ImGuiWindow* window = GetCurrentWindow();
 
@@ -390,7 +402,7 @@ namespace edited
         ItemSize(size, 0.f);
         if (!ItemAdd(bb, id)) return false;
 
-        bool hovered, held, pressed = ButtonBehavior(bb, id, &hovered, &held, NULL);
+        bool hovered, held, pressed = ButtonBehavior(bb, id, &hovered, &held, 0);
 
         static std::map<ImGuiID, tab_state> anim;
         tab_state& state = anim[id];
@@ -412,136 +424,33 @@ namespace edited
         return pressed;
     }
 
-    bool edited::BeginChild(const char* str_id, const ImVec2& size_arg, ImGuiChildFlags child_flags, ImGuiWindowFlags window_flags)
+    bool BeginChild(const char* str_id, const ImVec2& size_arg, ImGuiChildFlags child_flags, ImGuiWindowFlags window_flags)
     {
-        ImGuiID id = GetCurrentWindow()->GetID(str_id);
-
         PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10 * dpi, 10 * dpi));
         PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10 * dpi, 10 * dpi));
-
-        return edited::BeginChildEx(str_id, id, size_arg * dpi, child_flags, window_flags | ImGuiWindowFlags_AlwaysUseWindowPadding);
+        return ImGui::BeginChild(str_id, size_arg * dpi, child_flags != 0,
+                                 window_flags | ImGuiWindowFlags_AlwaysUseWindowPadding);
     }
 
-    bool edited::BeginChild(ImGuiID id, const ImVec2& size_arg, ImGuiChildFlags child_flags, ImGuiWindowFlags window_flags)
+    bool BeginChild(ImGuiID id, const ImVec2& size_arg, ImGuiChildFlags child_flags, ImGuiWindowFlags window_flags)
     {
-        return edited::BeginChildEx(NULL, id, size_arg, child_flags, window_flags);
+        PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10 * dpi, 10 * dpi));
+        PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10 * dpi, 10 * dpi));
+        return ImGui::BeginChild(id, size_arg * dpi, child_flags != 0,
+                                 window_flags | ImGuiWindowFlags_AlwaysUseWindowPadding);
     }
 
-    bool edited::BeginChildEx(const char* name, ImGuiID id, const ImVec2& size_arg, ImGuiChildFlags child_flags, ImGuiWindowFlags window_flags)
+    bool BeginChildEx(const char* name, ImGuiID id, const ImVec2& size_arg, ImGuiChildFlags child_flags, ImGuiWindowFlags window_flags)
     {
-        ImGuiContext& g = *GImGui;
-        ImGuiWindow* parent_window = g.CurrentWindow;
-        IM_ASSERT(id != 0);
-
-        const ImGuiChildFlags ImGuiChildFlags_SupportedMask_ = ImGuiChildFlags_Border | ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_ResizeX | ImGuiChildFlags_ResizeY | ImGuiChildFlags_AutoResizeX | ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysAutoResize | ImGuiChildFlags_FrameStyle;
-        IM_UNUSED(ImGuiChildFlags_SupportedMask_);
-        IM_ASSERT((child_flags & ~ImGuiChildFlags_SupportedMask_) == 0 && "Illegal ImGuiChildFlags value. Did you pass ImGuiWindowFlags values instead of ImGuiChildFlags?");
-        IM_ASSERT((window_flags & ImGuiWindowFlags_AlwaysAutoResize) == 0 && "Cannot specify ImGuiWindowFlags_AlwaysAutoResize for BeginChild(). Use ImGuiChildFlags_AlwaysAutoResize!");
-        if (child_flags & ImGuiChildFlags_AlwaysAutoResize)
-        {
-            IM_ASSERT((child_flags & (ImGuiChildFlags_ResizeX | ImGuiChildFlags_ResizeY)) == 0 && "Cannot use ImGuiChildFlags_ResizeX or ImGuiChildFlags_ResizeY with ImGuiChildFlags_AlwaysAutoResize!");
-            IM_ASSERT((child_flags & (ImGuiChildFlags_AutoResizeX | ImGuiChildFlags_AutoResizeY)) != 0 && "Must use ImGuiChildFlags_AutoResizeX or ImGuiChildFlags_AutoResizeY with ImGuiChildFlags_AlwaysAutoResize!");
-        }
-#ifndef IMGUI_DISABLE_OBSOLETE_FUNCTIONS
-        if (window_flags & ImGuiWindowFlags_AlwaysUseWindowPadding) child_flags |= ImGuiChildFlags_AlwaysUseWindowPadding;
-#endif
-        if (child_flags & ImGuiChildFlags_AutoResizeX) child_flags &= ~ImGuiChildFlags_ResizeX;
-        if (child_flags & ImGuiChildFlags_AutoResizeY) child_flags &= ~ImGuiChildFlags_ResizeY;
-
-        window_flags |= ImGuiWindowFlags_ChildWindow | ImGuiWindowFlags_NoTitleBar;
-        window_flags |= (parent_window->Flags & ImGuiWindowFlags_NoMove);
-        if (child_flags & (ImGuiChildFlags_AutoResizeX | ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_AlwaysAutoResize)) window_flags |= ImGuiWindowFlags_AlwaysAutoResize;
-        if ((child_flags & (ImGuiChildFlags_ResizeX | ImGuiChildFlags_ResizeY)) == 0) window_flags |= ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings;
-
-        if (child_flags & ImGuiChildFlags_FrameStyle)
-        {
-            PushStyleColor(ImGuiCol_ChildBg, g.Style.Colors[ImGuiCol_FrameBg]);
-            PushStyleVar(ImGuiStyleVar_ChildRounding, g.Style.FrameRounding);
-            PushStyleVar(ImGuiStyleVar_ChildBorderSize, g.Style.FrameBorderSize);
-            PushStyleVar(ImGuiStyleVar_WindowPadding, g.Style.FramePadding);
-            child_flags |= ImGuiChildFlags_Border | ImGuiChildFlags_AlwaysUseWindowPadding;
-            window_flags |= ImGuiWindowFlags_NoMove;
-        }
-
-        g.NextWindowData.Flags |= ImGuiNextWindowDataFlags_HasChildFlags;
-        g.NextWindowData.ChildFlags = child_flags;
-
-        const ImVec2 size_avail = GetContentRegionAvail();
-        const ImVec2 size_default((child_flags & ImGuiChildFlags_AutoResizeX) ? 0.0f : size_avail.x, (child_flags & ImGuiChildFlags_AutoResizeY) ? 0.0f : size_avail.y);
-        const ImVec2 size = CalcItemSize(size_arg, size_default.x, size_default.y);
-        SetNextWindowSize(size * dpi);
-
-   //     GetWindowDrawList()->AddRect(parent_window->DC.CursorPos, parent_window->DC.CursorPos + size_arg, GetColorU32(c::accent), 0);
-
-        const char* temp_window_name;
-
-        if (name)
-            ImFormatStringToTempBuffer(&temp_window_name, NULL, "%s/%s_%08X", parent_window->Name, name, id);
-        else
-            ImFormatStringToTempBuffer(&temp_window_name, NULL, "%s/%08X", parent_window->Name, id);
-
-        const float backup_border_size = g.Style.ChildBorderSize;
-        if ((child_flags & ImGuiChildFlags_Border) == 0) g.Style.ChildBorderSize = 0.0f;
-
-        const bool ret = Begin(temp_window_name, NULL, window_flags);
-
-        g.Style.ChildBorderSize = backup_border_size;
-        if (child_flags & ImGuiChildFlags_FrameStyle)
-        {
-            PopStyleVar(3);
-            PopStyleColor();
-        }
-
-        ImGuiWindow* child_window = g.CurrentWindow;
-        child_window->ChildId = id;
-
-        if (child_window->BeginCount == 1) parent_window->DC.CursorPos = child_window->Pos;
-
-        const ImGuiID temp_id_for_activation = ImHashStr("##Child", 0, id);
-        if (g.ActiveId == temp_id_for_activation) ClearActiveID();
-        if (g.NavActivateId == id && !(window_flags & ImGuiWindowFlags_NavFlattened) && (child_window->DC.NavLayersActiveMask != 0 || child_window->DC.NavWindowHasScrollY))
-        {
-            FocusWindow(child_window);
-            NavInitWindow(child_window, false);
-            SetActiveID(temp_id_for_activation, child_window);
-            g.ActiveIdSource = g.NavInputSource;
-        }
-        return ret;
+        if (name != nullptr)
+            return BeginChild(name, size_arg, child_flags, window_flags);
+        return BeginChild(id, size_arg, child_flags, window_flags);
     }
 
-    void edited::EndChild()
+    void EndChild()
     {
-        ImGuiContext& g = *GImGui;
-        ImGuiWindow* child_window = g.CurrentWindow;
+        ImGui::EndChild();
         PopStyleVar(2);
-        IM_ASSERT(g.WithinEndChild == false);
-        IM_ASSERT(child_window->Flags & ImGuiWindowFlags_ChildWindow);
-
-        g.WithinEndChild = true;
-        ImVec2 child_size = child_window->Size;
-        End();
-        if (child_window->BeginCount == 1)
-        {
-            ImGuiWindow* parent_window = g.CurrentWindow;
-            ImRect bb(parent_window->DC.CursorPos, parent_window->DC.CursorPos + child_size);
-            ItemSize(child_size);
-            if ((child_window->DC.NavLayersActiveMask != 0 || child_window->DC.NavWindowHasScrollY) && !(child_window->Flags & ImGuiWindowFlags_NavFlattened))
-            {
-                ItemAdd(bb, child_window->ChildId);
-                RenderNavHighlight(bb, child_window->ChildId);
-
-                if (child_window->DC.NavLayersActiveMask == 0 && child_window == g.NavWindow) RenderNavHighlight(ImRect(bb.Min - ImVec2(2, 2), bb.Max + ImVec2(2, 2)), g.NavId, ImGuiNavHighlightFlags_TypeThin);
-            }
-            else
-            {
-                ItemAdd(bb, 0);
-
-                if (child_window->Flags & ImGuiWindowFlags_NavFlattened) parent_window->DC.NavLayersActiveMaskNext |= child_window->DC.NavLayersActiveMaskNext;
-            }
-            if (g.HoveredWindow == child_window) g.LastItemData.StatusFlags |= ImGuiItemStatusFlags_HoveredWindow;
-        }
-        g.WithinEndChild = false;
-        g.LogLinePosY = -FLT_MAX;
     }
 
     struct check_state
@@ -550,7 +459,7 @@ namespace edited
         float alpha, mark_pos;
     };
 
-    bool edited::Checkbox(const char* label, const char* description, bool* v)
+    bool Checkbox(const char* label, const char* description, bool* v)
     {
         ImGuiWindow* window = GetCurrentWindow();
         if (window->SkipItems) return false;
@@ -604,7 +513,7 @@ namespace edited
     }
 
 
-    bool edited::Button(const char* label, const ImVec2& size_arg, ImGuiButtonFlags flags)
+    bool Button(const char* label, const ImVec2& size_arg, ImGuiButtonFlags flags)
     {
         ImGuiWindow* window = GetCurrentWindow();
         if (window->SkipItems)
@@ -674,7 +583,7 @@ namespace edited
 
         if (format == NULL) format = DataTypeGetInfo(data_type)->PrintFmt;
 
-        bool hovered = ItemHoverable(frame_bb, id, g.LastItemData.InFlags), held, pressed = ButtonBehavior(frame_bb, id, &hovered, &held, NULL);
+        bool hovered = ItemHoverable(frame_bb, id), held, pressed = ButtonBehavior(frame_bb, id, &hovered, &held, 0);
         bool temp_input_is_active = temp_input_allowed && TempInputIsActive(id);
 
         static std::map<ImGuiID, slider_state> anim;
@@ -900,7 +809,7 @@ namespace edited
         }
 
         bool bValueChanged = false;
-        if (BeginCombo(szLabel, "", strBuffer.c_str(), nItemsCount, NULL, NULL))
+        if (BeginCombo(szLabel, "", strBuffer.c_str(), nItemsCount, false, 0))
         {
             for (int i = 0; i < nItemsCount; i++)
             {
@@ -994,7 +903,7 @@ namespace edited
         if (popup_max_height_in_items != -1 && !(g.NextWindowData.Flags & ImGuiNextWindowDataFlags_HasSizeConstraint))
             SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(FLT_MAX, CalcMaxPopupHeightFromItemCount(popup_max_height_in_items)));
 
-        if (!BeginCombo(label, description, preview_value, items_count, ImGuiComboFlags_None, NULL)) return false;
+        if (!BeginCombo(label, description, preview_value, items_count, false, ImGuiComboFlags_None)) return false;
 
         bool value_changed = false;
         PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(15, 15));
@@ -1117,7 +1026,8 @@ namespace edited
         if (flags & ImGuiSelectableFlags_SelectOnClick) { button_flags |= ImGuiButtonFlags_PressedOnClick; }
         if (flags & ImGuiSelectableFlags_SelectOnRelease) { button_flags |= ImGuiButtonFlags_PressedOnRelease; }
         if (flags & ImGuiSelectableFlags_AllowDoubleClick) { button_flags |= ImGuiButtonFlags_PressedOnClickRelease | ImGuiButtonFlags_PressedOnDoubleClick; }
-        if ((flags & ImGuiSelectableFlags_AllowOverlap) || (g.LastItemData.InFlags & ImGuiItemFlags_AllowOverlap)) { button_flags |= ImGuiButtonFlags_AllowOverlap; }
+        if (flags & ImGuiSelectableFlags_AllowItemOverlap)
+            button_flags |= ImGuiButtonFlags_AllowItemOverlap;
 
         const bool was_selected = selected;
         bool hovered, held, pressed = ButtonBehavior(bb, id, &hovered, &held, button_flags);
@@ -1377,7 +1287,7 @@ namespace edited
             return false;
         }
 
-        const bool hovered = ItemHoverable(slider_bb, id, g.LastItemData.InFlags);
+        const bool hovered = ItemHoverable(slider_bb, id);
 
         if (hovered) SetHoveredID(id);
 
@@ -1497,6 +1407,7 @@ namespace edited
 
         RenderTextColor(font::lexend_bold, rect.Min + ImVec2(0, 7), rect.Max - ImVec2(15, 10), GetColorU32(c::elements::text_active), label_x.c_str(), ImVec2(1.0, 0.0f));
 
+        return value_changed0 || value_changed1;
     }
 
     bool QuandFloat(const char* label, const char* description, float* v0, float* v1, float v_min0, float v_max0, float v_min1, float v_max1, const char* format0, const char* format1, ImGuiSliderFlags flags)
@@ -1508,7 +1419,7 @@ namespace edited
     {
         return QuandScalar(label, description, ImGuiDataType_S32, v0, v1, &v_min0, &v_max0, &v_min1, &v_max1, format0, format1, flags);
     }
-    bool edited::pointbox(const char* label, bool* v, int type, float x, float y)
+    bool pointbox(const char* label, bool* v, int type, float x, float y)
     {
         ImGuiWindow* window = GetCurrentWindow();
         if (window->SkipItems)
@@ -1593,7 +1504,7 @@ namespace edited
 
         float shadow_thickness = 32.f; // Adjust shadow thickness as needed
         ImVec2 shadow_offset = ImVec2(0, 0); // Adjust shadow offset as needed
-        window->DrawList->AddShadowCircle(center, radius, shadow_col, shadow_thickness, shadow_offset, 0, 12);
+        window->DrawList->AddCircleFilled(center + shadow_offset, radius + 3.f, shadow_col, 12);
         window->DrawList->AddCircleFilled(center, radius, circle_col, 12);
 
         // Draw the checkbox frames and checkmark
@@ -1611,7 +1522,7 @@ namespace edited
 
         return pressed;
     }
-    bool edited::SmallCheckbox(const char* label, bool* v, int type)
+    bool SmallCheckbox(const char* label, bool* v, int type)
     {
         ImGuiWindow* window = GetCurrentWindow();
         if (window->SkipItems)
@@ -1737,7 +1648,7 @@ namespace edited
         ItemSize(rect, 0.f);
         if (!ItemAdd(rect, id)) return false;
 
-        bool hovered, held, pressed = ButtonBehavior(rect, id, &hovered, &held, NULL);
+        bool hovered, held, pressed = ButtonBehavior(rect, id, &hovered, &held, 0);
 
         static std::map<ImGuiID, iconbox_state> anim;
         iconbox_state& state = anim[id];
@@ -1766,13 +1677,13 @@ namespace edited
         ItemSize(rect, 0.f);
         if (!ItemAdd(rect, id)) return false;
 
-        bool hovered, held, pressed = ButtonBehavior(rect, id, &hovered, &held, NULL);
+        bool hovered, held, pressed = ButtonBehavior(rect, id, &hovered, &held, 0);
 
         static std::map<ImGuiID, iconbox_state> anim;
         iconbox_state& state = anim[id];
 
         GetWindowDrawList()->AddCircleFilled(rect.Min + ImVec2(size / 2), size.x / 2, GetColorU32(color_bg), 30.f);
-        GetWindowDrawList()->AddShadowCircle(rect.Min + ImVec2(size / 2), size.x / 2, GetColorU32(color_bg), 18.f, ImVec2(0, 0), 30.f);
+        GetWindowDrawList()->AddCircle(rect.Min + ImVec2(size / 2), size.x / 2 + 2.f, GetColorU32(color_bg), 30, 2.f);
 
         GetWindowDrawList()->AddCircle(rect.Min + ImVec2(size / 2), size.x / 3, VGetColorU32(c::elements::background, 0.3f), 30.f, 3.f);
 
@@ -1912,7 +1823,7 @@ namespace edited
 
             if (!(flags & ImGuiColorEditFlags_NoOptions)) OpenPopupOnItemClick("context", ImGuiPopupFlags_MouseButtonRight);
 
-            if (ItemHoverable(g.LastItemData.Rect, g.LastItemData.ID, NULL) && g.IO.MouseClicked[0] || state.active && !search_col && g.IO.MouseClicked[0] && !state.hovered)
+            if (ItemHoverable(g.LastItemData.Rect, g.LastItemData.ID) && g.IO.MouseClicked[0] || state.active && !search_col && g.IO.MouseClicked[0] && !state.hovered)
                 state.active = !state.active;
 
             state.alpha_search = ImLerp(state.alpha_search, search_col ? 1.f : 0.f, g.IO.DeltaTime * 6.f);
@@ -1924,9 +1835,6 @@ namespace edited
             PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(15, 15));
             PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.f);
 
-            POINT cursorPos;
-            COLORREF color;
-
             if (state.active)
             {
                 SetNextWindowPos(g.LastItemData.Rect.GetTR() + ImVec2(-45, -5));
@@ -1937,10 +1845,11 @@ namespace edited
 
                     ImVec4 col_v4(col[0], col[1], col[2], (flags & ImGuiColorEditFlags_NoAlpha) ? 1.0f : col[3]);
 
+#ifdef _WIN32
+                    POINT cursorPos;
                     GetCursorPos(&cursorPos);
                     HDC hdc = GetDC(NULL);
-                    color = GetPixel(hdc, cursorPos.x, cursorPos.y);
-
+                    COLORREF color = GetPixel(hdc, cursorPos.x, cursorPos.y);
                     if (search_col)
                     {
 
@@ -1956,6 +1865,11 @@ namespace edited
 
                         }
                     }
+#else
+                    // Desktop pixel sampling is a Win32-only convenience. The
+                    // actual Neverlose color picker remains fully functional.
+                    search_col = false;
+#endif
 
                     if (alpha)
                         ImFormatString(buf, IM_ARRAYSIZE(buf), "#%02X%02X%02X%02X", ImClamp(i[0], 0, 255), ImClamp(i[1], 0, 255), ImClamp(i[2], 0, 255), ImClamp(i[3], 0, 255));
@@ -2365,7 +2279,7 @@ namespace edited
 
         PushFont(font::lexend_bold);
 
-        if (*esp_box)  GetWindowDrawList()->AddRect(box.Min, box.Max, GetColorU32(state.box_color), 0.f, NULL, 2.f);
+        if (*esp_box)  GetWindowDrawList()->AddRect(box.Min, box.Max, GetColorU32(state.box_color), 0.f, 0, 2.f);
 
         if (*nickname) GetWindowDrawList()->AddText(pos + ImVec2((width - CalcTextSize("Nickname").x) / 2, 0), GetColorU32(state.nick_color), "Nickname");
 

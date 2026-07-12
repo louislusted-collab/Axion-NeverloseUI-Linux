@@ -1,10 +1,15 @@
 #pragma once
 // used: [win] winapi
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#else
+#include "../../linux/linux_compat.h"
+#endif
 
+#ifdef _WIN32
 #pragma region winapi_nt_types
 using NTSTATUS = LONG;
 using MEMORY_INFORMATION_CLASS = INT;
@@ -589,4 +594,6 @@ struct _TEB
 };
 
 static_assert(sizeof(_TEB) == 0x1850);
+
+#endif // _WIN32
 #pragma endregion

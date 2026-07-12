@@ -1,7 +1,9 @@
 #pragma once
 
 #include "../common.h"
+#ifdef _WIN32
 #include <d3d11.h>
+#endif
 #include "../utilities/memory.h"
 #pragma region sdk_definitons
 #define GAME_RESOURCE_SERVICE_CLIENT CS_XOR("GameResourceServiceClientV00")
@@ -64,17 +66,18 @@ namespace I
 	bool Setup();
 
 	/* @section: helpers */
-	// create and destroy render target view for handling resize
+#ifdef _WIN32
 	bool CreateRenderTarget(IDXGISwapChain* pSwapChain);
 	void DestroyRenderTarget();
 	inline ID3D11ShaderResourceView* Maintexture = nullptr;
-	inline IGameEventManager2* GameEvent = nullptr;
-	inline i_trace* Trace = nullptr;
-	inline IMemAlloc* MemAlloc = nullptr;
 	inline ISwapChainDx11* SwapChain = nullptr;
 	inline ID3D11Device* Device = nullptr;
 	inline ID3D11DeviceContext* DeviceContext = nullptr;
 	inline ID3D11RenderTargetView* RenderTargetView = nullptr;
+#endif
+	inline IGameEventManager2* GameEvent = nullptr;
+	inline i_trace* Trace = nullptr;
+	inline IMemAlloc* MemAlloc = nullptr;
 	inline CCSGOInput* Input = nullptr;
 	inline ISchemaSystem* SchemaSystem = nullptr;
 	inline IGlobalVars* GlobalVars = nullptr;

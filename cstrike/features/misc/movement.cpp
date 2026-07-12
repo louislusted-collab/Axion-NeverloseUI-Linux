@@ -25,7 +25,7 @@ struct MovementData {
 
 } _move_data;
 
-enum DIR : int {
+enum MOVE_DIR : int {
 	FORWARDS = 0,
 	BACKWARDS = 180,
 	LEFT = 90,

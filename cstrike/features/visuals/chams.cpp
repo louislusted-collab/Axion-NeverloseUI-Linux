@@ -347,6 +347,12 @@ material2_t* create_material_illum_invisible(const char* m_name) {
 }
 // other functions.
 bool ams::chams_t::initialize() {
+#ifdef __linux__
+	// On Linux: skip chams material creation - CreateMaterial uses pattern-scanned
+	// Windows functions (fnCreateMaterial, load_key_value) that don't exist on Linux.
+	// Chams will be disabled on Linux for now.
+	return true;
+#else
 	// first we have to check if this shit is alr initialized
 	if (this->m_initialized) {
 		return this->m_initialized;
@@ -379,6 +385,7 @@ bool ams::chams_t::initialize() {
 
 	// finish and return value
 	return this->m_initialized;
+#endif
 }
 
 void ams::chams_t::destroy() {
@@ -454,6 +461,11 @@ bool ams::chams_t::draw_object(void* animatable_object, void* dx11, material_dat
 
 material2_t* ams::chams_t::CreateMaterial(const char* szName, const char* szMaterialVMAT, const char* szShaderType, bool bBlendMode, bool bTranslucent, bool bDisableZBuffering)
 {
+#ifdef __linux__
+	// On Linux: CreateMaterial crashes because MaterialSystem2 functions
+	// (find_or_create_from_resource, create_material) may not work the same way
+	return nullptr;
+#else
 	material_data_t* pData = reinterpret_cast<material_data_t*>(static_cast<std::byte*>(MEM_STACKALLOC(0x200)) + 0x50);
 	material2_t** pMatPrototype;
 
@@ -474,6 +486,7 @@ material2_t* ams::chams_t::CreateMaterial(const char* szName, const char* szMate
 	return *pMaterial;
 #endif
 	return *pMatPrototype;
+#endif
 }
 
 bool ams::chams_t::override_material(void* animatable_object, void* dx11, material_data_t* arr_material_data, int data_count,

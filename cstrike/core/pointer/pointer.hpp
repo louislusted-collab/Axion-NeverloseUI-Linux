@@ -1,6 +1,8 @@
 #pragma once
 #include <cstdint>
 #include <type_traits>
+#include <functional>
+#include <utility>
 class CPointer {
    public:
     CPointer() { m_Value = 0; }

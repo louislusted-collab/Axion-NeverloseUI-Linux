@@ -53,13 +53,20 @@
 #include "../sdk/interfaces/ienginecvar.h"
 #include "../cstrike/features/rage/rage.h"
 #include "spoofcall/virtualization/VirtualizerSDK64.h"
+#ifdef _WIN32
 #include <dxgi.h>
 #include <d3d11.h>
+#else
+#include "../linux/vulkan_hook.h"
+#endif
 #define SDK_SIG(sig) stb::simple_conversion::build<stb::fixed_string{sig}>::value
+#define MEMORY_VARIABLE(var) var, "H::" #var
+
+#ifdef _WIN32
 IDXGIDevice* pDXGIDevice = NULL;
 IDXGIAdapter* pDXGIAdapter = NULL;
 IDXGIFactory* pIDXGIFactory = NULL;
-#define MEMORY_VARIABLE(var) var, "H::" #var
+#endif
 
 namespace sigs {
 	
@@ -89,15 +96,29 @@ namespace sigs {
 
 bool H::Setup()
 {
+	static FILE* hook_log = fopen("/tmp/cs2_hook_debug.log", "a");
+	auto HLOG = [&](const char* fmt, ...) {
+		va_list args;
+		va_start(args, fmt);
+		vfprintf(hook_log, fmt, args);
+		va_end(args);
+		fflush(hook_log);
+	};
+
+	HLOG("[H::Setup] entered\n");
+
 	VIRTUALIZER_MUTATE_ONLY_START;
 	if (MH_Initialize() != MH_OK)
 	{
 		L_PRINT(LOG_ERROR) << CS_XOR("failed to initialize minhook");
-
+		HLOG("[H::Setup] MH_Initialize FAILED\n");
 		return false;
 	}
+	HLOG("[H::Setup] MH_Initialize OK\n");
 	L_PRINT(LOG_INFO) << CS_XOR("Initializing ShadowVMT & SilentInlineHoooking");
 
+#ifndef __linux__
+	// ... Windows swapchain hooking ...
 	SilenthkPresent.Setup(I::SwapChain->pDXGISwapChain);
 	SilenthkPresent.HookIndex((int)VTABLE::D3D::PRESENT, Present);
 	SilenthkPresent.HookIndex((int)VTABLE::D3D::RESIZEBUFFERS, ResizeBuffers);
@@ -109,96 +130,208 @@ bool H::Setup()
 	Silentdxgi.Setup(pIDXGIFactory);
 	Silentdxgi.HookIndex((int)VTABLE::DXGI::CREATESWAPCHAIN, CreateSwapChain);
 
+	if (pDXGIDevice) { pDXGIDevice->Release(); pDXGIDevice = nullptr; }
+	if (pDXGIAdapter) { pDXGIAdapter->Release(); pDXGIAdapter = nullptr; }
+	if (pIDXGIFactory) { pIDXGIFactory->Release(); pIDXGIFactory = nullptr; }
+#else
+	InstallVulkanHook();
+	L_PRINT(LOG_INFO) << CS_XOR("[Linux] Installed Vulkan hooks");
+	HLOG("[H::Setup] InstallVulkanHook OK\n");
+	HLOG("[H::Setup] Native Linux menu-only mode; skipping Windows gameplay hooks\n");
+	HLOG("[H::Setup] returning true\n");
+	return true;
 
-	if (pDXGIDevice) {
-		pDXGIDevice->Release();
-		pDXGIDevice = nullptr;
-	}
+#endif
 
-	if (pDXGIAdapter) {
-		pDXGIAdapter->Release();
-		pDXGIAdapter = nullptr;
-	}
+	HLOG("[H::Setup] Starting MEM::FindPatterns...\n");
 
-	if (pIDXGIFactory) {
-		pIDXGIFactory->Release();
-		pIDXGIFactory = nullptr;
-	}
-
-	//	fnGetClientSystem = reinterpret_cast<CGCClientSystem*>(MEM::ResolveRelativeAddress(MEM::FindPattern(CLIENT_DLL, CS_XOR("E8 ? ? ? ? 48 8B 4F 10 8B 1D ? ? ? ?")), 0x1, 0x0));
-	//	L_PRINT(LOG_INFO) << CS_XOR("captured fnGetClientSystem \"") << CS_XOR("\" interface at address: ") << L::AddFlags(LOG_MODE_INT_SHOWBASE | LOG_MODE_INT_FORMAT_HEX) << reinterpret_cast<std::uintptr_t>(fnGetClientSystem);
-
+	HLOG("[H::Setup]   fnGetClientSystem...\n");
 	MEM::FindPatterns(CLIENT_DLL, CS_XOR("E8 ? ? ? ? 48 8B 4F 10 8B 1D ? ? ? ?")).ToAbsolute(1, 0).Get(MEMORY_VARIABLE(fnGetClientSystem));
+	HLOG("[H::Setup]   fnGetClientSystem OK\n");
+
+	HLOG("[H::Setup]   fnCreateSharedObjectSubclassEconItem...\n");
 	MEM::FindPatterns(CLIENT_DLL, CS_XOR("48 83 EC 28 B9 ? ? ? ? E8 ? ? ? ? 48 85 C0 74 3A 48 8D 0D ? ? ? ? C7 40 ? ? ? ? ?")).Get(MEMORY_VARIABLE(fnCreateSharedObjectSubclassEconItem));
+	HLOG("[H::Setup]   fnCreateSharedObjectSubclassEconItem OK\n");
+
+	HLOG("[H::Setup]   fnSetDynamicAttributeValueUint...\n");
 	MEM::FindPatterns(CLIENT_DLL, CS_XOR("E9 ? ? ? ? CC CC CC CC CC CC CC CC CC CC CC CC CC CC CC 49 8B C0 48")).ToAbsolute(1, 0).Get(MEMORY_VARIABLE(fnSetDynamicAttributeValueUint));
+	HLOG("[H::Setup]   fnSetDynamicAttributeValueUint OK\n");
+
+	HLOG("[H::Setup]   fnGetInventoryManager...\n");
 	MEM::FindPatterns(CLIENT_DLL, CS_XOR("E8 ? ? ? ? 48 63 BB ? ? ? ? 48 8D 68 28 83 FF FF")).ToAbsolute(1, 0).Get(MEMORY_VARIABLE(fnGetInventoryManager));
+	HLOG("[H::Setup]   fnGetInventoryManager OK\n");
+
+	HLOG("[H::Setup]   SetMeshGroupMask...\n");
 	MEM::FindPatterns(CLIENT_DLL, CS_XOR("48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 48 8D 99 60")).Get(MEMORY_VARIABLE(SetMeshGroupMask));
+	HLOG("[H::Setup]   SetMeshGroupMask OK\n");
+
+	HLOG("[H::Setup]   fnFindMaterialIndex...\n");
 	MEM::FindPatterns(CLIENT_DLL, CS_XOR("48 89 5C 24 10 48 89 6C 24 18 56 57 41 57 48 83 EC 20 83 79 10 00 49 8B F1 41 8B E8 4C 8B FA 48 8B D9 74 72 44 8B 49 14 48 8B 39 41 FF C9 45 8B D9 45 23 D8 41")).Get(MEMORY_VARIABLE(fnFindMaterialIndex));
+	HLOG("[H::Setup]   fnFindMaterialIndex OK\n");
 
-	SilentEntitySystem.Setup(I::GameResourceService->pGameEntitySystem);
-	SilentEntitySystem.HookIndex(14, OnAddEntity);
-	SilentEntitySystem.HookIndex(15, OnRemoveEntity);
+	HLOG("[H::Setup] SilentEntitySystem.Setup...\n");
+	void* pEntitySystem = reinterpret_cast<void*>(I::GameResourceService->pGameEntitySystem);
+	HLOG("[H::Setup]   pGameEntitySystem = %p\n", pEntitySystem);
+	if (pEntitySystem != nullptr) {
+		SilentEntitySystem.Setup(pEntitySystem);
+		SilentEntitySystem.HookIndex(14, OnAddEntity);
+		SilentEntitySystem.HookIndex(15, OnRemoveEntity);
+		HLOG("[H::Setup] SilentEntitySystem OK\n");
+	} else {
+		L_PRINT(LOG_WARNING) << CS_XOR("I::GameResourceService->pGameEntitySystem is null, skipping entity hooks");
+		HLOG("[H::Setup]   pGameEntitySystem is NULL!\n");
+	}
+	HLOG("[H::Setup] SilentEntitySystem OK\n");
 
-	SilentInput.Setup(I::Input);
-	SilentInput.HookIndex((int)VTABLE::CLIENT::MOUSEINPUTENABLED, MouseInputEnabled);
-	SilentInput.HookIndex((int)VTABLE::CLIENT::CREATEMOVE, CreateMove);
+	HLOG("[H::Setup] SilentInput.Setup...\n");
+	HLOG("[H::Setup]   I::Input = %p\n", I::Input);
+	bool bInputVtableValid = false;
+	if (I::Input != nullptr) {
+		// ShadowVMT::Setup performs mapped/readable/executable checks before it
+		// dereferences the native Linux object and its vtable.
+		bInputVtableValid = SilentInput.Setup(I::Input);
+		if (bInputVtableValid) {
+			SilentInput.HookIndex((int)VTABLE::CLIENT::MOUSEINPUTENABLED, MouseInputEnabled);
+			SilentInput.HookIndex((int)VTABLE::CLIENT::CREATEMOVE, CreateMove);
+			HLOG("[H::Setup]   Input vtable installed\n");
+		} else {
+			L_PRINT(LOG_WARNING) << CS_XOR("I::Input has an invalid vtable, skipping input hooks");
+			HLOG("[H::Setup]   I::Input vtable validation failed, skipping!\n");
+		}
+	} else {
+		L_PRINT(LOG_WARNING) << CS_XOR("I::Input is null, skipping input hooks");
+		HLOG("[H::Setup]   I::Input is NULL!\n");
+	}
+	HLOG("[H::Setup]   bInputVtableValid = %d\n", bInputVtableValid);
+	HLOG("[H::Setup] SilentInput OK\n");
 
+	HLOG("[H::Setup] spoof_call CacheCurrentEntities...\n");
 	spoof_call<void>(_fake_addr, &EntCache::CacheCurrentEntities);
+	HLOG("[H::Setup] CacheCurrentEntities OK\n");
 
-	// @ida: class CViewRender->OnRenderStart call GetMatricesForView
-	CS_ASSERT(hkGetMatrixForView.Create(MEM::FindPattern(CLIENT_DLL, CS_XOR("40 53 48 81 EC ? ? ? ? 49 8B C1")), reinterpret_cast<void*>(&GetMatrixForView)));
+	// hkGetMatrixForView
+	HLOG("[H::Setup] hkGetMatrixForView...\n");
+	void* pGetMatrixForView = MEM::FindPattern(CLIENT_DLL, CS_XOR("40 53 48 81 EC ? ? ? ? 49 8B C1"));
+	HLOG("[H::Setup]   pGetMatrixForView = %p\n", pGetMatrixForView);
+	CS_ASSERT(hkGetMatrixForView.Create(pGetMatrixForView, reinterpret_cast<void*>(&GetMatrixForView)));
+	HLOG("[H::Setup] hkGetMatrixForView OK\n");
 
-	CS_ASSERT(hkSetViewModelFOV.Create(MEM::FindPattern(CLIENT_DLL, CS_XOR("40 53 48 83 EC 30 33 C9 E8 ? ? ? ? 48 8B D8 48 85 C0 0F 84 ? ? ? ? 48 8B 00 48 8B CB FF 90 ? ? ? ? 84 C0 0F 84 ? ? ? ? 48 8B CB")), reinterpret_cast<float*>(&SetViewModelFOV)));
-	
-	
-	CS_ASSERT(hkFOVObject.Create(MEM::FindPattern(CLIENT_DLL, CS_XOR("40 53 48 81 EC 80 00 00 00 48 8B D9 E8 ?? ?? ?? ?? 48 85")), reinterpret_cast<float*>(&GetRenderFov)));
+	// hkSetViewModelFOV
+	HLOG("[H::Setup] hkSetViewModelFOV...\n");
+	void* pSetViewModelFOV = MEM::FindPattern(CLIENT_DLL, CS_XOR("40 53 48 83 EC 30 33 C9 E8 ? ? ? ? 48 8B D8 48 85 C0 0F 84 ? ? ? ? 48 8B 00 48 8B CB FF 90 ? ? ? ? 84 C0 0F 84 ? ? ? ? 48 8B CB"));
+	HLOG("[H::Setup]   pSetViewModelFOV = %p\n", pSetViewModelFOV);
+	CS_ASSERT(hkSetViewModelFOV.Create(pSetViewModelFOV, reinterpret_cast<float*>(&SetViewModelFOV)));
+	HLOG("[H::Setup] hkSetViewModelFOV OK\n");
 
-	CS_ASSERT(hkInputParser.Create(MEM::FindPattern(CLIENT_DLL, CS_XOR("48 8B C4 4C 89 48 20 55 56 41 56 48 8D 68 B1 48 81 EC D0 00 00 00")), reinterpret_cast<void*>(&InputParser)));
+	// hkFOVObject
+	HLOG("[H::Setup] hkFOVObject...\n");
+	void* pFOVObject = MEM::FindPattern(CLIENT_DLL, CS_XOR("40 53 48 81 EC 80 00 00 00 48 8B D9 E8 ?? ?? ?? ?? 48 85"));
+	HLOG("[H::Setup]   pFOVObject = %p\n", pFOVObject);
+	CS_ASSERT(hkFOVObject.Create(pFOVObject, reinterpret_cast<float*>(&GetRenderFov)));
+	HLOG("[H::Setup] hkFOVObject OK\n");
 
-	// client.dll; 40 55 53 41 55 41 57 48 8D AC 24 ?? ?? ?? ?? 48 81 EC ?? ?? ?? ?? 48 8B 02
-	CS_ASSERT(hkGameEvents.Create(MEM::FindPattern(CLIENT_DLL, CS_XOR("40 55 53 41 55 41 57 48 8D AC 24 ?? ?? ?? ?? 48 81 EC ?? ?? ?? ?? 48 8B 02")), reinterpret_cast<void*>(&HandleGameEvents)));
+	// hkInputParser
+	HLOG("[H::Setup] hkInputParser...\n");
+	void* pInputParser = MEM::FindPattern(CLIENT_DLL, CS_XOR("48 8B C4 4C 89 48 20 55 56 41 56 48 8D 68 B1 48 81 EC D0 00 00 00"));
+	HLOG("[H::Setup]   pInputParser = %p\n", pInputParser);
+	CS_ASSERT(hkInputParser.Create(pInputParser, reinterpret_cast<void*>(&InputParser)));
+	HLOG("[H::Setup] hkInputParser OK\n");
 
-	// I could just do VTABLE too idx: 15
-	//CS_ASSERT(hkPredictionSimulation.Create(MEM::FindPattern(CLIENT_DLL, CS_XOR("48 8B C4 4C 89 40 18 48 89 48 08 55 53 56 57 48")), reinterpret_cast<void*>(&PredictionSimulation)));
+	// hkGameEvents
+	HLOG("[H::Setup] hkGameEvents...\n");
+	void* pGameEvents = MEM::FindPattern(CLIENT_DLL, CS_XOR("40 55 53 41 55 41 57 48 8D AC 24 ?? ?? ?? ?? 48 81 EC ?? ?? ?? ?? 48 8B 02"));
+	HLOG("[H::Setup]   pGameEvents = %p\n", pGameEvents);
+	CS_ASSERT(hkGameEvents.Create(pGameEvents, reinterpret_cast<void*>(&HandleGameEvents)));
+	HLOG("[H::Setup] hkGameEvents OK\n");
 
-	// @ida: ClientModeShared -> #STR: "mapname", "transition", "game_newmap"
-	CS_ASSERT(hkLevelInit.Create(MEM::FindPattern(CLIENT_DLL, CS_XOR("48 89 5C 24 ? 56 48 83 EC ? 48 8B 0D ? ? ? ? 48 8B F2")), reinterpret_cast<void*>(&LevelInit)));
+	// hkLevelInit
+	HLOG("[H::Setup] hkLevelInit...\n");
+	void* pLevelInit = MEM::FindPattern(CLIENT_DLL, CS_XOR("48 89 5C 24 ? 56 48 83 EC ? 48 8B 0D ? ? ? ? 48 8B F2"));
+	HLOG("[H::Setup]   pLevelInit = %p\n", pLevelInit);
+	CS_ASSERT(hkLevelInit.Create(pLevelInit, reinterpret_cast<void*>(&LevelInit)));
+	HLOG("[H::Setup] hkLevelInit OK\n");
 
-	// @ida: ClientModeShared -> #STR: "map_shutdown"
-	CS_ASSERT(hkLevelShutdown.Create(MEM::FindPattern(CLIENT_DLL, CS_XOR("48 83 EC ? 48 8B 0D ? ? ? ? 48 8D 15 ? ? ? ? 45 33 C9 45 33 C0 48 8B 01 FF 50 ? 48 85 C0 74 ? 48 8B 0D ? ? ? ? 48 8B D0 4C 8B 01 48 83 C4 ? 49 FF 60 ? 48 83 C4 ? C3 CC CC CC 48 83 EC ? 4C 8B D9")), reinterpret_cast<void*>(&LevelShutdown)));
+	// hkLevelShutdown
+	HLOG("[H::Setup] hkLevelShutdown...\n");
+	void* pLevelShutdown = MEM::FindPattern(CLIENT_DLL, CS_XOR("48 83 EC ? 48 8B 0D ? ? ? ? 48 8D 15 ? ? ? ? 45 33 C9 45 33 C0 48 8B 01 FF 50 ? 48 85 C0 74 ? 48 8B 0D ? ? ? ? 48 8B D0 4C 8B 01 48 83 C4 ? 49 FF 60 ? 48 83 C4 ? C3 CC CC CC 48 83 EC ? 4C 8B D9"));
+	HLOG("[H::Setup]   pLevelShutdown = %p\n", pLevelShutdown);
+	CS_ASSERT(hkLevelShutdown.Create(pLevelShutdown, reinterpret_cast<void*>(&LevelShutdown)));
+	HLOG("[H::Setup] hkLevelShutdown OK\n");
 
-	CS_ASSERT(hkDrawObject.Create(MEM::FindPattern(SCENESYSTEM_DLL, CS_XOR("48 8B C4 48 89 50 ? 55 41 56")), reinterpret_cast<void*>(&DrawObject)));
+	// hkDrawObject
+	HLOG("[H::Setup] hkDrawObject...\n");
+	void* pDrawObject = MEM::FindPattern(SCENESYSTEM_DLL, CS_XOR("48 8B C4 48 89 50 ? 55 41 56"));
+	HLOG("[H::Setup]   pDrawObject = %p\n", pDrawObject);
+	CS_ASSERT(hkDrawObject.Create(pDrawObject, reinterpret_cast<void*>(&DrawObject)));
+	HLOG("[H::Setup] hkDrawObject OK\n");
 
-	//CS_ASSERT(hkCameraInput.Create(MEM::GetVFunc(I::Input, VTABLE::CLIENT::CAMERA), reinterpret_cast<void*>(&CameraInput)));
+	// hkFrameStageNotify
+	HLOG("[H::Setup] hkFrameStageNotify...\n");
+	void* pFrameStageNotify = MEM::FindPattern(CLIENT_DLL, CS_XOR("48 89 5C 24 10 56 48 83 EC 30 8B 05"));
+	HLOG("[H::Setup]   pFrameStageNotify = %p\n", pFrameStageNotify);
+	CS_ASSERT(hkFrameStageNotify.Create(pFrameStageNotify, reinterpret_cast<void*>(&FrameStageNotify)));
+	HLOG("[H::Setup] hkFrameStageNotify OK\n");
 
-	//CS_ASSERT(hkSendInputMessage.Create(MEM::FindPattern(CLIENT_DLL, CS_XOR("48 89 5C 24 ? 48 89 74 24 ? 48 89 7C 24 ? 41 56 48 81 EC ? ? ? ? 49 8B D9")), reinterpret_cast<void*>(&SendNetInputMessage)));
+	// hkSetModel
+	HLOG("[H::Setup] hkSetModel...\n");
+	void* pSetModel = MEM::FindPattern(CLIENT_DLL, CS_XOR("48 89 5C 24 10 48 89 7C 24 20 55 48 8B EC 48 83 EC 50"));
+	HLOG("[H::Setup]   pSetModel = %p\n", pSetModel);
+	CS_ASSERT(hkSetModel.Create(pSetModel, reinterpret_cast<void*>(&SetModel)));
+	HLOG("[H::Setup] hkSetModel OK\n");
 
-	CS_ASSERT(hkFrameStageNotify.Create(MEM::FindPattern(CLIENT_DLL, CS_XOR("48 89 5C 24 10 56 48 83 EC 30 8B 05")), reinterpret_cast<void*>(&FrameStageNotify)));
+	// hkEquipItemInLoadout
+	HLOG("[H::Setup] hkEquipItemInLoadout (vfunc 54)...\n");
+	void* pEquipItemInLoadout = MEM::GetVFunc(CCSInventoryManager::GetInstance(), 54u);
+	HLOG("[H::Setup]   pEquipItemInLoadout = %p\n", pEquipItemInLoadout);
+	CS_ASSERT(hkEquipItemInLoadout.Create(pEquipItemInLoadout, reinterpret_cast<void*>(&EquipItemInLoadout)));
+	HLOG("[H::Setup] hkEquipItemInLoadout OK\n");
 
-	CS_ASSERT(hkSetModel.Create(MEM::FindPattern(CLIENT_DLL, CS_XOR("48 89 5C 24 10 48 89 7C 24 20 55 48 8B EC 48 83 EC 50")), reinterpret_cast<void*>(&SetModel)));
+	// hkOverrideView
+	HLOG("[H::Setup] hkOverrideView (vfunc 9)...\n");
+	if (bInputVtableValid) {
+		void* pOverrideView = MEM::GetVFunc(I::Input, 9u);
+		HLOG("[H::Setup]   pOverrideView = %p, I::Input=%p\n", pOverrideView, I::Input);
+		CS_ASSERT(hkOverrideView.Create(pOverrideView, reinterpret_cast<void*>(&OverrideView)));
+		HLOG("[H::Setup] hkOverrideView OK\n");
+	} else {
+		L_PRINT(LOG_WARNING) << CS_XOR("I::Input vtable invalid, skipping OverrideView hook");
+		HLOG("[H::Setup]   Skipping OverrideView (invalid vtable)\n");
+	}
 
-	CS_ASSERT(hkEquipItemInLoadout.Create(MEM::GetVFunc(CCSInventoryManager::GetInstance(), 54u), reinterpret_cast<void*>(&EquipItemInLoadout)));
+	// hkAllowCameraChange
+	HLOG("[H::Setup] hkAllowCameraChange (vfunc 7)...\n");
+	if (bInputVtableValid) {
+		void* pAllowCameraChange = MEM::GetVFunc(I::Input, 7u);
+		HLOG("[H::Setup]   pAllowCameraChange = %p\n", pAllowCameraChange);
+		CS_ASSERT(hkAllowCameraChange.Create(pAllowCameraChange, reinterpret_cast<void*>(&AllowCameraAngleChange)));
+		HLOG("[H::Setup] hkAllowCameraChange OK\n");
+	} else {
+		L_PRINT(LOG_WARNING) << CS_XOR("I::Input vtable invalid, skipping AllowCameraChange hook");
+		HLOG("[H::Setup]   Skipping AllowCameraChange (invalid vtable)\n");
+	}
 
-	CS_ASSERT(hkOverrideView.Create(MEM::GetVFunc(I::Input, 9u), reinterpret_cast<void*>(&OverrideView)));
-
-	CS_ASSERT(hkAllowCameraChange.Create(MEM::GetVFunc(I::Input, 7u), reinterpret_cast<void*>(&AllowCameraAngleChange)));
-
-	//CS_ASSERT(hkPreFireEvent.Create(MEM::FindPattern(CLIENT_DLL, CS_XOR("48 89 5C 24 ? 56 57 41 54 48 83 EC 30 48 8B F2")), reinterpret_cast<void*>(&FireEventClientSide)));
-
+	// F::RAGE and F::LAGCOMP
+	HLOG("[H::Setup] F::RAGE::rage->BuildSeed()...\n");
 	F::RAGE::rage->BuildSeed();
-	F::LAGCOMP::lagcomp->Initialize();
+	HLOG("[H::Setup] BuildSeed OK\n");
 
-	//F::LAGCOMP::lagcomp->Initialize();
+	HLOG("[H::Setup] F::LAGCOMP::lagcomp->Initialize()...\n");
+	F::LAGCOMP::lagcomp->Initialize();
+	HLOG("[H::Setup] Initialize OK\n");
 
 	VIRTUALIZER_MUTATE_ONLY_END;
 
+	HLOG("[H::Setup] returning true\n");
+	fclose(hook_log);
 	return true;
 }
 
 
 void H::Destroy()
 {
+#ifdef _WIN32
 	skin_changer::Shutdown();
+
 	MH_DisableHook(MH_ALL_HOOKS);
 	MH_RemoveHook(MH_ALL_HOOKS);
 
@@ -208,6 +341,11 @@ void H::Destroy()
 	Silentdxgi.UnhookAll();
 	SilentInput.UnhookAll();
 	SilentEntitySystem.UnhookAll();
+#else
+	// Native Linux currently installs only preload interposers; there are no
+	// gameplay hooks or skin state to tear down.
+	MH_Uninitialize();
+#endif
 }
 // client.dll; 40 55 53 41 55 41 57 48 8D AC 24 ?? ?? ?? ?? 48 81 EC ?? ?? ?? ?? 48 8B 02
 // xref: "winpanel-basic-round-result-visible"
@@ -289,11 +427,11 @@ float CS_FASTCALL H::GetRenderFov(uintptr_t rcx)
 
 	if (!I::Engine->IsConnected() || !I::Engine->IsInGame())
 	{
-		oFOV(rcx);
+		return oFOV(rcx);
 	}
 	else if (!SDK::LocalController || !SDK::LocalController->IsPawnAlive()) // Checking if your spectating and alive
 	{
-		oFOV(rcx);
+		return oFOV(rcx);
 	}
 	else
 	{
@@ -306,7 +444,7 @@ float CS_FASTCALL H::GetRenderFov(uintptr_t rcx)
 		}
 		else
 		{
-			oFOV(rcx);
+			return oFOV(rcx);
 		}
 	}
 }
@@ -361,6 +499,7 @@ void CS_FASTCALL H::HandleGameEvents(void* rcx, IGameEvent* const ev)
 
 	original(rcx, ev);
 }
+#ifdef _WIN32
 bool init = false;
 HRESULT __stdcall H::Present(IDXGISwapChain* pSwapChain, UINT uSyncInterval, UINT uFlags)
 {
@@ -422,6 +561,8 @@ long H::WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 	return ::CallWindowProcW(IPT::pOldWndProc, hWnd, uMsg, wParam, lParam);
 }
 
+#endif // _WIN32
+
 void* CS_FASTCALL H::OnAddEntity(void* rcx, CEntityInstance* pInstance, CBaseHandle hHandle) {
 	spoof_call<void>(_fake_addr, EntCache::OnAddEntity, pInstance, hHandle);
 
@@ -459,7 +600,7 @@ int64_t CS_FASTCALL H::SendNetInputMessage(CNetInputMessage* a1, int64_t a2, int
 	return bres(a1, a2, a3, a4, a5, a6);
 }
 
-#include "..\cstrike\sdk\datatypes\usercmd.h"
+#include "../cstrike/sdk/datatypes/usercmd.h"
 #include "../features/misc.h"
 #include "../features/misc/movement.h"
 
@@ -690,4 +831,3 @@ void CS_FASTCALL H::DrawObject(void* pAnimatableSceneObjectDesc, void* pDx11, ma
 	if (!F::OnDrawObject(pAnimatableSceneObjectDesc, pDx11, arrMeshDraw, nDataCount, pSceneView, pSceneLayer, pUnk, pUnk2))
 		oDrawObject(pAnimatableSceneObjectDesc, pDx11, arrMeshDraw, nDataCount, pSceneView, pSceneLayer, pUnk, pUnk2);
 }
-

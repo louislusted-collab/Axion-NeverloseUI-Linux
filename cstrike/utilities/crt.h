@@ -7,7 +7,9 @@
 #include "../common.h"
 
 #ifdef CS_COMPILER_MSC
+#ifdef _WIN32
 #include <intrin.h>
+#endif
 #endif
 
 // used: algorithm function

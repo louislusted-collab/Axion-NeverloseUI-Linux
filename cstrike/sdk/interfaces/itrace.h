@@ -7,8 +7,8 @@
 
 // used: cbasehandle
 #include "../entity_handle.h"
-#include "..\cstrike\core\sdk.h"
-#include "..\cstrike\sdk\entity.h"
+#include "../../core/sdk.h"
+#include "../entity.h"
 #define CLIP_TRACE_TO_PLAYERS "48 8B C4 55 56 48 8D A8 58 FF FF FF 48 81 EC 98 01 00 00 48"
 #define TRACE_SHAPE "48 89 54 24 ? 48 89 4C 24 ? 55 53 56 57 41 55 41 56 48 8D AC 24"
 #define COMBINE(x, y) x##y

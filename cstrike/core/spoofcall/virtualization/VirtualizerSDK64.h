@@ -13,7 +13,9 @@
 // Declaration of Custom VM macros
 // ****************************************************************************
 
+#ifndef __linux__
 #define PLATFORM_X64 1
+#endif
 
 #ifdef __cplusplus
  extern "C" {
@@ -183,7 +185,50 @@ void __stdcall VIRTUALIZER_MUTATE_ONLY_END_ASM64();
 
 #endif
 
+#ifdef __linux__
+// On Linux: The .asm file isn't compiled (MASM only), and VMProtect/Oreans
+// virtualization markers are meaningless without the post-build tool.
+// Define all macros as no-ops to prevent undefined symbol crashes.
+#define VIRTUALIZER_TIGER_WHITE_START
+#define VIRTUALIZER_TIGER_WHITE_END
+#define VIRTUALIZER_TIGER_RED_START
+#define VIRTUALIZER_TIGER_RED_END
+#define VIRTUALIZER_TIGER_BLACK_START
+#define VIRTUALIZER_TIGER_BLACK_END
+#define VIRTUALIZER_FISH_WHITE_START
+#define VIRTUALIZER_FISH_WHITE_END
+#define VIRTUALIZER_FISH_RED_START
+#define VIRTUALIZER_FISH_RED_END
+#define VIRTUALIZER_FISH_BLACK_START
+#define VIRTUALIZER_FISH_BLACK_END
+#define VIRTUALIZER_PUMA_WHITE_START
+#define VIRTUALIZER_PUMA_WHITE_END
+#define VIRTUALIZER_PUMA_RED_START
+#define VIRTUALIZER_PUMA_RED_END
+#define VIRTUALIZER_PUMA_BLACK_START
+#define VIRTUALIZER_PUMA_BLACK_END
+#define VIRTUALIZER_SHARK_WHITE_START
+#define VIRTUALIZER_SHARK_WHITE_END
+#define VIRTUALIZER_SHARK_RED_START
+#define VIRTUALIZER_SHARK_RED_END
+#define VIRTUALIZER_SHARK_BLACK_START
+#define VIRTUALIZER_SHARK_BLACK_END
+#define VIRTUALIZER_DOLPHIN_WHITE_START
+#define VIRTUALIZER_DOLPHIN_WHITE_END
+#define VIRTUALIZER_DOLPHIN_RED_START
+#define VIRTUALIZER_DOLPHIN_RED_END
+#define VIRTUALIZER_DOLPHIN_BLACK_START
+#define VIRTUALIZER_DOLPHIN_BLACK_END
+#define VIRTUALIZER_EAGLE_WHITE_START
+#define VIRTUALIZER_EAGLE_WHITE_END
+#define VIRTUALIZER_EAGLE_RED_START
+#define VIRTUALIZER_EAGLE_RED_END
+#define VIRTUALIZER_EAGLE_BLACK_START
+#define VIRTUALIZER_EAGLE_BLACK_END
+#define VIRTUALIZER_MUTATE_ONLY_START
+#define VIRTUALIZER_MUTATE_ONLY_END
+#endif
+
 #ifdef __cplusplus
 }
 #endif
-

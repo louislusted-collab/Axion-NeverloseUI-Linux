@@ -18,7 +18,9 @@
 #include "../cstrike/sdk/interfaces/itrace.h"
 #include "../cstrike/core/spoofcall/syscall.h"
 #include <iostream>
+#ifdef _WIN32
 #include <memoryapi.h>
+#endif
 #include <mutex>
 #include <array>
 #include "../../core/spoofcall/virtualization/VirtualizerSDK64.h"
@@ -177,7 +179,7 @@ class scan_data
 {
 public:
     scan_point point;
-    temp_point temp_point;
+    temp_point fallback_point;
 
     bool visible;
     int damage;
@@ -190,7 +192,7 @@ public:
 
     void reset()
     {
-        temp_point.reset();
+        fallback_point.reset();
         point.reset();
         visible = false;
         damage = -1;
@@ -304,7 +306,7 @@ struct record {
 public:
     bool valid = { };
     float simulation_time = { };
-    std::array<bone_data, MAX_STUDIO_BONES> bone_data = { };
+    std::array<bone_data, MAX_STUDIO_BONES> bones = { };
     Vector_t head_pos = { };
 };
 
@@ -416,7 +418,7 @@ public:
         if (num_bones > MAX_STUDIO_BONES)
             num_bones = MAX_STUDIO_BONES;
 
-        memcpy(rec.bone_data.data(), bone_data, sizeof(bone_data) * num_bones);
+        std::copy_n(bone_data, num_bones, rec.bones.begin());
         rec.valid = true;
         last_valid = true;
     }
@@ -462,7 +464,7 @@ public:
                 if (rec.simulation_time <= las_valid_sim_time)
                     continue;
 
-                const float bone_dist = MATH::segment_dist(start, end, rec.bone_data[bone_index].pos, rec.bone_data[parent_bone_index].pos);
+                const float bone_dist = MATH::segment_dist(start, end, rec.bones[bone_index].pos, rec.bones[parent_bone_index].pos);
                 if (bone_dist < best_bone_dist) {
                     best_bone_dist = bone_dist;
                     best_bone = bone_index;
@@ -489,13 +491,13 @@ public:
 
         float prev_dist = MATH::segment_dist(
             start, end,
-            records[prev_record].bone_data[best_bone].pos,
-            records[prev_record].bone_data[best_bone_parent].pos
+            records[prev_record].bones[best_bone].pos,
+            records[prev_record].bones[best_bone_parent].pos
         );
         float next_dist = MATH::segment_dist(
             start, end,
-            records[next_record].bone_data[best_bone].pos,
-            records[next_record].bone_data[best_bone_parent].pos
+            records[next_record].bones[best_bone].pos,
+            records[next_record].bones[best_bone_parent].pos
         );
 
         bool prev_is_best = prev_dist < next_dist;
@@ -576,7 +578,7 @@ void F::LAGCOMP::impl::Render() noexcept {
             continue;
 
         L_PRINT(LOG_INFO) << CS_XOR("[record] info | simulation_time: ") << last_record->simulation_time;
-        L_PRINT(LOG_INFO) << CS_XOR("[record] info | bone_data: ") << last_record->bone_data[HEAD].pos;
+        L_PRINT(LOG_INFO) << CS_XOR("[record] info | bone_data: ") << last_record->bones[HEAD].pos;
         L_PRINT(LOG_INFO) << CS_XOR("[record] info | head_pos: ") << last_record->head_pos;
 
         entity->skeleton->calc_world_space_bones(0, bone_flags::FLAG_HITBOX);
@@ -591,9 +593,9 @@ void F::LAGCOMP::impl::Render() noexcept {
                 continue;
 
             ImVec2 screen_pos, screen_parent_pos;
-            if (!MATH::WorldToScreen(last_record->bone_data[i].pos, screen_pos))
+            if (!MATH::WorldToScreen(last_record->bones[i].pos, screen_pos))
                 continue;
-            if (!MATH::WorldToScreen(last_record->bone_data[parent_index].pos, screen_parent_pos))
+            if (!MATH::WorldToScreen(last_record->bones[parent_index].pos, screen_parent_pos))
                 continue;
 
             C_GET(ColorPickerVar_t, Vars.colSkeletonOutline).colValue.a = C_GET(ColorPickerVar_t, Vars.colSkeleton).colValue.a;
@@ -842,7 +844,7 @@ static Vector_t get_target_angle(C_CSPlayerPawn* localplayer, Vector_t position)
 }
 
 
-std::vector <scan_point> F::RAGE::impl::get_points(C_CSPlayerPawn* pLocal, C_CSPlayerPawn* record, uint32_t hitbox, bool from_aim)// надо добавить хтбоксы тут не все
+std::vector <scan_point> F::RAGE::impl::get_points(C_CSPlayerPawn* pLocal, C_CSPlayerPawn* record, uint32_t hitbox, bool from_aim)// пїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅ
 {
     // removed
     std::vector <scan_point> points;
@@ -903,7 +905,7 @@ void F::RAGE::impl::ScanPoint(C_CSPlayerPawn* pLocal, CUserCmd* cmd, C_CSPlayerP
         if (temp_point.damage > 0)
             continue;
 
-        data.temp_point = temp_point;
+        data.fallback_point = temp_point;
     }
 
     if (points.empty())
@@ -1187,13 +1189,13 @@ __forceinline Vector_t CalculateSpread(C_CSWeaponBase* weapon, int seed, float i
     r4 = MATH::fnRandomFloat(0.f, 3.14159265358979323846264338327950288f * 2);
 
     // revolver secondary spread.
-    if (item_def_index == CS_XOR("weapon_revoler") && revolver2) {
+    if (item_def_index && std::strcmp(item_def_index, CS_XOR("weapon_revolver")) == 0 && revolver2) {
         r1 = 1.f - (r1 * r1);
         r3 = 1.f - (r3 * r3);
     }
 
     // negev spread.
-    else if (item_def_index == CS_XOR("weapon_negev") && recoil_index < 3.f) {
+    else if (item_def_index && std::strcmp(item_def_index, CS_XOR("weapon_negev")) == 0 && recoil_index < 3.f) {
         for (int i{ 3 }; i > recoil_index; --i) {
             r1 *= r1;
             r3 *= r3;
@@ -1947,14 +1949,14 @@ void F::RAGE::impl::SetupAdaptiveWeapon(C_CSPlayerPawn* pLocal) {
         rage_data.auto_stop = C_GET_ARRAY(bool, 7, Vars.rage_auto_stop, 1);
         rage_data.penetration = C_GET_ARRAY(bool, 7, Vars.rage_penetration, 1);
         rage_data.rage_target_select = C_GET_ARRAY(int, 7, Vars.rage_target_select, 1);
-        rage_data.hitbox_head = C_GET(bool, 7, Vars.hitbox_head, 1);
-        rage_data.hitbox_neck = C_GET(bool, 7, Vars.hitbox_neck, 1);
-        rage_data.hitbox_uppeer_chest = C_GET(bool, 7, Vars.hitbox_uppeer_chest, 1);
-        rage_data.hitbox_chest = C_GET(bool, 7, Vars.hitbox_chest, 1);
-        rage_data.hitbox_stomach = C_GET(bool, 7, Vars.hitbox_stomach, 1);
-        rage_data.hitbox_legs = C_GET(bool, 7, Vars.hitbox_legs, 1);
-        rage_data.hitbox_feets = C_GET(bool, 7, Vars.hitbox_feet, 1);
-        rage_data.rapid_fire = C_GET(bool, 7, Vars.rapid_fire, 1);
+        rage_data.hitbox_head = C_GET_ARRAY(bool, 7, Vars.hitbox_head, 1);
+        rage_data.hitbox_neck = C_GET_ARRAY(bool, 7, Vars.hitbox_neck, 1);
+        rage_data.hitbox_uppeer_chest = C_GET_ARRAY(bool, 7, Vars.hitbox_uppeer_chest, 1);
+        rage_data.hitbox_chest = C_GET_ARRAY(bool, 7, Vars.hitbox_chest, 1);
+        rage_data.hitbox_stomach = C_GET_ARRAY(bool, 7, Vars.hitbox_stomach, 1);
+        rage_data.hitbox_legs = C_GET_ARRAY(bool, 7, Vars.hitbox_legs, 1);
+        rage_data.hitbox_feets = C_GET_ARRAY(bool, 7, Vars.hitbox_feet, 1);
+        rage_data.rapid_fire = C_GET_ARRAY(bool, 7, Vars.rapid_fire, 1);
     }
     else if (data->m_WeaponType() == WEAPONTYPE_MACHINEGUN) {
         rage_data.minimum_damage = C_GET_ARRAY(int, 7, Vars.rage_minimum_damage, 3);

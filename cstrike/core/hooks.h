@@ -1,12 +1,16 @@
 #pragma once
 
 // used: [d3d] api
+#ifdef _WIN32
 #include <d3d11.h>
+#endif
+#ifdef _WIN32
 #include <dxgi1_2.h>
+#endif
 
 // used: chookobject
 #include "../utilities/detourhook.h"
-#include "..\sdk\entity_handle.h"
+#include "../sdk/entity_handle.h"
 // used: viewmatrix_t
 #include "../sdk/datatypes/matrix.h"
 #include "../core/sdk.h"
@@ -80,11 +84,13 @@ namespace H
 	void Destroy();
 
 	/* @section: handlers */
+#ifdef _WIN32
 	// d3d11 & wndproc
 	HRESULT WINAPI Present(IDXGISwapChain* pSwapChain, UINT uSyncInterval, UINT uFlags);
 	HRESULT CS_FASTCALL ResizeBuffers(IDXGISwapChain* pSwapChain, std::uint32_t nBufferCount, std::uint32_t nWidth, std::uint32_t nHeight, DXGI_FORMAT newFormat, std::uint32_t nFlags);
 	HRESULT WINAPI CreateSwapChain(IDXGIFactory* pFactory, IUnknown* pDevice, DXGI_SWAP_CHAIN_DESC* pDesc, IDXGISwapChain** ppSwapChain);
 	long CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+#endif
 
 	// game's functions
 	ViewMatrix_t* CS_FASTCALL GetMatrixForView(CRenderGameSystem* pRenderGameSystem, IViewRender* pViewRender, ViewMatrix_t* pOutWorldToView, ViewMatrix_t* pOutViewToProjection, ViewMatrix_t* pOutWorldToProjection, ViewMatrix_t* pOutWorldToPixels);

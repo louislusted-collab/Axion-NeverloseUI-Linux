@@ -17,6 +17,7 @@ struct QAngle_t
 
 	constexpr QAngle_t(const float* arrAngles) :
 		x(arrAngles[0]), y(arrAngles[1]), z(arrAngles[2]) { }
+	constexpr QAngle_t(const QAngle_t&) = default;
 
 #pragma region qangle_array_operators
 

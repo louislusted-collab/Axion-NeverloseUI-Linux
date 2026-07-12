@@ -2,8 +2,14 @@
 #include "../pointer/pointer.hpp"
 #include "cmodule.hpp"
 #include "../fnv1a.hpp"
+#ifdef _WIN32
 #include <wtypes.h>
 #include <Psapi.h>
+#else
+#include "../../../linux/linux_compat.h"
+#include <stdio.h>
+#include <string.h>
+#endif
 CModule::CModule(const char* name) {
     m_Name = name;
     m_Hash = fnv1a::Hash(name);
@@ -71,9 +77,12 @@ uintptr_t CModule::GetInterface(const char* version) {
 uintptr_t CModule::GetProcAddress(const char* procName) {
     uintptr_t rv = 0;
     if (m_Handle) {
+#ifdef _WIN32
         rv = reinterpret_cast<uintptr_t>(::GetProcAddress(static_cast<HMODULE>(m_Handle), procName));
+#else
+        rv = reinterpret_cast<uintptr_t>(dlsym(m_Handle, procName));
+#endif
     }
-
     return rv;
 }
 
@@ -118,11 +127,36 @@ void CModule::InitializeBounds() {
         return;
     }
 
+#ifdef _WIN32
     MODULEINFO mi;
     BOOL status = GetModuleInformation(GetCurrentProcess(), static_cast<HMODULE>(m_Handle), &mi, sizeof(mi));
-    if (status != 0) {
+    if (status != 0)
         SetBounds(reinterpret_cast<uintptr_t>(m_Handle), mi.SizeOfImage);
+#else
+    // parse /proc/self/maps to find base + size of this .so
+    Dl_info info;
+    if (!dladdr(m_Handle, &info) || !info.dli_fbase)
+        return;
+
+    uintptr_t base = 0, end = 0;
+    FILE* f = fopen("/proc/self/maps", "r");
+    if (!f) return;
+
+    char line[512];
+    const char* soname = m_Name.c_str();
+    while (fgets(line, sizeof(line), f)) {
+        if (!strstr(line, soname)) continue;
+        uintptr_t lo, hi;
+        if (sscanf(line, "%lx-%lx", &lo, &hi) == 2) {
+            if (!base) base = lo;
+            end = hi;
+        }
     }
+    fclose(f);
+
+    if (base && end > base)
+        SetBounds(base, end - base);
+#endif
 }
 
 void CModule::SetBounds(uintptr_t begin, uintptr_t size) {

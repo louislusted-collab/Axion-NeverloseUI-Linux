@@ -1,7 +1,8 @@
+#include "inputsystem.h"
+
+#ifdef _WIN32
 // used: get_x_lparam, get_y_lparam
 #include <windowsx.h>
-
-#include "inputsystem.h"
 
 // used: menu open/panic keys
 #include "../core/variables.h"
@@ -19,6 +20,7 @@
 #include <memory>
 #include "bcrypt.h"
 #include "../core/spoofcall/lazy_importer.hpp"
+
 static BOOL CALLBACK EnumWindowsCallback(HWND handle, LPARAM lParam)
 {
 	const auto MainWindow = [handle]()
@@ -30,7 +32,7 @@ static BOOL CALLBACK EnumWindowsCallback(HWND handle, LPARAM lParam)
 	DWORD nPID = 0;
 	LI_FN(GetWindowThreadProcessId).safe()(handle, &nPID);
 
-	if	(LI_FN(GetCurrentProcessId).safe()() != nPID || !MainWindow())
+	if (LI_FN(GetCurrentProcessId).safe()() != nPID || !MainWindow())
 		return TRUE;
 
 	*reinterpret_cast<HWND*>(lParam) = handle;
@@ -123,7 +125,7 @@ bool IPT::OnWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 	}
 
 	// save key states
-	if (state == KEY_STATE_UP && arrKeyState[nKey] == KEY_STATE_DOWN) // if swap states it will be pressed state
+	if (state == KEY_STATE_UP && arrKeyState[nKey] == KEY_STATE_DOWN)
 		arrKeyState[nKey] = KEY_STATE_RELEASED;
 	else
 		arrKeyState[nKey] = state;
@@ -155,3 +157,46 @@ bool IPT::IsHovered(const ImVec2& vecPosition, const ImVec2& vecSize)
 	const ImVec2 vecMousePosition = ImGui::GetMousePos();
 	return ImRect(vecPosition, vecPosition + vecSize).Contains(vecMousePosition);
 }
+#else
+#include <SDL3/SDL.h>
+#include "../dependencies/imgui/imgui_internal.h"
+
+bool IPT::Setup()
+{
+	return true;
+}
+
+void IPT::Destroy()
+{
+}
+
+bool IPT::OnWndProc(void* /*hWnd*/, unsigned int /*uMsg*/, uintptr_t /*wParam*/, intptr_t /*lParam*/)
+{
+	return false;
+}
+
+bool IPT::GetBindState(KeyBind_t& keyBind)
+{
+	if (keyBind.uKey == 0U)
+		return false;
+
+	switch (keyBind.nMode)
+	{
+	case EKeyBindMode::HOLD:
+		keyBind.bEnable = IsKeyDown(keyBind.uKey);
+		break;
+	case EKeyBindMode::TOGGLE:
+		if (IsKeyReleased(keyBind.uKey))
+			keyBind.bEnable = !keyBind.bEnable;
+		break;
+	}
+
+	return keyBind.bEnable;
+}
+
+bool IPT::IsHovered(const ImVec2& vecPosition, const ImVec2& vecSize)
+{
+	const ImVec2 vecMousePosition = ImGui::GetMousePos();
+	return ImRect(vecPosition, vecPosition + vecSize).Contains(vecMousePosition);
+}
+#endif

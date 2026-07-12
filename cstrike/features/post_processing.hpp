@@ -4,8 +4,12 @@
 
 #define IMGUI_DEFINE_MATH_OPERATORS
 #include <DirectXMath.h>
+#ifdef _WIN32
 #include <d3d11.h>
+#endif
+#ifdef _WIN32
 #include <dxgi1_2.h>
+#endif
 #include <imgui.h>
 
 #include <algorithm>

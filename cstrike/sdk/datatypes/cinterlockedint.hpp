@@ -4,7 +4,9 @@
 #include <concepts>
 #include <cstdint>
 
+#ifdef _WIN32
 #include <intrin.h>
+#endif
 
 template< std::integral tElement >
 requires( sizeof( tElement ) == sizeof( std::int32_t ) || sizeof( tElement ) == sizeof( std::int64_t ) )

@@ -1,4 +1,6 @@
 #pragma once
+#include "../cstrike/utilities/log.h"
+#include "../cstrike/utilities/memory.h"
 
 namespace C::BIN
 {

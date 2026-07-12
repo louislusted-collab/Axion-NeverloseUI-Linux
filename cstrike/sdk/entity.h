@@ -43,7 +43,7 @@ class CFiringModeFloat
 public:
 	float flValue[2];
 };
-enum HitGroup_t : std::uint32_t {
+enum HitGroup_t : std::int32_t {
 	HITGROUP_INVALID = -1,
 	HITGROUP_GENERIC = 0,
 	HITGROUP_HEAD = 1,
@@ -456,7 +456,7 @@ public:
 };
 // Alignment: 4
 // Size: 0x4
-enum class ModelBoneFlexComponent_t : uint32_t
+enum class ModelBoneFlexComponent_t : uint64_t
 {
 	MODEL_BONE_FLEX_INVALID = 0xffffffffffffffff,
 	MODEL_BONE_FLEX_TX = 0x0,

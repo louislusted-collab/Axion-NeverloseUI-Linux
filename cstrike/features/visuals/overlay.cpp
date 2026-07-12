@@ -2,6 +2,7 @@
 #include <vector>
 // used: [stl] sort
 #include <algorithm>
+#include <cstring>
 
 #include "overlay.h"
 
@@ -29,9 +30,10 @@
 // used: mainwindowopened
 #include "../../core/menu.h"
 #include "../../sdk/datatypes/utlvector.h"
-#include <cstddef> 
-#include <xcharconv.h>
-#include <xiosbase>
+#include <cstddef>
+#ifndef _WIN32
+#include <charconv>
+#endif
 #include <iostream>
 #include "imgui/imgui_edited.hpp"
 using namespace F::VISUALS;
@@ -255,7 +257,7 @@ OVERLAY::CTextComponent::CTextComponent(const bool bIsMenuItem, const bool bIcon
 	CRT::StringCopy(this->szText, szText);
 	this->nSide = nAlignSide;
 	this->nDirection = nAlignDirection;
-	this->vecSize = pFont->CalcTextSizeA(pFont->FontSize, FLT_MAX, 0.0f, szText) + overlayConfig.flThickness;
+	this->vecSize = pFont->CalcTextSizeA(pFont->FontSize, FLT_MAX, 0.0f, szText) + ImVec2(overlayConfig.flThickness, overlayConfig.flThickness);
 }
 
 OVERLAY::CTextComponent::~CTextComponent()
@@ -330,6 +332,12 @@ void OVERLAY::CTextComponent::Render(ImDrawList* pDrawList, const ImVec2& vecPos
 #pragma endregion
 
 #pragma region visual_overlay_context
+
+OVERLAY::Context_t::~Context_t()
+{
+	for (CBaseComponent* pComponent : vecComponents)
+		delete pComponent;
+}
 
 bool OVERLAY::Context_t::AddBoxComponent(ImDrawList* pDrawList, const ImVec4& vecBox, const int nType, float flThickness, float flRounding, const Color_t& colPrimary, const Color_t& colOutline , const float AlphaMultiplier )
 {
@@ -412,7 +420,8 @@ ImVec4 OVERLAY::Context_t::AddFrameComponent(ImDrawList* pDrawList, const ImVec2
 	ImVec2 vecFrameMin = { vecScreen.x - vecFrameSize.x * 0.5f, vecScreen.y - vecFrameSize.y };
 	ImVec2 vecFrameMax = { vecScreen.x + vecFrameSize.x * 0.5f, vecScreen.y };
 
-	pDrawList->AddRectFilled(vecFrameMin - this->flComponentSpacing, vecFrameMax + this->flComponentSpacing, colBackground.GetU32(), flRounding, nRoundingCorners);
+	ImVec2 vecSpacing = { this->flComponentSpacing, this->flComponentSpacing };
+	pDrawList->AddRectFilled(vecFrameMin - vecSpacing, vecFrameMax + vecSpacing, colBackground.GetU32(), flRounding, nRoundingCorners);
 
 	// accumulate spacing for next side/directional components
 	for (float& flSidePadding : this->arrSidePaddings)
@@ -634,8 +643,6 @@ void OVERLAY::OnFrameStageNotify(CCSPlayerController* pLocalController)
 
 			break;
 		}
-		default:
-			break;
 		}
 	}
 }*/
@@ -678,13 +685,16 @@ void F::VISUALS::OVERLAY::Render()
 		if (hEntity != it.m_handle) continue;
 
 		switch (it.m_type) {
-		case CachedEntity_t::PLAYER_CONTROLLER:
+		case CachedEntity_t::PLAYER_CONTROLLER: {
 			CCSPlayerController* pPlayer = I::GameResourceService->pGameEntitySystem->Get<CCSPlayerController>(hEntity);
 			if (pPlayer == nullptr)
 				break;
 
 			OnPlayer(pPlayer, it.m_bbox);
 
+			break;
+		}
+		default:
 			break;
 		}
 	}
@@ -712,7 +722,7 @@ void F::VISUALS::OVERLAY::CalculateBoundingBoxes()
 
 		switch (it.m_type) {
 
-		case CachedEntity_t::PLAYER_CONTROLLER:
+		case CachedEntity_t::PLAYER_CONTROLLER: {
 
 			CCSPlayerController* pPlayer = I::GameResourceService->pGameEntitySystem->Get<CCSPlayerController>(hEntity);
 			if (pPlayer == nullptr)
@@ -724,6 +734,9 @@ void F::VISUALS::OVERLAY::CalculateBoundingBoxes()
 
 			it.m_draw = pPlayerPawn->CalculateBoundingBox(it.m_bbox, false);
 		//	it.hitboxpos[6] = pPlayerPawn->UpdateHitboxData(6);
+			break;
+		}
+		default:
 			break;
 		}
 	}
@@ -804,8 +817,8 @@ namespace WeaponsIcons {
 		try {
 			return *gunIcons.at(designerName);
 		}
-		catch (std::out_of_range& const e) {
-			return NULL;
+	catch (const std::out_of_range& e) {
+			return L'\0';
 		}
 	}
 };
@@ -824,7 +837,7 @@ static Vector_t get_target_angle(C_CSPlayerPawn* localplayer, Vector_t position)
 	angle.clamp();
 	return angle;
 }
-void OVERLAY::CalculateSkeleton(Context_t ctx, CCSPlayerController* pPlayerController, C_CSPlayerPawn* player, const ImVec4& out) {
+void OVERLAY::CalculateSkeleton(Context_t& ctx, CCSPlayerController* pPlayerController, C_CSPlayerPawn* player, const ImVec4& out) {
 	if (!pLocal)
 		return;
 
@@ -908,7 +921,7 @@ bool OVERLAY::IsValid(CCSPlayerController* player) {
 	return (mAlpha[idx] > 0.f);
 }
 #include "../cstrike/features/lagcomp/lagcomp.h"
-#include "../cstrike/core/spoofcall/Invoker.h"
+#include "../cstrike/core/spoofcall/invoker.h"
 void OVERLAY::OnPlayer(CCSPlayerController* player, const ImVec4& out) {
 
 	if (!pLocal)
@@ -978,7 +991,7 @@ void OVERLAY::OnPlayer(CCSPlayerController* player, const ImVec4& out) {
 
 			auto szWeaponName = data->m_szName();
 
-			if (szWeaponName == CS_XOR("NULL"))
+			if (!szWeaponName || std::strcmp(szWeaponName, CS_XOR("NULL")) == 0)
 				return;
 
 
@@ -1052,4 +1065,3 @@ void OVERLAY::OnPlayer(CCSPlayerController* player, const ImVec4& out) {
 	context.Render(ImGui::GetBackgroundDrawList(), out);
 
 }
-
