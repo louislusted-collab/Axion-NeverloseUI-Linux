@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Axion Loader
+Comment=Launch the Axion native Linux loader
+Exec=/home/louis/cheat/Axion-NeverloseUI/run_loader.sh
+Path=/home/louis/cheat/Axion-NeverloseUI
+Icon=/home/louis/cheat/Axion-NeverloseUI/cs2.png
+Terminal=false
+Categories=Game;
+Keywords=Axion;CS2;Loader;Inject;
+StartupNotify=true
