@@ -41,6 +41,15 @@ void SetButtonsSensitive(LoaderState* state, bool sensitive)
     gtk_widget_set_sensitive(state->update_button, sensitive);
 }
 
+std::string LastStatusLine(const char* output)
+{
+    std::string text = output ? output : "";
+    while (!text.empty() && (text.back() == '\n' || text.back() == '\r'))
+        text.pop_back();
+    const auto newline = text.find_last_of("\r\n");
+    return newline == std::string::npos ? text : text.substr(newline + 1);
+}
+
 void InjectionFinished(GObject* source, GAsyncResult* result, gpointer user_data)
 {
     auto* state = static_cast<LoaderState*>(user_data);
@@ -113,8 +122,8 @@ void UpdateFinished(GObject* source, GAsyncResult* result, gpointer user_data)
     const gboolean succeeded = communicated && g_subprocess_get_successful(G_SUBPROCESS(source));
 
     if (succeeded) {
-        const char* message = (output && *output) ? output : "Native Linux manifest is current";
-        SetStatus(state, message, "status-ready");
+        const std::string message = LastStatusLine(output);
+        SetStatus(state, message.empty() ? "Native Linux dump is current" : message.c_str(), "status-ready");
     } else {
         const char* message = error ? error->message : error_output;
         SetStatus(state, (message && *message) ? message : "Signature update failed", "status-error");
