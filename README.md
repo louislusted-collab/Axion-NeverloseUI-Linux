@@ -36,7 +36,9 @@ menu after injection. Renderer diagnostics are written to
 Every injection checks the public native-Linux signature manifest. Updates are
 downloaded into `.axion-cache`, validated before activation, and backed up as a
 last-known-good copy. Network or validation failures never replace the active
-manifest. Set `AXION_SKIP_UPDATE=1` to skip the check.
+manifest. The loader also has an explicit **Update offsets & signatures** button
+which reports the number of verified native signatures. Set
+`AXION_SKIP_UPDATE=1` to skip the automatic check.
 
 The validator rejects Windows modules and manifests that do not require a
 unique match. Windows `client.dll` dumps are never applied to native Linux
