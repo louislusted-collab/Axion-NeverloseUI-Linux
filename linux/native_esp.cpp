@@ -15,6 +15,7 @@
 
 #include <cstring>
 #include <cstdio>
+#include <cstdarg>
 #include <dlfcn.h>
 #include <filesystem>
 #include <fstream>
@@ -26,12 +27,15 @@ CCSPlayerController** native_local_controller = nullptr;
 bool attempted_matrix_lookup = false;
 std::uint64_t frame_counter = 0;
 
-void EspLog(const char* message, const void* first = nullptr, const void* second = nullptr)
+void EspLog(const char* message, ...)
 {
     static FILE* file = std::fopen("/tmp/cs2_esp_debug.log", "a");
     if (file == nullptr)
         return;
-    std::fprintf(file, message, first, second);
+    va_list arguments;
+    va_start(arguments, message);
+    std::vfprintf(file, message, arguments);
+    va_end(arguments);
     std::fputc('\n', file);
     std::fflush(file);
 }
@@ -139,23 +143,33 @@ void LinuxNativeEsp::Render()
     if (draw == nullptr)
         return;
 
+    int found_entities = 0;
+    int found_pawns = 0;
+    int alive_pawns = 0;
+    int enemy_pawns = 0;
+    int projected_pawns = 0;
     int drawn = 0;
-    for (int index = 1; index <= 64; ++index)
+    for (int index = 1; index <= 128; ++index)
     {
         CCSPlayerController* controller = entities->Get<CCSPlayerController>(index);
         if (controller == nullptr || controller == local_controller)
             continue;
 
-        SchemaClassInfoData_t* class_info = nullptr;
-        controller->GetSchemaClassInfo(&class_info);
-        if (class_info == nullptr || class_info->szName == nullptr ||
-            std::strcmp(class_info->szName, "CCSPlayerController") != 0)
-            continue;
+        ++found_entities;
 
         C_CSPlayerPawn* pawn = entities->Get<C_CSPlayerPawn>(controller->GetPawnHandle());
-        if (pawn == nullptr || pawn->GetHealth() <= 0 || pawn->GetHealth() > 200 ||
-            pawn->GetTeam() == local_pawn->GetTeam())
+        if (pawn == nullptr || pawn == local_pawn)
             continue;
+        ++found_pawns;
+
+        const int health_value = pawn->GetHealth();
+        if (health_value <= 0 || health_value > 200)
+            continue;
+        ++alive_pawns;
+
+        if (pawn->GetTeam() == local_pawn->GetTeam())
+            continue;
+        ++enemy_pawns;
 
         CGameSceneNode* scene = pawn->GetGameSceneNode();
         if (scene == nullptr || scene->IsDormant())
@@ -166,6 +180,7 @@ void LinuxNativeEsp::Render()
         ImVec2 feet_screen{}, head_screen{};
         if (!D::WorldToScreen(feet, feet_screen) || !D::WorldToScreen(head, head_screen))
             continue;
+        ++projected_pawns;
 
         const float height = feet_screen.y - head_screen.y;
         if (height < 4.f || height > ImGui::GetIO().DisplaySize.y * 1.5f)
@@ -177,7 +192,7 @@ void LinuxNativeEsp::Render()
         draw->AddRect(min - ImVec2(1.f, 1.f), max + ImVec2(1.f, 1.f), IM_COL32(0, 0, 0, 220), 0.f, 0, 3.f);
         draw->AddRect(min, max, IM_COL32(40, 170, 255, 255), 0.f, 0, 1.f);
 
-        const float health = static_cast<float>(pawn->GetHealth()) / 100.f;
+        const float health = static_cast<float>(health_value) / 100.f;
         draw->AddRectFilled(ImVec2(min.x - 6.f, min.y), ImVec2(min.x - 3.f, max.y), IM_COL32(0, 0, 0, 220));
         draw->AddRectFilled(ImVec2(min.x - 5.f, max.y - height * health), ImVec2(min.x - 4.f, max.y),
                             IM_COL32(static_cast<int>(255.f * (1.f - health)), static_cast<int>(255.f * health), 60, 255));
@@ -185,7 +200,8 @@ void LinuxNativeEsp::Render()
     }
 
     if ((++frame_counter % 300) == 0)
-        EspLog("[ESP] active local=%p drawn=%p", local_controller, reinterpret_cast<void*>(static_cast<std::uintptr_t>(drawn)));
+        EspLog("[ESP] local=%p entities=%d pawns=%d alive=%d enemies=%d projected=%d drawn=%d",
+               local_controller, found_entities, found_pawns, alive_pawns, enemy_pawns, projected_pawns, drawn);
 }
 
 #endif
