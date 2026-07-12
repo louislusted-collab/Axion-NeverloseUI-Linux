@@ -94,24 +94,43 @@ void ResolveViewMatrix()
 
 void LinuxNativeEsp::Render()
 {
-    if (!C_GET(bool, Vars.bVisualOverlay))
+    static bool logged_entry = false;
+    const bool enabled = C_GET(bool, Vars.bVisualOverlay);
+    if (!logged_entry)
+    {
+        EspLog("[ESP] render path reached enabled=%p resource_service=%p",
+               reinterpret_cast<void*>(static_cast<std::uintptr_t>(enabled)), I::GameResourceService);
+        logged_entry = true;
+    }
+    if (!enabled)
         return;
 
-    if (I::Engine == nullptr || I::GameResourceService == nullptr || !I::Engine->IsConnected())
+    // Native engine vtable indices differ from Windows and are not required
+    // here; valid resource/local-player pointers are a stronger state check.
+    if (I::GameResourceService == nullptr)
+        return;
+
+    ResolveViewMatrix();
+    if (native_view_matrix == nullptr || native_local_controller == nullptr)
         return;
 
     CGameEntitySystem* entities = I::GameResourceService->pGameEntitySystem;
     if (entities == nullptr)
         return;
 
-    ResolveViewMatrix();
-    if (native_view_matrix == nullptr)
-        return;
     SDK::ViewMatrix = *native_view_matrix;
 
     CCSPlayerController* local_controller = native_local_controller != nullptr ? *native_local_controller : nullptr;
     if (local_controller == nullptr)
+    {
+        static bool logged_local = false;
+        if (!logged_local)
+        {
+            EspLog("[ESP] local controller is null; pointer=%p", native_local_controller);
+            logged_local = true;
+        }
         return;
+    }
     C_CSPlayerPawn* local_pawn = entities->Get<C_CSPlayerPawn>(local_controller->GetPawnHandle());
     if (local_pawn == nullptr)
         return;
