@@ -24,7 +24,7 @@ if [ "$EUID" -ne 0 ]; then
     exec sudo env AXION_UPDATE_DONE=1 "$0" "$@"
 fi
 
-rm -f /tmp/cs2_vulkan_debug.log /tmp/cs2_inject_debug.log /tmp/cs2_init_debug.log /tmp/cs2_hook_debug.log
+rm -f /tmp/cs2_vulkan_debug.log /tmp/cs2_inject_debug.log /tmp/cs2_init_debug.log /tmp/cs2_hook_debug.log /tmp/cs2_esp_debug.log
 echo "Injecting $LIBRARY into CS2 pid $PID..."
 gdb -n --batch \
     -ex "attach $PID" \

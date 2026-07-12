@@ -168,12 +168,22 @@ std::uint32_t SCHEMA::GetOffset(const char* szQualifiedFieldName)
 
 	SchemaClassInfoData_t* classInfo = nullptr;
 	scope->FindDeclaredClass(&classInfo, className.c_str());
-	if (classInfo == nullptr || classInfo->pFields == nullptr)
+	if (classInfo == nullptr)
 		return 0U;
 
-	for (int i = 0; i < classInfo->nFieldSize; ++i)
+#ifdef __linux__
+	const std::int16_t fieldCount = *reinterpret_cast<const std::int16_t*>(reinterpret_cast<const std::uint8_t*>(classInfo) + 0x24);
+	const auto fields = *reinterpret_cast<SchemaClassFieldData_t* const*>(reinterpret_cast<const std::uint8_t*>(classInfo) + 0x30);
+#else
+	const std::int16_t fieldCount = classInfo->nFieldSize;
+	const auto fields = classInfo->pFields;
+#endif
+	if (fields == nullptr || fieldCount <= 0 || fieldCount > 4096)
+		return 0U;
+
+	for (int i = 0; i < fieldCount; ++i)
 	{
-		const SchemaClassFieldData_t& field = classInfo->pFields[i];
+		const SchemaClassFieldData_t& field = fields[i];
 		if (field.szName != nullptr && std::strcmp(field.szName, fieldName) == 0)
 		{
 			vecSchemaData.emplace_back(hash, field.nSingleInheritanceOffset);

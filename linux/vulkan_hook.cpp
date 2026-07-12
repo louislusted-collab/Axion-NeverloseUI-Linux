@@ -30,6 +30,7 @@
 #include "../cstrike/utilities/log.h"
 #include "../cstrike/utilities/draw.h"
 #include "../cstrike/core/menu.h"
+#include "native_esp.h"
 
 void* g_SDLWindow = nullptr;
 bool  g_MenuOpen  = false;
@@ -823,6 +824,7 @@ static VkResult Hooked_QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pI
         MENU::animMenuDimBackground.Switch();
     }
     MENU::bMainWindowOpened = g_MenuOpen;
+    LinuxNativeEsp::Render();
     MENU::RenderMainWindow();
 
     ImGui::Render();

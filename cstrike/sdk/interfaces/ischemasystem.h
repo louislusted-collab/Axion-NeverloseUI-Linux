@@ -161,7 +161,11 @@ class CSchemaSystemTypeScope
 public:
 	void FindDeclaredClass(SchemaClassInfoData_t** pReturnClass, const char* szClassName)
 	{
+#ifdef __linux__
+		*pReturnClass = MEM::CallVFunc<SchemaClassInfoData_t*, 2U>(this, szClassName);
+#else
 		return MEM::CallVFunc<void, 2U>(this, pReturnClass, szClassName);
+#endif
 	}
 
 	CSchemaType* FindSchemaTypeByName(const char* szName, std::uintptr_t* pSchema)

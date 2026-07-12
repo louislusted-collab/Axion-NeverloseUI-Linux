@@ -21,6 +21,18 @@
       "occurrences": 1,
       "operations": [{ "type": "rip" }]
     },
+    "dwViewMatrixNative": {
+      "module": "libclient.so",
+      "pattern": "C6 83 ? ? 00 00 01 4C 8D 05",
+      "occurrences": 1,
+      "operations": [{ "type": "add", "value": 7 }, { "type": "rip", "offset": 3, "len": 7 }]
+    },
+    "dwLocalPlayerControllerNative": {
+      "module": "libclient.so",
+      "pattern": "48 83 3D ? ? ? ? 00 0F 95 C0 C3",
+      "occurrences": 1,
+      "operations": [{ "type": "rip", "offset": 3, "len": 8 }]
+    },
     "dwBuildNumber": {
       "module": "libengine2.so",
       "pattern": "89 15 ? ? ? ? 48 83 C3",

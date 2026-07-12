@@ -33,17 +33,32 @@ public:
 
 	int GetHighestEntityIndex()
 	{
+#ifdef __linux__
+		// Native ESP only needs controller slots; avoid a patch-sensitive static offset.
+		return 128;
+#else
 		return *reinterpret_cast<int*>(reinterpret_cast<std::uintptr_t>(this) + 0x1510);
+#endif
 	}
 
 private:
 	void* GetEntityByIndex(int nIndex)
 	{
+#ifdef __linux__
+		if (nIndex < 0 || nIndex >= MAX_TOTAL_ENTITIES)
+			return nullptr;
+		const auto base = reinterpret_cast<std::uintptr_t>(this);
+		const auto bucket = *reinterpret_cast<std::uintptr_t*>(base + 0x10 + 0x8 * (nIndex >> 9));
+		if (bucket == 0)
+			return nullptr;
+		return *reinterpret_cast<void**>(bucket + 0x70 * (nIndex & 0x1FF));
+#else
 		//@ida: #STR: "(missing),", "(missing)", "Ent %3d: %s class %s name %s\n" | or find "cl_showents" cvar -> look for callback
 		//	do { pEntity = GetBaseEntityByIndex(g_pGameEntitySystem, nCurrentIndex); ... }
 		using fnGetBaseEntity = void*(CS_THISCALL*)(void*, int);
 		static auto GetBaseEntity = reinterpret_cast<fnGetBaseEntity>(MEM::FindPattern(CLIENT_DLL, CS_XOR("81 FA ? ? ? ? 77 ? 8B C2 C1 F8 ? 83 F8 ? 77 ? 48 98 48 8B 4C C1 ? 48 85 C9 74 ? 8B C2 25 ? ? ? ? 48 6B C0 ? 48 03 C8 74 ? 8B 41 ? 25 ? ? ? ? 3B C2 75 ? 48 8B 01")));
 		return GetBaseEntity(this, nIndex);
+#endif
 	}
 };
 
