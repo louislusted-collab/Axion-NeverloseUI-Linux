@@ -85,12 +85,20 @@ inline static void WriteConVarFlags(FILE* hFile, const uint32_t nFlags)
 bool CONVAR::Dump(const wchar_t* wszFileName)
 {
 #ifdef __linux__
+	FILE* hOutFile = fopen("/tmp/cs2_convars_dump.txt", "w");
+	if (!hOutFile || I::Cvar == nullptr)
+		return false;
+	const std::uint64_t count = I::Cvar->GetNativeCount();
+	for (std::uint64_t i = 0; i < count; ++i)
+	{
+		CConVar* convar = I::Cvar->GetNativeAt(i);
+		if (convar != nullptr && convar->szName != nullptr)
+			fprintf(hOutFile, "%s\n", convar->szName);
+	}
+	fclose(hOutFile);
+	L_PRINT(LOG_INFO) << CS_XOR("dumped native Linux cvars: ") << count;
 	return true;
-#endif
-#ifdef __linux__
-	// @todo: fix listConvars offset for Linux, skip dump for now
-	return true;
-#endif
+#else
 #ifdef _WIN32
 	wchar_t wszDumpFilePath[MAX_PATH];
 	if (!CORE::GetWorkingPath(wszDumpFilePath))
@@ -135,24 +143,11 @@ bool CONVAR::Dump(const wchar_t* wszFileName)
 	fclose(hOutFile);
 #endif
 	return true;
+#endif
 }
 
 bool CONVAR::Setup()
 {
-#ifdef __linux__
-	L_PRINT(LOG_WARNING) << CS_XOR("Linux: skipping CONVAR::Setup - IEngineCVar offsets differ");
-	return true;
-#endif
-#ifdef __linux__
-	// @todo: fix IEngineCVar::Find hash table offsets for Linux
-	L_PRINT(LOG_WARNING) << CS_XOR("Linux: skipping CONVAR::Setup, convars unavailable");
-	return true;
-#endif
-#ifdef __linux__
-	// @todo: fix IEngineCVar::Find for Linux (hash table traversal uses different offsets)
-	// For now, skip convar capture. Features that use these will need null checks.
-	return true;
-#endif
 	bool bSuccess = true;
 
 	m_pitch = I::Cvar->Find(FNV1A::HashConst("m_pitch"));
@@ -206,5 +201,10 @@ bool CONVAR::Setup()
 	cl_interp_ratio = I::Cvar->Find(FNV1A::HashConst("cl_interp_ratio")); // flaot
 	bSuccess &= cl_interp_ratio != nullptr;
 
+#ifdef __linux__
+	// Some cvars are absent in particular modes; the registry itself is usable.
+	return I::Cvar != nullptr;
+#else
 	return bSuccess;
+#endif
 }

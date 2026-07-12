@@ -150,7 +150,8 @@ void OVERLAY::CBarComponent::Render(ImDrawList* pDrawList, const ImVec2& vecPosi
 
 	// Apply animation smoothing
 	const float flAnimationSpeed = 8.f; // Adjust as needed
-	flPrevProgressFactor = std::lerp(flPrevProgressFactor, flProgressFactor, flAnimationSpeed * I::GlobalVars->flFrameTime);
+	const float frameTime = I::GlobalVars != nullptr ? I::GlobalVars->flFrameTime : ImGui::GetIO().DeltaTime;
+	flPrevProgressFactor = std::lerp(flPrevProgressFactor, flProgressFactor, std::clamp(flAnimationSpeed * frameTime, 0.f, 1.f));
 
 	// Modify active side axis by factor
 	if ((this->nSide & 1U) == 0U)
