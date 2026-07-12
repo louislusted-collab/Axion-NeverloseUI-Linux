@@ -44,7 +44,9 @@ void ImGui_ImplDX11_SetupRenderState(ImDrawData* draw_data, ID3D11DeviceContext*
 #include "../core/Header.h"
 #include "../core/gui.hpp"
 #ifdef _WIN32
+#ifdef _WIN32
 #include "../cstrike/font.h"
+#endif
 #endif
 #include "../cstrike/texture.h"
 // used: engine/engineclient

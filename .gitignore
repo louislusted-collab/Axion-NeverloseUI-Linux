@@ -4,6 +4,7 @@ obj/
 *.o
 *.so
 *.a
+axion_loader
 
 # Logs and crash dumps
 *.log
@@ -22,3 +23,9 @@ core.*
 .idea/
 *.swp
 *~
+
+# Runtime updater cache and local recovery artifacts
+.axion-cache/
+axion-renderer-recovery/
+axion-renderer-recovery.tar.gz
+renderer-backup-*/

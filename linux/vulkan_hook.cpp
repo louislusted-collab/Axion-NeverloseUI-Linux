@@ -15,16 +15,20 @@
 #include <cstdlib>
 #include <string>
 #include <unistd.h>
+#include <funchook.h>
 
 // stb_image implementation already lives in cstrike/utilities/draw.cpp.
 #include "../dependencies/stb_image.h"
 
 #include "../dependencies/imgui/imgui.h"
+#include "../dependencies/imgui/imgui_settings.h"
 #include "../dependencies/imgui/backends/imgui_impl_sdl3.h"
 #include "../dependencies/imgui/backends/imgui_impl_vulkan.h"
+#include "../cstrike/font.h"
 
 #include "../cstrike/utilities/inputsystem.h"
 #include "../cstrike/utilities/log.h"
+#include "../cstrike/utilities/draw.h"
 #include "../cstrike/core/menu.h"
 
 void* g_SDLWindow = nullptr;
@@ -65,8 +69,15 @@ static ImGui_ImplVulkanH_FrameSemaphores frame_sems[8]     = {};
 static VkResult (*orig_vkQueuePresentKHR)(VkQueue, const VkPresentInfoKHR*) = nullptr;
 static VkResult (*orig_vkCreateSwapchainKHR)(VkDevice, const VkSwapchainCreateInfoKHR*,
                                              const VkAllocationCallbacks*, VkSwapchainKHR*) = nullptr;
+static VkResult (*orig_vkAcquireNextImageKHR)(VkDevice, VkSwapchainKHR, uint64_t,
+                                              VkSemaphore, VkFence, uint32_t*) = nullptr;
+static VkResult (*orig_vkAcquireNextImage2KHR)(VkDevice,
+                                               const VkAcquireNextImageInfoKHR*, uint32_t*) = nullptr;
 static bool (*orig_SDL_PollEvent)(SDL_Event*) = nullptr;
 static int (*orig_SDL_PeepEvents)(SDL_Event*, int, SDL_EventAction, Uint32, Uint32) = nullptr;
+static funchook_t* late_hooks = nullptr;
+static VkInstance late_probe_instance = VK_NULL_HANDLE;
+static VkDevice late_probe_device = VK_NULL_HANDLE;
 
 struct QueueRecord { VkQueue queue = VK_NULL_HANDLE; uint32_t family = UINT32_MAX; };
 static QueueRecord queue_records[32] = {};
@@ -75,6 +86,33 @@ static void VulkanDebug(const char* msg)
 {
     FILE* f = fopen("/tmp/cs2_vulkan_debug.log", "a");
     if (f) { fprintf(f, "%s\n", msg); fclose(f); }
+}
+
+static SDL_Window* FindCS2Window()
+{
+    if (g_SDLWindow)
+        return static_cast<SDL_Window*>(g_SDLWindow);
+
+    SDL_Window* window = SDL_GetKeyboardFocus();
+    if (!window)
+        window = SDL_GetMouseFocus();
+
+    if (!window) {
+        int count = 0;
+        SDL_Window** windows = SDL_GetWindows(&count);
+        for (int i = 0; windows && i < count; ++i) {
+            int width = 0, height = 0;
+            if (windows[i] && SDL_GetWindowSizeInPixels(windows[i], &width, &height) &&
+                width > 0 && height > 0) {
+                window = windows[i];
+                break;
+            }
+        }
+        SDL_free(windows);
+    }
+
+    g_SDLWindow = window;
+    return window;
 }
 
 
@@ -465,7 +503,7 @@ static unsigned int SDLMouseButtonToVK(uint8_t button)
 static void ProcessSDLEvent(SDL_Event* event)
 {
     if (!event) return;
-    if (!g_SDLWindow) g_SDLWindow = SDL_GetKeyboardFocus();
+    FindCS2Window();
 
     switch (event->type) {
     case SDL_EVENT_KEY_DOWN:
@@ -683,8 +721,17 @@ static VkResult Hooked_QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pI
     uint32_t image_index = pInfo->pImageIndices ? pInfo->pImageIndices[0] : 0;
     if (image_index >= 8) return orig_vkQueuePresentKHR(queue, pInfo);
 
-    if (!g_SDLWindow) g_SDLWindow = SDL_GetKeyboardFocus();
-    if (!g_SDLWindow) return orig_vkQueuePresentKHR(queue, pInfo);
+    SDL_Window* window = FindCS2Window();
+    if (!window) return orig_vkQueuePresentKHR(queue, pInfo);
+
+    if (vk_extent.width == 0 || vk_extent.height == 0) {
+        int width = 0, height = 0;
+        if (SDL_GetWindowSizeInPixels(window, &width, &height) && width > 0 && height > 0) {
+            vk_extent.width = static_cast<uint32_t>(width);
+            vk_extent.height = static_cast<uint32_t>(height);
+            PreviewDebug("[VULKAN] late drawable size: %dx%d", width, height);
+        }
+    }
 
     if (!ImGui::GetCurrentContext()) {
         ImGui::CreateContext();
@@ -693,16 +740,55 @@ static VkResult Hooked_QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pI
         io.LogFilename = nullptr;
         io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
 
-        if (!ImGui_ImplSDL3_InitForVulkan((SDL_Window*)g_SDLWindow)) {
+        if (!ImGui_ImplSDL3_InitForVulkan(window)) {
             ImGui::DestroyContext();
             return orig_vkQueuePresentKHR(queue, pInfo);
         }
         vk_sdl_inited = true;
-        io.Fonts->AddFontDefault();
+        ImFontConfig font_cfg{};
+        font_cfg.FontDataOwnedByAtlas = false;
+        font::lexend_regular = io.Fonts->AddFontFromMemoryTTF(
+            lexend_regular, sizeof(lexend_regular), 14.f, &font_cfg,
+            io.Fonts->GetGlyphRangesCyrillic());
+        font::lexend_bold = io.Fonts->AddFontFromMemoryTTF(
+            lexend_bold, sizeof(lexend_bold), 15.f, &font_cfg,
+            io.Fonts->GetGlyphRangesCyrillic());
+        font::lexend_general_bold = font::lexend_bold;
+        font::icomoon = io.Fonts->AddFontFromMemoryTTF(
+            icomoon, sizeof(icomoon), 20.f, &font_cfg,
+            io.Fonts->GetGlyphRangesCyrillic());
+        font::icomoon_widget = io.Fonts->AddFontFromMemoryTTF(
+            icomoon_widget, sizeof(icomoon_widget), 15.f, &font_cfg,
+            io.Fonts->GetGlyphRangesCyrillic());
+        font::icomoon_widget2 = io.Fonts->AddFontFromMemoryTTF(
+            icomoon, sizeof(icomoon), 16.f, &font_cfg,
+            io.Fonts->GetGlyphRangesCyrillic());
+
+        if (!font::lexend_regular || !font::lexend_bold || !font::icomoon || !font::icomoon_widget) {
+            ImFont* fallback = io.Fonts->AddFontDefault();
+            font::lexend_regular = fallback;
+            font::lexend_bold = fallback;
+            font::lexend_general_bold = fallback;
+            font::icomoon = fallback;
+            font::icomoon_widget = fallback;
+            font::icomoon_widget2 = fallback;
+        }
+
+        FONT::pVisual = font::lexend_regular;
+        FONT::pEspName = font::lexend_regular;
+        FONT::pEspFlagsName = font::lexend_regular;
+        FONT::pEspWepName = font::lexend_regular;
+        FONT::pEspHealth = font::lexend_regular;
+        FONT::pEspIcons = font::icomoon_widget;
+        FONT::pExtra = font::lexend_regular;
+        FONT::pMenuTabsDesc = font::lexend_regular;
+        for (ImFont*& menu_font : FONT::pMenu)
+            menu_font = font::lexend_regular;
         io.Fonts->Build();
 
         g_MenuOpen = true;
         MENU::bMainWindowOpened = true;
+        MENU::animMenuDimBackground.SetSwitch(true);
         VulkanDebug("[VULKAN] ImGui context initialized; menu opened");
     }
 
@@ -729,6 +815,8 @@ static VkResult Hooked_QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pI
     ImGui_ImplVulkan_NewFrame();
     ImGui_ImplSDL3_NewFrame();
     ImGui::NewFrame();
+
+    ImGui::GetIO().MouseDrawCursor = g_MenuOpen;
 
     if (ImGui::IsKeyPressed(ImGuiKey_Insert, false)) {
         g_MenuOpen = !g_MenuOpen;
@@ -796,6 +884,42 @@ static VkResult Hooked_CreateSwapchainKHR(VkDevice device,
     return orig_vkCreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
 }
 
+static void CaptureLateDevice(VkDevice device)
+{
+    if (device == VK_NULL_HANDLE)
+        return;
+
+    vk_device = device;
+    void* vulkan = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_NOLOAD);
+    auto get_device_queue = vulkan
+        ? reinterpret_cast<PFN_vkGetDeviceQueue>(dlsym(vulkan, "vkGetDeviceQueue"))
+        : nullptr;
+    if (get_device_queue && vk_queue_family != UINT32_MAX) {
+        VkQueue graphics_queue = VK_NULL_HANDLE;
+        get_device_queue(device, vk_queue_family, 0, &graphics_queue);
+        if (graphics_queue != VK_NULL_HANDLE)
+            vk_queue = graphics_queue;
+    }
+    if (vulkan)
+        dlclose(vulkan);
+}
+
+static VkResult Late_AcquireNextImageKHR(VkDevice device, VkSwapchainKHR swapchain,
+                                         uint64_t timeout, VkSemaphore semaphore,
+                                         VkFence fence, uint32_t* image_index)
+{
+    CaptureLateDevice(device);
+    return orig_vkAcquireNextImageKHR(device, swapchain, timeout, semaphore, fence, image_index);
+}
+
+static VkResult Late_AcquireNextImage2KHR(VkDevice device,
+                                          const VkAcquireNextImageInfoKHR* info,
+                                          uint32_t* image_index)
+{
+    CaptureLateDevice(device);
+    return orig_vkAcquireNextImage2KHR(device, info, image_index);
+}
+
 // ── SDL event hooks ────────────────────────────────────────────────────────
 static bool Hooked_SDL_PollEvent(SDL_Event* event)
 {
@@ -804,23 +928,9 @@ static bool Hooked_SDL_PollEvent(SDL_Event* event)
     return result;
 }
 
-// ── LD_PRELOAD exports ─────────────────────────────────────────────────────
-extern "C" bool SDL_PollEvent(SDL_Event* event)
+static int Late_SDL_PeepEvents(SDL_Event* events, int numevents,
+                               SDL_EventAction action, Uint32 minType, Uint32 maxType)
 {
-    if (!orig_SDL_PollEvent)
-        orig_SDL_PollEvent = reinterpret_cast<decltype(orig_SDL_PollEvent)>(dlsym(RTLD_NEXT, "SDL_PollEvent"));
-    return orig_SDL_PollEvent ? Hooked_SDL_PollEvent(event) : false;
-}
-
-extern "C" int SDL_PeepEvents(SDL_Event* events, int numevents,
-                                SDL_EventAction action, Uint32 minType, Uint32 maxType)
-{
-    if (!orig_SDL_PeepEvents) {
-        orig_SDL_PeepEvents = reinterpret_cast<decltype(orig_SDL_PeepEvents)>(dlsym(RTLD_NEXT, "SDL_PeepEvents"));
-        VulkanDebug("[SDL] SDL_PeepEvents intercepted");
-    }
-    if (!orig_SDL_PeepEvents) return -1;
-
     const int result = orig_SDL_PeepEvents(events, numevents, action, minType, maxType);
     if (result > 0 && events && action != SDL_ADDEVENT) {
         for (int i = 0; i < result; ++i)
@@ -829,6 +939,7 @@ extern "C" int SDL_PeepEvents(SDL_Event* events, int numevents,
     return result;
 }
 
+// ── LD_PRELOAD exports ─────────────────────────────────────────────────────
 extern "C" VkResult vkCreateInstance(const VkInstanceCreateInfo* ci, const VkAllocationCallbacks* alloc, VkInstance* inst)
 {
     static auto real = reinterpret_cast<PFN_vkCreateInstance>(dlsym(RTLD_NEXT, "vkCreateInstance"));
@@ -930,11 +1041,127 @@ void UnloadCheatPreviewTexture()
 void InstallVulkanHook()
 {
     L_PRINT(LOG_INFO) << "[VULKAN] InstallVulkanHook called";
-    if (vk_device != VK_NULL_HANDLE && orig_vkQueuePresentKHR != nullptr) {
-        L_PRINT(LOG_INFO) << "[VULKAN] Preload interception active";
+    if (late_hooks != nullptr)
+        return;
+
+    void* vulkan = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_NOLOAD);
+    if (!vulkan) {
+        VulkanDebug("[VULKAN] late hook: libvulkan is not loaded");
         return;
     }
-    L_PRINT(LOG_WARNING) << "[VULKAN] Renderer interception not active at startup; use launch_preload.sh";
+
+    auto create_instance = reinterpret_cast<PFN_vkCreateInstance>(dlsym(vulkan, "vkCreateInstance"));
+    auto enumerate_devices = reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(dlsym(vulkan, "vkEnumeratePhysicalDevices"));
+    auto get_properties = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(dlsym(vulkan, "vkGetPhysicalDeviceProperties"));
+    auto get_queue_properties = reinterpret_cast<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(dlsym(vulkan, "vkGetPhysicalDeviceQueueFamilyProperties"));
+    auto create_device = reinterpret_cast<PFN_vkCreateDevice>(dlsym(vulkan, "vkCreateDevice"));
+    auto destroy_device = reinterpret_cast<PFN_vkDestroyDevice>(dlsym(vulkan, "vkDestroyDevice"));
+    auto get_device_proc = reinterpret_cast<PFN_vkGetDeviceProcAddr>(dlsym(vulkan, "vkGetDeviceProcAddr"));
+    if (!create_instance || !enumerate_devices || !get_properties || !get_queue_properties ||
+        !create_device || !destroy_device || !get_device_proc) {
+        VulkanDebug("[VULKAN] late hook: missing loader functions");
+        dlclose(vulkan);
+        return;
+    }
+
+    VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
+    app.pApplicationName = "Axion probe";
+    app.apiVersion = VK_API_VERSION_1_1;
+    VkInstanceCreateInfo instance_info{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+    instance_info.pApplicationInfo = &app;
+    if (create_instance(&instance_info, nullptr, &late_probe_instance) != VK_SUCCESS) {
+        VulkanDebug("[VULKAN] late hook: probe instance failed");
+        dlclose(vulkan);
+        return;
+    }
+    vk_instance = late_probe_instance;
+
+    uint32_t device_count = 0;
+    enumerate_devices(late_probe_instance, &device_count, nullptr);
+    std::vector<VkPhysicalDevice> devices(device_count);
+    if (device_count == 0 || enumerate_devices(late_probe_instance, &device_count, devices.data()) != VK_SUCCESS) {
+        VulkanDebug("[VULKAN] late hook: no physical device");
+        dlclose(vulkan);
+        return;
+    }
+
+    vk_physical_device = devices[0];
+    for (VkPhysicalDevice candidate : devices) {
+        VkPhysicalDeviceProperties properties{};
+        get_properties(candidate, &properties);
+        if (properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+            vk_physical_device = candidate;
+            break;
+        }
+    }
+
+    uint32_t family_count = 0;
+    get_queue_properties(vk_physical_device, &family_count, nullptr);
+    std::vector<VkQueueFamilyProperties> families(family_count);
+    get_queue_properties(vk_physical_device, &family_count, families.data());
+    vk_queue_family = UINT32_MAX;
+    for (uint32_t i = 0; i < family_count; ++i) {
+        if (families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+            vk_queue_family = i;
+            break;
+        }
+    }
+    if (vk_queue_family == UINT32_MAX) {
+        VulkanDebug("[VULKAN] late hook: no graphics queue family");
+        dlclose(vulkan);
+        return;
+    }
+
+    const float priority = 1.f;
+    VkDeviceQueueCreateInfo queue_info{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+    queue_info.queueFamilyIndex = vk_queue_family;
+    queue_info.queueCount = 1;
+    queue_info.pQueuePriorities = &priority;
+    const char* extension = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+    VkDeviceCreateInfo device_info{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
+    device_info.queueCreateInfoCount = 1;
+    device_info.pQueueCreateInfos = &queue_info;
+    device_info.enabledExtensionCount = 1;
+    device_info.ppEnabledExtensionNames = &extension;
+    if (create_device(vk_physical_device, &device_info, nullptr, &late_probe_device) != VK_SUCCESS) {
+        VulkanDebug("[VULKAN] late hook: probe device failed");
+        dlclose(vulkan);
+        return;
+    }
+
+    orig_vkQueuePresentKHR = reinterpret_cast<decltype(orig_vkQueuePresentKHR)>(get_device_proc(late_probe_device, "vkQueuePresentKHR"));
+    orig_vkCreateSwapchainKHR = reinterpret_cast<decltype(orig_vkCreateSwapchainKHR)>(get_device_proc(late_probe_device, "vkCreateSwapchainKHR"));
+    orig_vkAcquireNextImageKHR = reinterpret_cast<decltype(orig_vkAcquireNextImageKHR)>(get_device_proc(late_probe_device, "vkAcquireNextImageKHR"));
+    orig_vkAcquireNextImage2KHR = reinterpret_cast<decltype(orig_vkAcquireNextImage2KHR)>(get_device_proc(late_probe_device, "vkAcquireNextImage2KHR"));
+
+    late_hooks = funchook_create();
+    int result = late_hooks ? 0 : -1;
+    if (result == 0) result = funchook_prepare(late_hooks, reinterpret_cast<void**>(&orig_vkQueuePresentKHR), reinterpret_cast<void*>(Hooked_QueuePresentKHR));
+    if (result == 0) result = funchook_prepare(late_hooks, reinterpret_cast<void**>(&orig_vkAcquireNextImageKHR), reinterpret_cast<void*>(Late_AcquireNextImageKHR));
+    if (result == 0 && orig_vkAcquireNextImage2KHR)
+        result = funchook_prepare(late_hooks, reinterpret_cast<void**>(&orig_vkAcquireNextImage2KHR), reinterpret_cast<void*>(Late_AcquireNextImage2KHR));
+
+    void* sdl = dlopen("libSDL3.so.0", RTLD_NOW | RTLD_NOLOAD);
+    if (result == 0 && sdl) {
+        orig_SDL_PeepEvents = reinterpret_cast<decltype(orig_SDL_PeepEvents)>(dlsym(sdl, "SDL_PeepEvents"));
+        if (orig_SDL_PeepEvents)
+            result = funchook_prepare(late_hooks, reinterpret_cast<void**>(&orig_SDL_PeepEvents), reinterpret_cast<void*>(Late_SDL_PeepEvents));
+    }
+    if (sdl) dlclose(sdl);
+
+    if (result == 0)
+        result = funchook_install(late_hooks, 0);
+    destroy_device(late_probe_device, nullptr);
+    late_probe_device = VK_NULL_HANDLE;
+    dlclose(vulkan);
+
+    if (result != 0) {
+        VulkanDebug("[VULKAN] late hook installation failed");
+        funchook_destroy(late_hooks);
+        late_hooks = nullptr;
+        return;
+    }
+    VulkanDebug("[VULKAN] late hooks installed");
 }
 
 void EnableVulkanMenu()

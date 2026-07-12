@@ -1,3 +1,47 @@
+# Axion NeverloseUI — Native Linux
+
+Native Linux port of Axion with a Vulkan/SDL3 renderer and a minimal GTK4
+loader. This repository is under active development; gameplay features that
+depend on old signatures or layouts may not work until the validated updater
+is complete.
+
+## Build
+
+Arch Linux packages used by the current build include GTK4, SDL3, Vulkan,
+FreeType, GDB, and a C++20 compiler.
+
+```bash
+make
+```
+
+This creates:
+
+- `cs2_axion.so` — the injected library.
+- `axion_loader` — the graphical loader.
+
+## Run
+
+Start native CS2 normally through Steam, then launch:
+
+```bash
+./run_loader.sh
+```
+
+Press **Inject** and approve the graphical privilege prompt. Insert toggles the
+menu after injection. Renderer diagnostics are written to
+`/tmp/cs2_vulkan_debug.log`.
+
+## Offset updater
+
+The native-Linux updater is the next milestone. It will use runtime schema
+resolution plus a versioned Linux signature manifest with validation and a
+last-known-good fallback. Windows `client.dll` dumps are not applied to native
+Linux `libclient.so`.
+
+## Upstream
+
+Based on the original Axion project:
+
 # Axion-CS2-RAGE-CHEAT
  + The source code of AXION CS2 internal rage cheat.
  + It's made on asphyxia base and has some features implemented from csgo cheats like Pandora.

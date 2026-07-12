@@ -9,7 +9,7 @@ IMGUI   = $(DEPS)/imgui
 
 BUILD ?= debug
 
-CFLAGS_BASE = -shared -fPIC $(STD) \
+CFLAGS_BASE = -shared -fPIC -fvisibility=hidden $(STD) \
 	-D__linux__ \
 	-DIMGUI_DEFINE_MATH_OPERATORS \
 	-I$(BASE) \
@@ -110,10 +110,13 @@ OBJ_FILES += $(IMGUI)/backends/imgui_impl_vulkan.cpp.o
 
 OBJS = $(addprefix obj/, $(OBJ_FILES))
 BIN  = cs2_axion.so
+LOADER = axion_loader
+GTK_CFLAGS = $(shell pkg-config --cflags gtk4)
+GTK_LIBS = $(shell pkg-config --libs gtk4)
 
-.PHONY: all debug release clean
+.PHONY: all debug release loader clean
 
-all: debug
+all: debug loader
 
 debug: BUILD = debug
 debug: $(BIN)
@@ -121,8 +124,13 @@ debug: $(BIN)
 release: BUILD = release
 release: $(BIN)
 
+loader: $(LOADER)
+
 clean:
-	rm -rf obj $(BIN)
+	rm -rf obj $(BIN) $(LOADER)
+
+$(LOADER): loader/axion_loader.cpp
+	$(CC) $(STD) -O2 -Wall -Wextra $(GTK_CFLAGS) -o $@ $< $(GTK_LIBS)
 
 $(BIN): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
