@@ -7,7 +7,10 @@ LOCAL="$ROOT/offsets/linux-signatures.json"
 ACTIVE="$CACHE/linux-signatures.json"
 BACKUP="$CACHE/linux-signatures.last-good.json"
 TEMP="$CACHE/linux-signatures.download"
+TEMP_RESOLVED="$CACHE/linux-offsets.download.json"
+RESOLVED="$CACHE/linux-offsets.resolved.json"
 VALIDATOR="$ROOT/tools/validate_offsets.py"
+SCANNER="$ROOT/tools/dump_linux_offsets.py"
 REMOTE="${AXION_OFFSETS_URL:-https://raw.githubusercontent.com/louislusted-collab/Axion-NeverloseUI-Linux/main/offsets/linux-signatures.json}"
 
 mkdir -p "$CACHE"
@@ -15,6 +18,7 @@ mkdir -p "$CACHE"
 report_active() {
     if [ -f "$ACTIVE" ]; then
         "$VALIDATOR" "$ACTIVE"
+        "$SCANNER" "$ACTIVE" "$RESOLVED"
     fi
 }
 
@@ -23,7 +27,12 @@ activate_local() {
         echo "Bundled Linux signature manifest is invalid." >&2
         return 1
     fi
+    if ! "$SCANNER" "$LOCAL" "$TEMP_RESOLVED" >/dev/null; then
+        echo "Bundled signatures do not match the installed native CS2 build." >&2
+        return 1
+    fi
     cp -f "$LOCAL" "$ACTIVE"
+    mv -f "$TEMP_RESOLVED" "$RESOLVED"
     echo "Offsets: using bundled native-Linux manifest."
 }
 
@@ -44,15 +53,23 @@ if ! curl --fail --silent --show-error --location \
 fi
 
 if ! "$VALIDATOR" "$TEMP" >/dev/null; then
-    rm -f "$TEMP"
+    rm -f "$TEMP" "$TEMP_RESOLVED"
     [ -f "$ACTIVE" ] || activate_local
     echo "Offsets: rejected invalid update; kept last-known-good manifest." >&2
     report_active
     exit 0
 fi
 
+if ! "$SCANNER" "$TEMP" "$TEMP_RESOLVED" >/dev/null; then
+    rm -f "$TEMP" "$TEMP_RESOLVED"
+    [ -f "$ACTIVE" ] || activate_local
+    echo "Offsets: update does not match installed native CS2; kept last-known-good manifest." >&2
+    report_active
+    exit 0
+fi
+
 if [ -f "$ACTIVE" ] && cmp -s "$TEMP" "$ACTIVE"; then
-    rm -f "$TEMP"
+    rm -f "$TEMP" "$TEMP_RESOLVED"
     echo "Offsets: already current."
     report_active
     exit 0
@@ -62,5 +79,6 @@ if [ -f "$ACTIVE" ]; then
     cp -f "$ACTIVE" "$BACKUP"
 fi
 mv -f "$TEMP" "$ACTIVE"
+mv -f "$TEMP_RESOLVED" "$RESOLVED"
 echo "Offsets: installed validated native-Linux manifest update."
 report_active

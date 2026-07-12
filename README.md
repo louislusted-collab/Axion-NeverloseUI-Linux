@@ -43,9 +43,11 @@ which reports the number of verified native signatures. Set
 The validator rejects Windows modules and manifests that do not require a
 unique match. Windows `client.dll` dumps are never applied to native Linux
 `libclient.so`. Schema fields now resolve directly from CS2's runtime schema,
-so they do not need static offsets. The bundled signature manifest is an empty,
-validated baseline until native Linux patterns are verified; native gameplay
-hooks are also still required before the old gameplay features work.
+so they do not need static offsets. The bundled manifest contains only patterns
+that match uniquely against current native ELF files; downloaded updates must
+also resolve locally before activation. Patterns were initially derived from
+the MIT-licensed `a2x/cs2-dumper` Linux branch and independently validated.
+Native gameplay hooks are still required before all old gameplay features work.
 
 ## Upstream
 

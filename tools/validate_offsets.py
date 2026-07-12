@@ -18,6 +18,7 @@ MODULES = {
     "libschemasystem.so",
     "libtier0.so",
 }
+OPERATIONS = {"add", "sub", "rip", "read", "slice"}
 
 
 def fail(message: str) -> None:
@@ -55,6 +56,17 @@ def validate(path: Path) -> dict:
             fail(f"{name}: pattern must require exactly one match")
         if not isinstance(entry.get("offset", 0), int):
             fail(f"{name}: offset must be an integer")
+        operations = entry.get("operations", [])
+        if not isinstance(operations, list):
+            fail(f"{name}: operations must be an array")
+        for operation in operations:
+            if not isinstance(operation, dict) or operation.get("type") not in OPERATIONS:
+                fail(f"{name}: invalid operation")
+            kind = operation["type"]
+            if kind in {"add", "sub"} and not isinstance(operation.get("value"), int):
+                fail(f"{name}: {kind} requires an integer value")
+            if kind == "slice" and not all(isinstance(operation.get(key), int) for key in ("start", "end")):
+                fail(f"{name}: slice requires integer start/end")
 
     return data
 

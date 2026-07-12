@@ -2,10 +2,36 @@
   "format": 1,
   "platform": "linux-x86_64-native",
   "channel": "stable",
-  "updated_at": "2026-07-12T00:00:00Z",
+  "updated_at": "2026-07-12T19:00:00Z",
+  "source": "Axion native ELF validation; patterns derived from a2x/cs2-dumper linux branch",
   "schema": {
     "mode": "runtime",
     "fallback": "none"
   },
-  "signatures": {}
+  "signatures": {
+    "dwGameEntitySystem": {
+      "module": "libclient.so",
+      "pattern": "48 89 3D ? ? ? ? E9 ? ? ? ? 55",
+      "occurrences": 1,
+      "operations": [{ "type": "rip" }]
+    },
+    "dwViewRender": {
+      "module": "libclient.so",
+      "pattern": "48 8D 05 ? ? ? ? 48 89 38 48 85 FF",
+      "occurrences": 1,
+      "operations": [{ "type": "rip" }]
+    },
+    "dwBuildNumber": {
+      "module": "libengine2.so",
+      "pattern": "89 15 ? ? ? ? 48 83 C3",
+      "occurrences": 1,
+      "operations": [{ "type": "rip", "offset": 2, "len": 6 }]
+    },
+    "dwNetworkGameClient_deltaTick": {
+      "module": "libengine2.so",
+      "pattern": "89 83 ? ? ? ? B8 ? ? ? ? 5B",
+      "occurrences": 1,
+      "operations": [{ "type": "slice", "start": 2, "end": 4 }]
+    }
+  }
 }
