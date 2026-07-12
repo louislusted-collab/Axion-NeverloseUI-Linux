@@ -106,9 +106,6 @@ public:
 	uint32_t nRegistered; // 0x2C
 	uint32_t nFlags; // 0x30
 	MEM_PAD(0x8); // 0x34
-#ifdef __linux__
-	MEM_PAD(0x10); // native Linux stores the value at 0x50
-#endif
 	// @note: read-only, mofify with caution
 	CVValue_t value; // 0x40
 };
@@ -121,22 +118,6 @@ public:
 
 	CConVar* Find(FNV1A_t uHashedName)
 	{
-#ifdef __linux__
-		const auto base = reinterpret_cast<std::uintptr_t>(this);
-		const auto objects = *reinterpret_cast<const std::uintptr_t*>(base + 0x48);
-		const auto count = *reinterpret_cast<const std::uint64_t*>(base + 0xA0);
-		if (objects < 0x10000 || count > 100000)
-			return nullptr;
-		for (std::uint64_t i = 0; i < count; ++i)
-		{
-			const auto object = *reinterpret_cast<CConVar* const*>(objects + i * 0x10);
-			if (object == nullptr || object->szName == nullptr)
-				continue;
-			if (FNV1A::Hash(object->szName) == uHashedName)
-				return object;
-		}
-		return nullptr;
-#else
 		for (int i = I::Cvar->listConvars.Head(); i != I::Cvar->listConvars.InvalidIndex(); i = I::Cvar->listConvars.Next(i))
 		{
 			CConVar* pConVar = I::Cvar->listConvars.Element(i);
@@ -149,24 +130,7 @@ public:
 
 		CS_ASSERT(false); // invalid convar name
 		return nullptr;
-#endif
 	}
-
-#ifdef __linux__
-	std::uint64_t GetNativeCount() const
-	{
-		const auto count = *reinterpret_cast<const std::uint64_t*>(reinterpret_cast<std::uintptr_t>(this) + 0xA0);
-		return count <= 100000 ? count : 0;
-	}
-
-	CConVar* GetNativeAt(std::uint64_t index) const
-	{
-		const auto objects = *reinterpret_cast<const std::uintptr_t*>(reinterpret_cast<std::uintptr_t>(this) + 0x48);
-		if (objects < 0x10000 || index >= GetNativeCount())
-			return nullptr;
-		return *reinterpret_cast<CConVar* const*>(objects + index * 0x10);
-	}
-#endif
 
 	void UnlockHiddenCVars()
 	{

@@ -9,6 +9,7 @@
 #include <stdarg.h>
 #include <atomic>
 #include <string.h>
+#include <stdlib.h>
 
 // Forward decls from cstrike/core
 extern "C" bool Setup_Linux();
@@ -142,9 +143,13 @@ static void on_load() {
         return;
 
     DebugLog("[cs2_inject] on_load constructor called\n");
-    // Replacing the game's process-wide handlers is intrusive. Keep the
-    // backtrace handler opt-in for dedicated debugging sessions only.
-    InstallSignalHandlers();
+    // Never replace CS2/Steam's process-wide handlers during normal use.
+    // Some networking code relies on its own fault handling.
+    const char* crashHandler = getenv("AXION_CRASH_HANDLER");
+    if (crashHandler != nullptr && strcmp(crashHandler, "1") == 0)
+        InstallSignalHandlers();
+    else
+        DebugLog("[cs2_inject] preserving game signal handlers\n");
 
     pthread_t t;
     int threadResult = pthread_create(&t, nullptr, cheat_thread, nullptr);

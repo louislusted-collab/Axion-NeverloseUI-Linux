@@ -85,18 +85,7 @@ inline static void WriteConVarFlags(FILE* hFile, const uint32_t nFlags)
 bool CONVAR::Dump(const wchar_t* wszFileName)
 {
 #ifdef __linux__
-	FILE* hOutFile = fopen("/tmp/cs2_convars_dump.txt", "w");
-	if (!hOutFile || I::Cvar == nullptr)
-		return false;
-	const std::uint64_t count = I::Cvar->GetNativeCount();
-	for (std::uint64_t i = 0; i < count; ++i)
-	{
-		CConVar* convar = I::Cvar->GetNativeAt(i);
-		if (convar != nullptr && convar->szName != nullptr)
-			fprintf(hOutFile, "%s\n", convar->szName);
-	}
-	fclose(hOutFile);
-	L_PRINT(LOG_INFO) << CS_XOR("dumped native Linux cvars: ") << count;
+	// Native registry layout is not verified for this build.
 	return true;
 #else
 #ifdef _WIN32
@@ -148,6 +137,10 @@ bool CONVAR::Dump(const wchar_t* wszFileName)
 
 bool CONVAR::Setup()
 {
+#ifdef __linux__
+	L_PRINT(LOG_WARNING) << CS_XOR("Linux: cvar registry layout unverified; skipping capture");
+	return true;
+#endif
 	bool bSuccess = true;
 
 	m_pitch = I::Cvar->Find(FNV1A::HashConst("m_pitch"));
@@ -201,10 +194,5 @@ bool CONVAR::Setup()
 	cl_interp_ratio = I::Cvar->Find(FNV1A::HashConst("cl_interp_ratio")); // flaot
 	bSuccess &= cl_interp_ratio != nullptr;
 
-#ifdef __linux__
-	// Some cvars are absent in particular modes; the registry itself is usable.
-	return I::Cvar != nullptr;
-#else
 	return bSuccess;
-#endif
 }
