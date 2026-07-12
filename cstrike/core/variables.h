@@ -133,6 +133,13 @@ struct Variables_t
 
 #pragma endregion
 #pragma region legit
+	// UI-only Legitbot controls. Gameplay code intentionally does not consume
+	// these until the native Linux implementation is supplied.
+	C_ADD_VARIABLE(bool, legit_ui_aim, false);
+	C_ADD_VARIABLE(float, legit_ui_smoothness, 1.f);
+	C_ADD_VARIABLE(bool, legit_ui_draw_fov, false);
+	C_ADD_VARIABLE(float, legit_ui_fov_size, 5.f);
+
 	C_ADD_VARIABLE(bool, legit_enable, false);
 	C_ADD_VARIABLE(int, legit_weapon_selection, 0);
 	C_ADD_VARIABLE(bool, legit_silent_aim, false);

@@ -185,7 +185,11 @@ typedef LRESULT (*WNDPROC)(HWND, UINT, WPARAM, LPARAM);
 // Wide-string to narrow helper
 static inline void _w2n(const wchar_t* w, char* buf, size_t n) {
     size_t i = 0;
-    while (i + 1 < n && w[i]) { buf[i] = (char)(w[i] & 0xFF); i++; }
+    while (i + 1 < n && w[i]) {
+        const char value = (char)(w[i] & 0xFF);
+        buf[i] = value == '\\' ? '/' : value;
+        i++;
+    }
     buf[i] = '\0';
 }
 
@@ -242,7 +246,9 @@ static inline BOOL CreateDirectoryW(const wchar_t* path, void*) {
     char nbuf[MAX_PATH*2]; _w2n(path, nbuf, sizeof(nbuf));
     return mkdir(nbuf, 0777) == 0;
 }
-static inline DWORD GetLastError() { return (DWORD)errno; }
+static inline DWORD GetLastError() {
+    return errno == EEXIST ? ERROR_ALREADY_EXISTS : (DWORD)errno;
+}
 static inline BOOL DeleteFileW(const wchar_t* path) {
     char nbuf[MAX_PATH*2]; _w2n(path, nbuf, sizeof(nbuf));
     return unlink(nbuf) == 0;

@@ -222,10 +222,10 @@ void MENU::RenderMainWindow()
 		ImGui::BeginGroup();
 		{
 			std::vector<std::vector<std::string>> tab_columns = {
-				{ "c", "b", "f", "o", "e" },
-				{ "Ragebot", "Antiaim", "Visuals", "Skins", "Misc" },
-				{ "Aims agressively at targets...",  "Accuracy assistance...", "Visualisation", "Items customization...", "Save/Load configs, engine..." },
-				{ "Have you switched to the Aimbot tab? You're just crazy!", "Have you switched to the Visuals tab, do you want to get banned?", "You switched to the skins tab, why do you need self-deception??", "You switched over.. And yes, to hell with it, come up with a script yourself.", "You switched over.. And yes, to hell with it, come up with a script yourself." }
+				{ "c", "", "b", "f", "o", "e" },
+				{ "Ragebot", "Legitbot", "Antiaim", "Visuals", "Skins", "Misc" },
+				{ "Aims agressively at targets...", "Subtle aim assistance...", "Accuracy assistance...", "Visualisation", "Items customization...", "Save/Load configs, engine..." },
+				{ "", "", "", "", "", "" }
 			};
 
 			const int num_tabs = tab_columns[0].size();
@@ -360,6 +360,18 @@ void MENU::RenderMainWindow()
 			}
 			else if (active_tab == 1)
 			{
+				edited::BeginChild("##LegitbotContainer", ImVec2(c::background::size.x - 200, c::background::size.y), 0);
+				{
+					ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "Legitbot");
+					edited::Checkbox("Legit Aim", "UI only; gameplay is not connected yet", &C_GET(bool, Vars.legit_ui_aim));
+					edited::SliderFloat("Smoothness", "Aim smoothing amount", &C_GET(float, Vars.legit_ui_smoothness), 1.f, 100.f, "%.0f");
+					edited::Checkbox("Draw FoV", "UI only; no circle is drawn yet", &C_GET(bool, Vars.legit_ui_draw_fov));
+					edited::SliderFloat("FoV Size", "Field of view size", &C_GET(float, Vars.legit_ui_fov_size), 5.f, 60.f, "%.0f°");
+				}
+				edited::EndChild();
+			}
+			else if (active_tab == 2)
+			{
 				edited::BeginChild("##Container0", ImVec2((c::background::size.x - 200) / 2, c::background::size.y), 0);
 				{
 					ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "Antiaim");
@@ -372,7 +384,7 @@ void MENU::RenderMainWindow()
 				}
 				edited::EndChild();
 			}
-			else if (active_tab == 2) {
+			else if (active_tab == 3) {
 				edited::BeginChild("##Container0", ImVec2((c::background::size.x - 200) / 2, c::background::size.y), 0);
 				{
 
@@ -508,7 +520,7 @@ void MENU::RenderMainWindow()
 				}
 				edited::EndChild();
 			}
-			else if (active_tab == 4) {
+			else if (active_tab == 5) {
 			edited::BeginChild("##Container0", ImVec2((c::background::size.x - 200) / 2, c::background::size.y), 0);
 			{
 
@@ -549,15 +561,21 @@ void MENU::RenderMainWindow()
 				{
 					ImGui::PushItemWidth(-1);
 
-					// check selected configuration for magic value
-					if (nSelectedConfig == ~1U)
+					// Repair stale selection after refresh/removal and select the
+					// default (or first available) configuration.
+					if (nSelectedConfig >= C::vecFileNames.size())
 					{
-						// set default configuration as selected on first use
+						nSelectedConfig = ~0ULL;
 						for (std::size_t i = 0U; i < C::vecFileNames.size(); i++)
 						{
 							if (CRT::StringCompare(C::vecFileNames[i], CS_XOR(CS_CONFIGURATION_DEFAULT_FILE_NAME CS_CONFIGURATION_FILE_EXTENSION)) == 0)
+							{
 								nSelectedConfig = i;
+								break;
+							}
 						}
+						if (nSelectedConfig == ~0ULL && !C::vecFileNames.empty())
+							nSelectedConfig = 0U;
 					}
 
 					if (ImGui::BeginListBox(CS_XOR("##config.list"), C::vecFileNames.size(), 5))
@@ -565,10 +583,14 @@ void MENU::RenderMainWindow()
 						for (std::size_t i = 0U; i < C::vecFileNames.size(); i++)
 						{
 							// Convert wide string to narrow string
-							const std::wstring& wideName = C::vecFileNames[i];
-							const int bufferSize = 512; // Adjust the buffer size as needed
+							const std::wstring wideName = C::vecFileNames[i];
+							constexpr std::size_t bufferSize = 512;
 							char narrowName[bufferSize];
-							std::wcstombs(narrowName, wideName.c_str(), bufferSize);
+							const std::size_t converted = std::wcstombs(narrowName, wideName.c_str(), bufferSize - 1U);
+							if (converted == static_cast<std::size_t>(-1))
+								CRT::StringCopy(narrowName, "invalid filename");
+							else
+								narrowName[converted] = '\0';
 
 							if (ImGui::Selectable(narrowName, (nSelectedConfig == i)))
 								nSelectedConfig = i;
@@ -601,23 +623,31 @@ void MENU::RenderMainWindow()
 					if (ImGui::IsItemHovered())
 						ImGui::SetTooltip(CS_XOR("press enter to create new configuration"));
 
+					const bool hasSelectedConfig = nSelectedConfig < C::vecFileNames.size();
+					ImGui::BeginDisabled(!hasSelectedConfig);
 					if (ImGui::Button(CS_XOR("save"), ImVec2(-1, 15 * MENU::flDpiScale)))
 					{
-						C::SaveFile(nSelectedConfig);
-						NOTIFY::Push({ N_TYPE_SUCCESS, CS_XOR("config saved") });
+						if (C::SaveFile(nSelectedConfig))
+							NOTIFY::Push({ N_TYPE_SUCCESS, CS_XOR("config saved") });
+						else
+							NOTIFY::Push({ N_TYPE_ERROR, CS_XOR("config save failed") });
 					}
 					if (ImGui::Button(CS_XOR("load"), ImVec2(-1, 15 * MENU::flDpiScale)))
 					{
-						C::LoadFile(nSelectedConfig);
-						NOTIFY::Push({ N_TYPE_SUCCESS, CS_XOR("config loaded") });
+						if (C::LoadFile(nSelectedConfig))
+							NOTIFY::Push({ N_TYPE_SUCCESS, CS_XOR("config loaded") });
+						else
+							NOTIFY::Push({ N_TYPE_ERROR, CS_XOR("config is invalid or outdated") });
 					}
 					if (ImGui::Button(CS_XOR("remove"), ImVec2(-1, 15 * MENU::flDpiScale)))
 					{
 						ImGui::OpenPopup(CS_XOR("confirmation##config.remove"));
 					}
+					ImGui::EndDisabled();
 					if (ImGui::Button(CS_XOR("refresh"), ImVec2(-1, 15 * MENU::flDpiScale)))
 					{
 						C::Refresh();
+						nSelectedConfig = ~0ULL;
 						NOTIFY::Push({ N_TYPE_INFO, CS_XOR("configs refreshed") });
 					}
 					ImGui::PopItemWidth();
@@ -627,36 +657,44 @@ void MENU::RenderMainWindow()
 
 				if (ImGui::BeginPopupModal(CS_XOR("confirmation##config.remove"), nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove))
 				{
-					CRT::String_t<MAX_PATH> szCurrentConfig(C::vecFileNames[nSelectedConfig]);
-
-					ImGui::Text(CS_XOR("are you sure you want to remove \"%s\" configuration?"), szCurrentConfig.Data());
-					ImGui::Spacing();
-
-					if (ImGui::Button(CS_XOR("no"), ImVec2(ImGui::GetContentRegionAvail().x / 2.f, 0)))
+					if (nSelectedConfig >= C::vecFileNames.size())
 					{
 						ImGui::CloseCurrentPopup();
-						NOTIFY::Push({ N_TYPE_ERROR, CS_XOR("canceled") });
+						ImGui::EndPopup();
 					}
-					ImGui::SameLine();
-
-					if (ImGui::Button(CS_XOR("yes"), ImVec2(ImGui::GetContentRegionAvail().x, 0)))
+					else
 					{
-						C::RemoveFile(nSelectedConfig);
+						CRT::String_t<MAX_PATH> szCurrentConfig(C::vecFileNames[nSelectedConfig]);
 
-						// reset selected configuration index
-						nSelectedConfig = ~0U;
+						ImGui::Text(CS_XOR("are you sure you want to remove \"%s\" configuration?"), szCurrentConfig.Data());
+						ImGui::Spacing();
 
-						NOTIFY::Push({ N_TYPE_WARNING, CS_XOR("config removed") });
+						if (ImGui::Button(CS_XOR("no"), ImVec2(ImGui::GetContentRegionAvail().x / 2.f, 0)))
+						{
+							ImGui::CloseCurrentPopup();
+							NOTIFY::Push({ N_TYPE_ERROR, CS_XOR("canceled") });
+						}
+						ImGui::SameLine();
 
-						ImGui::CloseCurrentPopup();
+						if (ImGui::Button(CS_XOR("yes"), ImVec2(ImGui::GetContentRegionAvail().x, 0)))
+						{
+							C::RemoveFile(nSelectedConfig);
+
+							// reset selected configuration index
+							nSelectedConfig = ~0ULL;
+
+							NOTIFY::Push({ N_TYPE_WARNING, CS_XOR("config removed") });
+
+							ImGui::CloseCurrentPopup();
+						}
+
+						ImGui::EndPopup();
 					}
-
-					ImGui::EndPopup();
 				}
 			}
 			edited::EndChild();
 			}
-			else if (active_tab == 3) {
+			else if (active_tab == 4) {
 
 				edited::BeginChild("##Container0", ImVec2((600), c::background::size.y), 0);
 				{					

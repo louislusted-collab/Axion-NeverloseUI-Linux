@@ -78,7 +78,7 @@ namespace MENU
 	inline int nCurrentMainTab = 0;
 	inline int g_cur_tab_idx = 0;
 	inline char szConfigFile[256U] = {};
-	inline unsigned long long nSelectedConfig = ~1U;
+	inline unsigned long long nSelectedConfig = ~0ULL;
 	inline ParticleContext_t menuParticle = ParticleContext_t(MENU_MAX_BACKGROUND_PARTICLES);
 	inline AnimationHandler_t animMenuDimBackground;
 	inline float flDpiScale = 1.f;
@@ -100,7 +100,7 @@ namespace T
 	// user-defined configuration filename in miscellaneous tab
 	inline char szConfigFile[256U] = {};
 	// current selected configuration in miscellaneous tab
-	inline unsigned long long nSelectedConfig = ~1U;
+	inline unsigned long long nSelectedConfig = ~0ULL;
 	// current sub tab overlay in visuals tab
 	inline int nCurrentOverlaySubtab = 0;
 }

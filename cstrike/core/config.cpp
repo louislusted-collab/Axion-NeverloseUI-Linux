@@ -27,6 +27,11 @@
 // default configurations working path
 static wchar_t wszConfigurationsPath[MAX_PATH];
 
+static bool IsValidFileIndex(const std::size_t nFileIndex)
+{
+	return nFileIndex < C::vecFileNames.size() && C::vecFileNames[nFileIndex] != nullptr;
+}
+
 #pragma region config_user_data_type
 
 std::size_t C::UserDataType_t::GetSerializationSize() const
@@ -157,12 +162,32 @@ bool C::Setup(const wchar_t* wszDefaultFileName)
 		UserDataMember_t{ FNV1A::HashConst("colOutline"), FNV1A::HashConst("Color_t"), &BarOverlayVar_t::colOutline } 
 	});
 
-	// create default configuration
-	if (!CreateFile(wszDefaultFileName))
-		return false;
-
-	// store existing configurations list
+	// Discover existing configs before creating anything. The previous code
+	// overwrote default.bin on every injection, so saved values never persisted.
 	Refresh();
+	std::size_t nDefaultIndex = C_INVALID_VARIABLE;
+	for (std::size_t i = 0U; i < vecFileNames.size(); ++i)
+	{
+		if (CRT::StringCompare(vecFileNames[i], CS_XOR(CS_CONFIGURATION_DEFAULT_FILE_NAME CS_CONFIGURATION_FILE_EXTENSION)) == 0)
+		{
+			nDefaultIndex = i;
+			break;
+		}
+	}
+
+	if (nDefaultIndex == C_INVALID_VARIABLE)
+	{
+		if (!CreateFile(wszDefaultFileName))
+			return false;
+		nDefaultIndex = vecFileNames.size() - 1U;
+	}
+	else if (!LoadFile(nDefaultIndex))
+	{
+		// Old or malformed configs are replaced safely instead of entering the
+		// unchecked legacy deserializer.
+		if (!SaveFile(nDefaultIndex))
+			return false;
+	}
 
 	return true;
 }
@@ -172,6 +197,8 @@ bool C::Setup(const wchar_t* wszDefaultFileName)
 void C::Refresh()
 {
 	// clear and free previous stored file names
+	for (wchar_t* wszFileName : vecFileNames)
+		delete[] wszFileName;
 	vecFileNames.clear();
 
 	// make configuration files path filter
@@ -210,6 +237,9 @@ void C::AddUserType(const FNV1A_t uTypeHash, const std::initializer_list<UserDat
 
 bool C::SaveFileVariable(const std::size_t nFileIndex, const VariableObject_t& variable)
 {
+	if (!IsValidFileIndex(nFileIndex))
+		return false;
+
 	const wchar_t* wszFileName = vecFileNames[nFileIndex];
 
 	wchar_t wszFilePath[MAX_PATH];
@@ -231,6 +261,9 @@ bool C::SaveFileVariable(const std::size_t nFileIndex, const VariableObject_t& v
 
 bool C::LoadFileVariable(const std::size_t nFileIndex, VariableObject_t& variable)
 {
+	if (!IsValidFileIndex(nFileIndex))
+		return false;
+
 	const wchar_t* wszFileName = vecFileNames[nFileIndex];
 
 	wchar_t wszFilePath[MAX_PATH];
@@ -252,6 +285,9 @@ bool C::LoadFileVariable(const std::size_t nFileIndex, VariableObject_t& variabl
 
 bool C::RemoveFileVariable(const std::size_t nFileIndex, const VariableObject_t& variable)
 {
+	if (!IsValidFileIndex(nFileIndex))
+		return false;
+
 	const wchar_t* wszFileName = vecFileNames[nFileIndex];
 
 	wchar_t wszFilePath[MAX_PATH];
@@ -273,6 +309,9 @@ bool C::RemoveFileVariable(const std::size_t nFileIndex, const VariableObject_t&
 
 bool C::CreateFile(const wchar_t* wszFileName)
 {
+	if (wszFileName == nullptr || *wszFileName == L'\0')
+		return false;
+
 	const wchar_t* wszFileExtension = CRT::StringCharR(wszFileName, L'.');
 
 	// get length of the given filename and strip out extension if there any
@@ -296,11 +335,16 @@ bool C::CreateFile(const wchar_t* wszFileName)
 	}
 
 	L_PRINT(LOG_WARNING) << CS_XOR("failed to create configuration file: \"") << wszFullFileName << CS_XOR("\"");
+	delete[] vecFileNames.back();
+	vecFileNames.pop_back();
 	return false;
 }
 
 bool C::SaveFile(const std::size_t nFileIndex)
 {
+	if (!IsValidFileIndex(nFileIndex))
+		return false;
+
 	const wchar_t* wszFileName = vecFileNames[nFileIndex];
 
 	wchar_t wszFilePath[MAX_PATH];
@@ -324,6 +368,9 @@ bool C::SaveFile(const std::size_t nFileIndex)
 
 bool C::LoadFile(const std::size_t nFileIndex)
 {
+	if (!IsValidFileIndex(nFileIndex))
+		return false;
+
 	const wchar_t* wszFileName = vecFileNames[nFileIndex];
 
 	wchar_t wszFilePath[MAX_PATH];
@@ -347,6 +394,9 @@ bool C::LoadFile(const std::size_t nFileIndex)
 
 void C::RemoveFile(const std::size_t nFileIndex)
 {
+	if (!IsValidFileIndex(nFileIndex))
+		return;
+
 	const wchar_t* wszFileName = vecFileNames[nFileIndex];
 
 	// unable to delete default config
@@ -362,9 +412,10 @@ void C::RemoveFile(const std::size_t nFileIndex)
 	if (::DeleteFileW(wszFilePath))
 	{
 		// erase and free filename from the list
+		delete[] vecFileNames[nFileIndex];
 		vecFileNames.erase(vecFileNames.cbegin() + nFileIndex);
 
-		L_PRINT(LOG_INFO) << CS_XOR("removed configuration file: \"") << wszFileName << CS_XOR("\"");
+		L_PRINT(LOG_INFO) << CS_XOR("removed configuration file");
 	}
 }
 

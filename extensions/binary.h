@@ -1,4 +1,6 @@
 #pragma once
+#include <cstring>
+
 #include "../cstrike/utilities/log.h"
 #include "../cstrike/utilities/memory.h"
 
@@ -86,6 +88,66 @@ namespace C::BIN
 		const std::size_t nWriteCount = (pBufferCurrent - pBuffer);
 		CS_ASSERT(nWriteCount == sizeof(FNV1A_t[2]) + variable.GetSerializationSize()); // count of actually written bytes mismatch to serialization size
 		return nWriteCount;
+	}
+
+	/// Validate a serialized variable before ReadBuffer performs pointer
+	/// arithmetic. Config files are user-editable and must never be trusted.
+	CS_INLINE bool ValidateBuffer(const std::uint8_t* pBuffer, const std::size_t nAvailable, const VariableObject_t& variable)
+	{
+		const std::size_t nRequired = sizeof(FNV1A_t[2]) + variable.GetSerializationSize();
+		if (pBuffer == nullptr || nAvailable < nRequired)
+			return false;
+
+		const auto* pCurrent = pBuffer;
+		if (*reinterpret_cast<const FNV1A_t*>(pCurrent) != variable.uNameHash)
+			return false;
+		pCurrent += sizeof(FNV1A_t);
+		if (*reinterpret_cast<const FNV1A_t*>(pCurrent) != variable.uTypeHash)
+			return false;
+		pCurrent += sizeof(FNV1A_t);
+
+		switch (variable.uTypeHash)
+		{
+		case FNV1A::HashConst("char[]"):
+			return std::memchr(pCurrent, '\0', variable.nStorageSize) != nullptr;
+		case FNV1A::HashConst("bool"):
+		case FNV1A::HashConst("int"):
+		case FNV1A::HashConst("unsigned int"):
+		case FNV1A::HashConst("float"):
+		case FNV1A::HashConst("Color_t"):
+			return true;
+		case FNV1A::HashConst("bool[]"):
+		case FNV1A::HashConst("int[]"):
+		case FNV1A::HashConst("unsigned int[]"):
+		case FNV1A::HashConst("float[]"):
+		case FNV1A::HashConst("char[][]"):
+			return *reinterpret_cast<const std::size_t*>(pCurrent) == variable.nStorageSize;
+		default:
+			break;
+		}
+
+		for (const UserDataType_t& userType : vecUserTypes)
+		{
+			if (userType.uTypeHash != variable.uTypeHash)
+				continue;
+
+			if (*reinterpret_cast<const std::size_t*>(pCurrent) != variable.GetSerializationSize())
+				return false;
+			pCurrent += sizeof(std::size_t);
+
+			for (const UserDataMember_t& member : userType.vecMembers)
+			{
+				if (*reinterpret_cast<const FNV1A_t*>(pCurrent) != member.uNameHash)
+					return false;
+				pCurrent += sizeof(FNV1A_t);
+				if (*reinterpret_cast<const FNV1A_t*>(pCurrent) != member.uTypeHash)
+					return false;
+				pCurrent += sizeof(FNV1A_t) + member.nDataSize;
+			}
+			return static_cast<std::size_t>(pCurrent - pBuffer) == nRequired;
+		}
+
+		return false;
 	}
 
 	/// read single variable from the buffer
@@ -435,6 +497,19 @@ namespace C::BIN
 			return false;
 		}
 
+		// The binary reader was written for trusted Windows files and performs
+		// unchecked pointer arithmetic. Reject truncated, stale, or oversized
+		// files before parsing so a bad config cannot crash native CS2.
+		std::size_t nExpectedFileSize = sizeof(FNV1A_t[2]) +
+			VariableObject_t(FNV1A::HashConst("version"), FNV1A::HashConst("int"), CS_VERSION).GetSerializationSize();
+		for (const auto& variable : vecVariables)
+			nExpectedFileSize += sizeof(FNV1A_t[2]) + variable.GetSerializationSize();
+		if (dwFileSize != nExpectedFileSize)
+		{
+			::CloseHandle(hFileInOut);
+			return false;
+		}
+
 		std::uint8_t* pBuffer = static_cast<std::uint8_t*>(MEM::HeapAlloc(dwFileSize));
 		if (!::ReadFile(hFileInOut, pBuffer, dwFileSize, nullptr, nullptr))
 		{
@@ -445,38 +520,25 @@ namespace C::BIN
 		}
 
 		VariableObject_t version = { FNV1A::HashConst("version"), FNV1A::HashConst("int"), CS_VERSION };
+		if (!ValidateBuffer(pBuffer, dwFileSize, version))
+		{
+			::CloseHandle(hFileInOut);
+			MEM::HeapFree(pBuffer);
+			return false;
+		}
 		ReadBuffer(pBuffer, version);
 
 		for (auto& variable : vecVariables)
 		{
 			std::uint8_t* pVariableData = FindBuffer(pBuffer, dwFileSize, variable);
-
-			// check is variable not found
-			if (pVariableData == nullptr)
+			const std::size_t nAvailable = pVariableData != nullptr
+				? static_cast<std::size_t>((pBuffer + dwFileSize) - pVariableData)
+				: 0U;
+			if (!ValidateBuffer(pVariableData, nAvailable, variable))
 			{
-				if (*version.GetStorage<int>() < CS_VERSION)
-				{
-					// write missing variable to the end of file
-					if (::SetFilePointer(hFileInOut, 0L, nullptr, FILE_END) != INVALID_SET_FILE_POINTER)
-					{
-						std::uint8_t* pTemporaryBuffer = static_cast<std::uint8_t*>(MEM_STACKALLOC(sizeof(FNV1A_t[2]) + variable.GetSerializationSize()));
-						const std::size_t nWriteBytesCount = WriteBuffer(pTemporaryBuffer, variable);
-
-						::WriteFile(hFileInOut, pTemporaryBuffer, nWriteBytesCount, nullptr, nullptr);
-						MEM_STACKFREE(pTemporaryBuffer);
-
-						// overwrite version
-						if (::SetFilePointer(hFileInOut, sizeof(FNV1A_t[2]), nullptr, FILE_BEGIN) != INVALID_SET_FILE_POINTER)
-						{
-							constexpr int iLastVersion = CS_VERSION;
-							::WriteFile(hFileInOut, &iLastVersion, version.GetSerializationSize(), nullptr, nullptr);
-						}
-					}
-				}
-				else
-					CS_ASSERT(false); // version of configuration is greater than cheat, or version is same but configuration missing variable, consider update 'CS_VERSION' cheat version
-
-				continue;
+				::CloseHandle(hFileInOut);
+				MEM::HeapFree(pBuffer);
+				return false;
 			}
 
 			ReadBuffer(pVariableData, variable);
