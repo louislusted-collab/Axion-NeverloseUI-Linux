@@ -5,6 +5,7 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 SOURCE="$ROOT/tools/cs2-dumper"
 CACHE="$ROOT/.axion-cache"
 TARGET="$CACHE/cs2-dumper-target"
+BUILD_STAMP="$TARGET/.axion-source-revision"
 RUNTIME="$CACHE/cs2-dumper-runtime"
 OUTPUT="$CACHE/cs2-dumper-output"
 UPSTREAM_CONFIG="$CACHE/cs2-dumper-config.json"
@@ -46,9 +47,12 @@ fi
 "$ROOT/tools/prepare_full_dumper_config.py" \
     "$UPSTREAM_CONFIG" "/proc/$PID/maps" "$RUNTIME/config.json"
 
-if [ ! -x "$TARGET/release/cs2-dumper" ]; then
-    echo "Full dumper: compiling once (Rust release build)…"
+SOURCE_REVISION="$(git -C "$SOURCE" rev-parse HEAD 2>/dev/null || true)"
+BUILT_REVISION="$(cat "$BUILD_STAMP" 2>/dev/null || true)"
+if [ ! -x "$TARGET/release/cs2-dumper" ] || [ -z "$SOURCE_REVISION" ] || [ "$SOURCE_REVISION" != "$BUILT_REVISION" ]; then
+    echo "Full dumper: compiling the current source revision…"
     CARGO_TARGET_DIR="$TARGET" cargo build --release --manifest-path "$SOURCE/Cargo.toml"
+    printf '%s\n' "$SOURCE_REVISION" > "$BUILD_STAMP"
 fi
 
 rm -rf "$OUTPUT.new"
