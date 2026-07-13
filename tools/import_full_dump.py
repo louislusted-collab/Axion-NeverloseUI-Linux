@@ -15,6 +15,7 @@ ALIASES = {
 
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=Path)
     parser.add_argument("input", type=Path)
     parser.add_argument("output", type=Path)
     args = parser.parse_args()
@@ -31,6 +32,7 @@ def main() -> int:
         "schema_offsets": {},
     }
 
+    dumped_offsets = set()
     for module, entries in source.items():
         if not isinstance(entries, list):
             continue
@@ -39,10 +41,34 @@ def main() -> int:
             value = entry.get("value")
             if not isinstance(name, str) or not isinstance(value, int):
                 continue
+            dumped_offsets.add((module, name))
             resolved["offsets"][name] = {"module": module, "value": value}
             alias = ALIASES.get(name)
             if alias:
                 resolved["offsets"][alias] = {"module": module, "value": value}
+
+    if args.config is not None:
+        config = json.loads(args.config.read_text(encoding="utf-8"))
+        expected_offsets = {
+            (module, signature["name"])
+            for group in config.get("signatures", [])
+            if isinstance(group, dict)
+            for module, signatures in group.items()
+            if isinstance(signatures, list)
+            for signature in signatures
+            if isinstance(signature, dict) and isinstance(signature.get("name"), str)
+        }
+        missing_offsets = sorted(expected_offsets - dumped_offsets)
+        if missing_offsets:
+            missing_text = ", ".join(f"{module}!{name}" for module, name in missing_offsets)
+            raise SystemExit("full dump did not resolve every configured signature: " + missing_text)
+
+    def valid_runtime_name(name: object) -> bool:
+        return (
+            isinstance(name, str)
+            and bool(name)
+            and all(0x20 <= ord(character) < 0x7F for character in name)
+        )
 
     dump_directory = args.input.parent
     interfaces_path = dump_directory / "interfaces.json"
@@ -52,7 +78,7 @@ def main() -> int:
             if not isinstance(entries, dict):
                 continue
             for name, value in entries.items():
-                if isinstance(name, str) and isinstance(value, int):
+                if valid_runtime_name(name) and isinstance(value, int):
                     resolved["interfaces"][f"{module}!{name}"] = {
                         "module": module,
                         "value": value,
@@ -65,7 +91,7 @@ def main() -> int:
             if not isinstance(entries, dict):
                 continue
             for name, value in entries.items():
-                if isinstance(name, str) and isinstance(value, int):
+                if valid_runtime_name(name) and isinstance(value, int):
                     resolved["buttons"][f"{module}!{name}"] = {
                         "module": module,
                         "value": value,

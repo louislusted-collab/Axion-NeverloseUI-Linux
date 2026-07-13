@@ -14,11 +14,15 @@ def main() -> int:
     args = parser.parse_args()
 
     config = json.loads(args.config.read_text(encoding="utf-8"))
-    mapped = {
-        Path(line.split()[-1]).name
-        for line in args.maps.read_text(encoding="utf-8", errors="replace").splitlines()
-        if line and line.split()[-1].startswith("/")
-    }
+    mapped = set()
+    for line in args.maps.read_text(encoding="utf-8", errors="replace").splitlines():
+        # /proc/<pid>/maps has five fixed whitespace-delimited columns followed
+        # by the pathname. Split only those columns: Steam's default CS2 path
+        # contains "Counter-Strike Global Offensive", so split()[-1] loses the
+        # absolute path and previously made every live module look unloaded.
+        columns = line.split(maxsplit=5)
+        if len(columns) == 6 and columns[5].startswith("/"):
+            mapped.add(Path(columns[5]).name)
 
     filtered = []
     for group in config.get("signatures", []):

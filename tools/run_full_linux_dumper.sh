@@ -22,10 +22,20 @@ import_runtime_cvars() {
     fi
 }
 
+import_full_dump() {
+    local input="$1"
+    if [ -s "$RUNTIME/config.json" ]; then
+        "$ROOT/tools/import_full_dump.py" --config "$RUNTIME/config.json" \
+            "$input" "$CACHE/linux-offsets.resolved.json"
+    else
+        "$ROOT/tools/import_full_dump.py" "$input" "$CACHE/linux-offsets.resolved.json"
+    fi
+}
+
 PID="$(pgrep -n -x cs2 2>/dev/null || true)"
 if [ -z "$PID" ]; then
     if [ -s "$OUTPUT/offsets.json" ]; then
-        "$ROOT/tools/import_full_dump.py" "$OUTPUT/offsets.json" "$CACHE/linux-offsets.resolved.json"
+        import_full_dump "$OUTPUT/offsets.json"
         import_runtime_cvars
         echo "Full dumper: kept the last live dump; start native CS2 to refresh it."
     else
@@ -78,6 +88,6 @@ echo "Full dumper: reading live offsets, interfaces, buttons, and schemas…"
 test -s "$OUTPUT.new/offsets.json"
 rm -rf "$OUTPUT"
 mv "$OUTPUT.new" "$OUTPUT"
-"$ROOT/tools/import_full_dump.py" "$OUTPUT/offsets.json" "$CACHE/linux-offsets.resolved.json"
+import_full_dump "$OUTPUT/offsets.json"
 import_runtime_cvars
 echo "Full dump saved to $OUTPUT"

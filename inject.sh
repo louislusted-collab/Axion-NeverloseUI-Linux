@@ -11,7 +11,7 @@ if [ ! -f "$LIBRARY" ]; then
 fi
 
 if [ "${AXION_SKIP_UPDATE:-0}" != "1" ] && [ "${AXION_UPDATE_DONE:-0}" != "1" ] && [ -x "$UPDATER" ]; then
-    "$UPDATER"
+    "$UPDATER" || echo "Full dump update failed; injection will use the last validated offsets." >&2
 fi
 
 PID="$(pidof cs2 2>/dev/null || true)"

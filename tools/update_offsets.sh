@@ -18,11 +18,21 @@ mkdir -p "$CACHE"
 
 run_full_dumper() {
     if [ -x "$FULL_DUMPER" ]; then
-        "$FULL_DUMPER" || echo "Full dumper failed; kept the validated static cache." >&2
+        "$FULL_DUMPER"
     fi
 }
 
-trap run_full_dumper EXIT
+finish_update() {
+    local update_status=$?
+    trap - EXIT
+    if ! run_full_dumper; then
+        echo "Full dumper failed; kept the validated static cache." >&2
+        exit 1
+    fi
+    exit "$update_status"
+}
+
+trap finish_update EXIT
 
 report_active() {
     if [ -f "$ACTIVE" ]; then
