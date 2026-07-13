@@ -9,6 +9,7 @@ from pathlib import Path
 ALIASES = {
     "dwViewMatrix": "dwViewMatrixNative",
     "dwLocalPlayerController": "dwLocalPlayerControllerNative",
+    "dwViewAngles": "dwViewAnglesNative",
 }
 
 

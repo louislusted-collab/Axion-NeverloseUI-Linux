@@ -2,6 +2,11 @@
 #include <vector>
 // used: [stl] find_if
 #include <algorithm>
+#include <cstdio>
+#include <cstring>
+#include <limits>
+#include <string>
+#include <unordered_set>
 
 #include "convars.h"
 
@@ -13,6 +18,96 @@
 
 // used: getworkingpath
 #include "../core.h"
+
+#ifdef __linux__
+namespace
+{
+struct ReadableRange
+{
+	std::uintptr_t begin;
+	std::uintptr_t end;
+};
+
+const std::vector<ReadableRange>& GetReadableRanges()
+{
+	static const std::vector<ReadableRange> ranges = [] {
+		std::vector<ReadableRange> result;
+		FILE* maps = std::fopen("/proc/self/maps", "r");
+		if (maps == nullptr)
+			return result;
+		char line[1024];
+		while (std::fgets(line, sizeof(line), maps) != nullptr)
+		{
+			unsigned long long begin = 0, end = 0;
+			char permissions[5] = {};
+			if (std::sscanf(line, "%llx-%llx %4s", &begin, &end, permissions) == 3 && permissions[0] == 'r')
+				result.push_back({static_cast<std::uintptr_t>(begin), static_cast<std::uintptr_t>(end)});
+		}
+		std::fclose(maps);
+		return result;
+	}();
+	return ranges;
+}
+
+bool IsReadable(const void* pointer, std::size_t size)
+{
+	if (pointer == nullptr || size == 0)
+		return false;
+	const auto begin = reinterpret_cast<std::uintptr_t>(pointer);
+	if (begin > std::numeric_limits<std::uintptr_t>::max() - size)
+		return false;
+	const auto end = begin + size;
+	for (const auto& range : GetReadableRanges())
+		if (begin >= range.begin && end <= range.end)
+			return true;
+	return false;
+}
+
+bool IsReadableString(const char* text)
+{
+	if (text == nullptr)
+		return false;
+	for (std::size_t index = 0; index < 256; ++index)
+	{
+		if (!IsReadable(text + index, 1))
+			return false;
+		const unsigned char character = static_cast<unsigned char>(text[index]);
+		if (character == '\0')
+			return index != 0;
+		if (character < 0x20 || character == 0x7F)
+			return false;
+	}
+	return false;
+}
+
+std::vector<CConVar*> GetNativeConVars()
+{
+	std::vector<CConVar*> result;
+	if (I::Cvar == nullptr || !IsReadable(I::Cvar, 0xA8))
+		return result;
+
+	const auto base = reinterpret_cast<const std::uint8_t*>(I::Cvar);
+	const auto entries = *reinterpret_cast<const std::uint8_t* const*>(base + 0x48);
+	const std::uint64_t count = *reinterpret_cast<const std::uint64_t*>(base + 0xA0);
+	if (entries == nullptr || count == 0 || count > 65536 || !IsReadable(entries, static_cast<std::size_t>(count) * 0x10))
+		return result;
+
+	result.reserve(static_cast<std::size_t>(count));
+	std::unordered_set<CConVar*> seen;
+	for (std::uint64_t index = 0; index < count; ++index)
+	{
+		auto* convar = *reinterpret_cast<CConVar* const*>(entries + index * 0x10);
+		if (convar == nullptr || !IsReadable(convar, 0x58))
+			continue;
+		const char* name = *reinterpret_cast<const char* const*>(convar);
+		if (!IsReadableString(name) || !seen.insert(convar).second)
+			continue;
+		result.push_back(convar);
+	}
+	return result;
+}
+}
+#endif
 
 #ifdef _WIN32
 inline static void WriteConVarType(HANDLE hFile, const uint32_t nType)
@@ -85,7 +180,34 @@ inline static void WriteConVarFlags(FILE* hFile, const uint32_t nFlags)
 bool CONVAR::Dump(const wchar_t* wszFileName)
 {
 #ifdef __linux__
-	// Native registry layout is not verified for this build.
+	wchar_t workingPath[MAX_PATH] = {};
+	if (!CORE::GetWorkingPath(workingPath))
+		return false;
+	char outputPath[MAX_PATH * 2] = {};
+	std::size_t position = 0;
+	for (std::size_t index = 0; workingPath[index] != L'\0' && position + 1 < sizeof(outputPath); ++index)
+		outputPath[position++] = static_cast<char>(workingPath[index]);
+	for (std::size_t index = 0; wszFileName != nullptr && wszFileName[index] != L'\0' && position + 1 < sizeof(outputPath); ++index)
+		outputPath[position++] = static_cast<char>(wszFileName[index]);
+	outputPath[position] = '\0';
+
+	FILE* output = std::fopen(outputPath, "w");
+	if (output == nullptr)
+		return false;
+	auto convars = GetNativeConVars();
+	std::ranges::sort(convars, [](const CConVar* left, const CConVar* right) {
+		return std::strcmp(left->szName, right->szName) < 0;
+	});
+	std::fprintf(output, "Axion native Linux runtime CVar dump (%zu entries)\n\n", convars.size());
+	if (convars.empty())
+		std::fputs("Native CVar registry was not available in this game build.\n", output);
+	for (const CConVar* convar : convars)
+	{
+		WriteConVarType(output, convar->nType);
+		std::fprintf(output, "%s ", convar->szName);
+		WriteConVarFlags(output, convar->nFlags);
+	}
+	std::fclose(output);
 	return true;
 #else
 #ifdef _WIN32
@@ -135,10 +257,44 @@ bool CONVAR::Dump(const wchar_t* wszFileName)
 #endif
 }
 
+CConVar* CONVAR::Find(const char* name)
+{
+	if (name == nullptr)
+		return nullptr;
+#ifdef __linux__
+	for (CConVar* convar : GetNativeConVars())
+		if (std::strcmp(convar->szName, name) == 0)
+			return convar;
+	return nullptr;
+#else
+	return I::Cvar != nullptr ? I::Cvar->Find(FNV1A::Hash(name)) : nullptr;
+#endif
+}
+
 bool CONVAR::Setup()
 {
 #ifdef __linux__
-	L_PRINT(LOG_WARNING) << CS_XOR("Linux: cvar registry layout unverified; skipping capture");
+	m_pitch = Find("m_pitch");
+	m_yaw = Find("m_yaw");
+	sensitivity = Find("sensitivity");
+	game_type = Find("game_type");
+	game_mode = Find("game_mode");
+	mp_teammates_are_enemies = Find("mp_teammates_are_enemies");
+	sv_autobunnyhopping = Find("sv_autobunnyhopping");
+	cam_idealdist = Find("cam_idealdist");
+	cam_collision = Find("cam_collision");
+	cam_snapto = Find("cam_snapto");
+	c_thirdpersonshoulder = Find("c_thirdpersonshoulder");
+	c_thirdpersonshoulderaimdist = Find("c_thirdpersonshoulderaimdist");
+	c_thirdpersonshoulderdist = Find("c_thirdpersonshoulderdist");
+	c_thirdpersonshoulderheight = Find("c_thirdpersonshoulderheight");
+	c_thirdpersonshoulderoffset = Find("c_thirdpersonshoulderoffset");
+	cl_interpolate = Find("cl_interpolate");
+	cl_interp_ratio = Find("cl_interp_ratio");
+	if (GetNativeConVars().empty())
+		L_PRINT(LOG_WARNING) << CS_XOR("Linux CVar registry layout did not validate; CVar-backed features will stay disabled");
+	else
+		L_PRINT(LOG_INFO) << CS_XOR("Linux CVar registry captured; runtime dump and third person are available");
 	return true;
 #endif
 	bool bSuccess = true;

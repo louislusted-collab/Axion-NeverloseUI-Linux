@@ -108,6 +108,17 @@ public:
 	MEM_PAD(0x8); // 0x34
 	// @note: read-only, mofify with caution
 	CVValue_t value; // 0x40
+
+	template <typename T>
+	[[nodiscard]] T& GetValue()
+	{
+#ifdef __linux__
+		// The native Source 2 ConVar object keeps its live value at 0x50.
+		return *reinterpret_cast<T*>(reinterpret_cast<std::uint8_t*>(this) + 0x50);
+#else
+		return *reinterpret_cast<T*>(&value);
+#endif
+	}
 };
 
 class IEngineCVar

@@ -363,9 +363,10 @@ void MENU::RenderMainWindow()
 				edited::BeginChild("##LegitbotContainer", ImVec2(c::background::size.x - 200, c::background::size.y), 0);
 				{
 					ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "Legitbot");
-					edited::Checkbox("Legit Aim", "UI only; gameplay is not connected yet", &C_GET(bool, Vars.legit_ui_aim));
+					edited::Checkbox("Enable", "Master switch for every Legitbot feature", &C_GET(bool, Vars.legit_ui_enable));
+					edited::Checkbox("Legit Aim", "Smooth aim assistance while firing", &C_GET(bool, Vars.legit_ui_aim));
 					edited::SliderFloat("Smoothness", "Aim smoothing amount", &C_GET(float, Vars.legit_ui_smoothness), 1.f, 100.f, "%.0f");
-					edited::Checkbox("Draw FoV", "UI only; no circle is drawn yet", &C_GET(bool, Vars.legit_ui_draw_fov));
+					edited::Checkbox("Draw FoV", "Draw the active aim field of view", &C_GET(bool, Vars.legit_ui_draw_fov));
 					edited::SliderFloat("FoV Size", "Field of view size", &C_GET(float, Vars.legit_ui_fov_size), 5.f, 60.f, "%.0f°");
 				}
 				edited::EndChild();

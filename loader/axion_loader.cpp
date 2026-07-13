@@ -162,7 +162,7 @@ void UpdateClicked(GtkButton*, gpointer user_data)
 
     SetButtonsSensitive(state, false);
     gtk_button_set_label(GTK_BUTTON(state->update_button), "Dumping…");
-    SetStatus(state, "Updating signatures, offsets, interfaces, and schemas…", "status-working");
+    SetStatus(state, "Updating offsets, signatures, CVars, interfaces, buttons, and schemas…", "status-working");
     g_subprocess_communicate_utf8_async(process, nullptr, nullptr, UpdateFinished, state);
 }
 

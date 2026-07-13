@@ -10,11 +10,23 @@ RUNTIME="$CACHE/cs2-dumper-runtime"
 OUTPUT="$CACHE/cs2-dumper-output"
 UPSTREAM_CONFIG="$CACHE/cs2-dumper-config.json"
 CONFIG_URL="${AXION_DUMPER_CONFIG_URL:-https://raw.githubusercontent.com/catpetter1999/cs2-dumper/linux/config.json}"
+RUNTIME_CVARS="${AXION_RUNTIME_CVARS:-$HOME/.cs2/convars.txt}"
+
+import_runtime_cvars() {
+    if [ -s "$RUNTIME_CVARS" ]; then
+        mkdir -p "$OUTPUT"
+        cp -f "$RUNTIME_CVARS" "$OUTPUT/convars.txt"
+        echo "Full dumper: imported the injected runtime CVar registry."
+    else
+        echo "Full dumper: inject once to create the runtime CVar registry." >&2
+    fi
+}
 
 PID="$(pgrep -n -x cs2 2>/dev/null || true)"
 if [ -z "$PID" ]; then
     if [ -s "$OUTPUT/offsets.json" ]; then
         "$ROOT/tools/import_full_dump.py" "$OUTPUT/offsets.json" "$CACHE/linux-offsets.resolved.json"
+        import_runtime_cvars
         echo "Full dumper: kept the last live dump; start native CS2 to refresh it."
     else
         echo "Full dumper: ready; start native CS2, then press Update."
@@ -67,4 +79,5 @@ test -s "$OUTPUT.new/offsets.json"
 rm -rf "$OUTPUT"
 mv "$OUTPUT.new" "$OUTPUT"
 "$ROOT/tools/import_full_dump.py" "$OUTPUT/offsets.json" "$CACHE/linux-offsets.resolved.json"
+import_runtime_cvars
 echo "Full dump saved to $OUTPUT"

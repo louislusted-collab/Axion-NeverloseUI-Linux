@@ -8,6 +8,8 @@ namespace CONVAR
 	bool Dump(const wchar_t* wszFileName);
 	// setup convars
 	bool Setup();
+	// Native-safe exact-name lookup used by Linux features and the runtime dump.
+	CConVar* Find(const char* name);
 
 	inline CConVar* m_pitch = nullptr;
 	inline CConVar* m_yaw = nullptr;

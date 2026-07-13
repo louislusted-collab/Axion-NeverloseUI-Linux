@@ -33,6 +33,18 @@
       "occurrences": 1,
       "operations": [{ "type": "rip", "offset": 3, "len": 8 }]
     },
+    "dwCSGOInputNative": {
+      "module": "libclient.so",
+      "pattern": "F3 41 0F 7E 06 F3 0F 7E 4D B0 48 8D 05 ? ? ? ? 0F 58 C1",
+      "occurrences": 1,
+      "operations": [{ "type": "add", "value": 10 }, { "type": "rip", "offset": 3, "len": 7 }, { "type": "add", "value": 16 }]
+    },
+    "dwViewAnglesNative": {
+      "module": "libclient.so",
+      "pattern": "F3 41 0F 7E 06 F3 0F 7E 4D B0 48 8D 05 ? ? ? ? 0F 58 C1",
+      "occurrences": 1,
+      "operations": [{ "type": "add", "value": 10 }, { "type": "rip", "offset": 3, "len": 7 }, { "type": "add", "value": 1368 }]
+    },
     "dwBuildNumber": {
       "module": "libengine2.so",
       "pattern": "89 15 ? ? ? ? 48 83 C3",
