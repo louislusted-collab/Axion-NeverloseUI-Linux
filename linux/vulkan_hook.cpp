@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdarg>
 #include <algorithm>
+#include <cmath>
 #include <vector>
 #include <mutex>
 #include <atomic>
@@ -83,6 +84,15 @@ static std::atomic<float> native_aim_mouse_x{0.f};
 static std::atomic<float> native_aim_mouse_y{0.f};
 static std::atomic<std::uint64_t> native_aim_sdl_samples{0};
 static std::atomic<bool> native_thirdperson_input{false};
+using InputCreateMoveFn = bool(*)(void*, int, bool);
+static InputCreateMoveFn native_input_create_move_original = nullptr;
+static funchook_t* native_input_hooks = nullptr;
+static std::atomic<void*> native_aim_angle_destination{nullptr};
+static std::atomic<float> native_aim_angle_pitch{0.f};
+static std::atomic<float> native_aim_angle_yaw{0.f};
+static std::atomic<float> native_aim_angle_roll{0.f};
+static std::atomic<std::uint64_t> native_create_move_calls{0};
+static std::atomic<std::uint64_t> native_aim_angle_applications{0};
 static funchook_t* late_hooks = nullptr;
 static VkInstance late_probe_instance = VK_NULL_HANDLE;
 static VkDevice late_probe_device = VK_NULL_HANDLE;
@@ -132,6 +142,36 @@ static void PreviewDebug(const char* format, ...)
     vsnprintf(buffer, sizeof(buffer), format, args);
     va_end(args);
     VulkanDebug(buffer);
+}
+
+static bool NativeInputCreateMove(void* input, int slot, bool active)
+{
+    native_create_move_calls.fetch_add(1, std::memory_order_relaxed);
+    const bool thirdPerson = native_thirdperson_input.load(std::memory_order_acquire);
+    if (input != nullptr)
+        *reinterpret_cast<bool*>(reinterpret_cast<std::uint8_t*>(input) + 0x229) = thirdPerson;
+
+    void* destination = native_aim_angle_destination.exchange(nullptr, std::memory_order_acq_rel);
+    if (destination != nullptr)
+    {
+        const float pitch = native_aim_angle_pitch.load(std::memory_order_relaxed);
+        const float yaw = native_aim_angle_yaw.load(std::memory_order_relaxed);
+        const float roll = native_aim_angle_roll.load(std::memory_order_relaxed);
+        if (std::isfinite(pitch) && std::isfinite(yaw) && std::isfinite(roll))
+        {
+            auto* angles = static_cast<float*>(destination);
+            angles[0] = std::clamp(pitch, -89.f, 89.f);
+            angles[1] = std::remainder(yaw, 360.f);
+            angles[2] = 0.f;
+            native_aim_angle_applications.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
+    const bool result = native_input_create_move_original != nullptr
+        ? native_input_create_move_original(input, slot, active) : false;
+    if (input != nullptr)
+        *reinterpret_cast<bool*>(reinterpret_cast<std::uint8_t*>(input) + 0x229) = thirdPerson;
+    return result;
 }
 
 static std::string ResolvePreviewPngPath()
@@ -1220,6 +1260,57 @@ void EnableVulkanMenu()
     L_PRINT(LOG_INFO) << "[VULKAN] Menu rendering enabled";
 }
 
+bool InstallNativeInputHook()
+{
+    if (native_input_hooks != nullptr)
+        return true;
+    if (I::Input == nullptr)
+    {
+        VulkanDebug("[INPUT] CreateMove hook unavailable: CCSGOInput is null");
+        return false;
+    }
+
+    auto** vtable = *reinterpret_cast<void***>(I::Input);
+    void* target = vtable != nullptr ? vtable[6] : nullptr;
+    if (target == nullptr)
+    {
+        VulkanDebug("[INPUT] CreateMove hook unavailable: vtable[6] is null");
+        return false;
+    }
+
+    native_input_create_move_original = reinterpret_cast<InputCreateMoveFn>(target);
+    native_input_hooks = funchook_create();
+    int result = native_input_hooks != nullptr ? 0 : -1;
+    if (result == 0)
+        result = funchook_prepare(native_input_hooks,
+            reinterpret_cast<void**>(&native_input_create_move_original),
+            reinterpret_cast<void*>(&NativeInputCreateMove));
+    if (result == 0)
+        result = funchook_install(native_input_hooks, 0);
+    if (result != 0)
+    {
+        if (native_input_hooks != nullptr)
+            funchook_destroy(native_input_hooks);
+        native_input_hooks = nullptr;
+        native_input_create_move_original = nullptr;
+        PreviewDebug("[INPUT] CreateMove hook install failed result=%d target=%p", result, target);
+        return false;
+    }
+    PreviewDebug("[INPUT] CreateMove hook installed target=%p input=%p", target, I::Input);
+    return true;
+}
+
+void DestroyNativeInputHook()
+{
+    native_aim_angle_destination.store(nullptr, std::memory_order_release);
+    if (native_input_hooks == nullptr)
+        return;
+    funchook_uninstall(native_input_hooks, 0);
+    funchook_destroy(native_input_hooks);
+    native_input_hooks = nullptr;
+    native_input_create_move_original = nullptr;
+}
+
 bool QueueNativeAimDelta(float x, float y)
 {
     if (late_hooks == nullptr || orig_SDL_GetRelativeMouseState == nullptr)
@@ -1235,6 +1326,29 @@ void ClearNativeAimDelta()
 {
     native_aim_mouse_x.store(0.f, std::memory_order_release);
     native_aim_mouse_y.store(0.f, std::memory_order_release);
+    native_aim_angle_destination.store(nullptr, std::memory_order_release);
+}
+
+bool QueueNativeAimAngles(void* destination, float pitch, float yaw, float roll)
+{
+    if (native_input_hooks == nullptr || destination == nullptr ||
+        !std::isfinite(pitch) || !std::isfinite(yaw) || !std::isfinite(roll))
+        return false;
+    native_aim_angle_pitch.store(pitch, std::memory_order_relaxed);
+    native_aim_angle_yaw.store(yaw, std::memory_order_relaxed);
+    native_aim_angle_roll.store(roll, std::memory_order_relaxed);
+    native_aim_angle_destination.store(destination, std::memory_order_release);
+    return true;
+}
+
+unsigned long long GetNativeCreateMoveCalls()
+{
+    return native_create_move_calls.load(std::memory_order_relaxed);
+}
+
+unsigned long long GetNativeAimAngleApplications()
+{
+    return native_aim_angle_applications.load(std::memory_order_relaxed);
 }
 
 void SetNativeThirdPersonInput(bool enabled)

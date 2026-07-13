@@ -130,6 +130,7 @@ struct Variables_t
 	C_ADD_VARIABLE(ColorPickerVar_t, colVisualChams, ColorPickerVar_t(0, 255, 0));
 	C_ADD_VARIABLE(ColorPickerVar_t, colVisualChamsIgnoreZ, ColorPickerVar_t(255, 0, 0));
 	C_ADD_VARIABLE(ColorPickerVar_t, colModulate, ColorPickerVar_t(255, 0, 0));
+	C_ADD_VARIABLE(bool, bRemoveSmoke, false);
 
 #pragma endregion
 #pragma region legit

@@ -223,10 +223,10 @@ void MENU::RenderMainWindow()
 		ImGui::BeginGroup();
 		{
 			std::vector<std::vector<std::string>> tab_columns = {
-				{ "c", "", "b", "f", "o", "e" },
-				{ "Ragebot", "Legitbot", "Antiaim", "Visuals", "Skins", "Misc" },
-				{ "Aims agressively at targets...", "Subtle aim assistance...", "Accuracy assistance...", "Visualisation", "Items customization...", "Save/Load configs, engine..." },
-				{ "", "", "", "", "", "" }
+				{ "c", "", "b", "d", "f", "o", "e" },
+				{ "Ragebot", "Legitbot", "Antiaim", "Removals", "Visuals", "Skins", "Misc" },
+				{ "Aims agressively at targets...", "Subtle aim assistance...", "Accuracy assistance...", "Remove obstructive effects...", "Visualisation", "Items customization...", "Save/Load configs, engine..." },
+				{ "", "", "", "", "", "", "" }
 			};
 
 			const int num_tabs = tab_columns[0].size();
@@ -398,6 +398,14 @@ void MENU::RenderMainWindow()
 				edited::EndChild();
 			}
 			else if (active_tab == 3) {
+				edited::BeginChild("##RemovalsContainer", ImVec2(c::background::size.x - 200, c::background::size.y), 0);
+				{
+					ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "Removals");
+					edited::Checkbox("Remove Smoke", "Suppress active smoke volumes and the local smoke overlay", &C_GET(bool, Vars.bRemoveSmoke));
+				}
+				edited::EndChild();
+			}
+			else if (active_tab == 4) {
 				edited::BeginChild("##Container0", ImVec2((c::background::size.x - 200) / 2, c::background::size.y), 0);
 				{
 
@@ -538,7 +546,7 @@ void MENU::RenderMainWindow()
 				}
 				edited::EndChild();
 			}
-			else if (active_tab == 5) {
+			else if (active_tab == 6) {
 			edited::BeginChild("##Container0", ImVec2((c::background::size.x - 200) / 2, c::background::size.y), 0);
 			{
 
@@ -728,7 +736,7 @@ void MENU::RenderMainWindow()
 			}
 			edited::EndChild();
 			}
-			else if (active_tab == 4) {
+			else if (active_tab == 5) {
 				#ifdef __linux__
 					edited::BeginChild("##NativeSkinChanger", ImVec2(600, c::background::size.y), 0);
 					{

@@ -8,6 +8,8 @@ extern "C" {
 
 void InstallVulkanHook();
 void EnableVulkanMenu();
+bool InstallNativeInputHook();
+void DestroyNativeInputHook();
 
 // Queues a relative mouse delta for CS2's next SDL input sample. The native
 // legitbot uses the same input path as physical mouse movement so CreateMove
@@ -17,6 +19,12 @@ void EnableVulkanMenu();
 // pointer.
 bool QueueNativeAimDelta(float x, float y);
 void ClearNativeAimDelta();
+
+// Schedules a schema-resolved pawn angle for the next CCSGOInput::CreateMove.
+// The destination remains inside CS2; no OS or kernel input device is used.
+bool QueueNativeAimAngles(void* destination, float pitch, float yaw, float roll);
+unsigned long long GetNativeCreateMoveCalls();
+unsigned long long GetNativeAimAngleApplications();
 
 // Keeps CS2's native third-person input flag synchronized during the game's
 // SDL input sample. Writing this only from Vulkan present is too late for the

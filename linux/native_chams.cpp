@@ -22,6 +22,7 @@
 #include <cstring>
 #include <dlfcn.h>
 #include <string>
+#include <vector>
 
 namespace NativeChams
 {
@@ -247,10 +248,10 @@ bool IsTarget(void* mesh)
         reinterpret_cast<std::uint8_t*>(mesh) + kSceneAnimatableOffset);
     if (sceneAnimatable == nullptr)
         return false;
-    // SceneAnimatableObject has moved between 0xB0 and 0xC0 across CS2
-    // builds. Resolve only handles that map back to one of our known live
-    // enemy pawns, which makes the check safe across both layouts.
-    for (const std::size_t ownerOffset : {0xB0U, 0xB8U, 0xC0U})
+    // Player LODs and attachment meshes do not all use the same owner slot.
+    // Only accept handles that resolve back to a tracked live enemy, so this
+    // broader layout probe cannot turn unrelated world meshes into targets.
+    for (std::size_t ownerOffset = 0x98U; ownerOffset <= 0xE0U; ownerOffset += 8U)
     {
         const auto handle = *reinterpret_cast<const CBaseHandle*>(sceneAnimatable + ownerOffset);
         C_BaseEntity* owner = I::GameResourceService->pGameEntitySystem->Get<C_BaseEntity>(handle);
@@ -282,21 +283,23 @@ void DrawArray(void* descriptor, void* renderContext, void* meshArray, int count
         material2_t* material;
         Color_t color;
     };
-    std::array<Backup, 128> changed{};
-    int changedCount = 0;
-    const int safeCount = std::min(count, static_cast<int>(changed.size()));
+    // Far-away/alternate-LOD batches regularly contain more than 128 mesh
+    // records. The old fixed array silently ignored every record after 127.
+    const int safeCount = std::min(count, 4096);
+    std::vector<Backup> changed;
+    changed.reserve(static_cast<std::size_t>(safeCount));
     for (int index = 0; index < safeCount; ++index)
     {
         auto* mesh = reinterpret_cast<std::uint8_t*>(meshArray) + index * kMeshStride;
         if (!IsTarget(mesh))
             continue;
-        auto& backup = changed[changedCount++];
+        auto& backup = changed.emplace_back();
         backup.mesh = mesh;
         backup.material = *reinterpret_cast<material2_t**>(mesh + kMaterialOffset);
         std::memcpy(&backup.color, mesh + kColorOffset, sizeof(backup.color));
     }
 
-    if (changedCount == 0)
+    if (changed.empty())
     {
         original(descriptor, renderContext, meshArray, count, sceneView, sceneLayer, drawContext, frameStats);
         return;
@@ -305,6 +308,22 @@ void DrawArray(void* descriptor, void* renderContext, void* meshArray, int count
     const int selectedStyle = std::clamp(C_GET(int, Vars.nVisualChamMaterial), 0,
         static_cast<int>(MaterialStyle::Count) - 1);
     const MaterialPair& selectedMaterials = materials[static_cast<std::size_t>(selectedStyle)];
+    const int changedCount = static_cast<int>(changed.size());
+
+    static std::uint64_t matchedMeshes = 0;
+    static std::uint64_t matchedBatches = 0;
+    static auto nextStats = std::chrono::steady_clock::now();
+    matchedMeshes += changed.size();
+    ++matchedBatches;
+    const auto statsNow = std::chrono::steady_clock::now();
+    if (statsNow >= nextStats)
+    {
+        Log("coverage batches=%llu meshes=%llu current_batch=%d/%d style=%d through_walls=%d",
+            static_cast<unsigned long long>(matchedBatches),
+            static_cast<unsigned long long>(matchedMeshes), changedCount, count,
+            selectedStyle, C_GET(bool, Vars.bVisualChamsIgnoreZ));
+        nextStats = statsNow + std::chrono::seconds(5);
+    }
 
     if (C_GET(bool, Vars.bVisualChamsIgnoreZ) && selectedMaterials.hidden != nullptr)
     {

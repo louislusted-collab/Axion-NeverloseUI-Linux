@@ -233,6 +233,13 @@ static bool Setup(HMODULE hModule)
 	}
 	SetupDebugLog("H::Setup succeeded\n");
 
+#ifdef __linux__
+	if (!InstallNativeInputHook())
+		SetupDebugLog("native CCSGOInput::CreateMove hook unavailable; present-time angle fallback remains active\n");
+	else
+		SetupDebugLog("native CCSGOInput::CreateMove hook installed\n");
+#endif
+
 	L_PRINT(LOG_NONE) << CS_XOR("hooks initialization completed");
 
 
@@ -258,6 +265,9 @@ SetupDebugLog("Setup() completed successfully\n");
 // @todo: some of those may crash while closing process, because we dont have any dependencies from the game modules, it means them can be unloaded and destruct interfaces etc before our module | modify ldrlist?
 static void Destroy()
 {
+#ifdef __linux__
+	DestroyNativeInputHook();
+#endif
 	// restore window messages processor to original
 	IPT::Destroy();
 

@@ -19,6 +19,27 @@ static FILE* g_DebugLogFile = nullptr;
 static bool g_IsCs2Process = false;
 static std::atomic<bool> g_SetupSucceeded{false};
 
+static void ResetDebugLogs()
+{
+    static const char* paths[] = {
+        "/tmp/cs2_inject_debug.log",
+        "/tmp/cs2_init_debug.log",
+        "/tmp/cs2_hook_debug.log",
+        "/tmp/cs2_esp_debug.log",
+        "/tmp/cs2_chams_debug.log",
+        "/tmp/cs2_vulkan_debug.log",
+        "/tmp/cs2_legit_debug.log",
+        "/tmp/cs2_modules.txt",
+    };
+    if (g_DebugLogFile != nullptr)
+    {
+        fclose(g_DebugLogFile);
+        g_DebugLogFile = nullptr;
+    }
+    for (const char* path : paths)
+        unlink(path);
+}
+
 static bool IsCs2Process()
 {
     char executable[4096] = {};
@@ -142,6 +163,9 @@ static void on_load() {
     if (!g_IsCs2Process)
         return;
 
+    // A new CS2 process is a new diagnostic session. Keeping old process
+    // addresses in these logs made failures needlessly difficult to read.
+    ResetDebugLogs();
     DebugLog("[cs2_inject] on_load constructor called\n");
     // Never replace CS2/Steam's process-wide handlers during normal use.
     // Some networking code relies on its own fault handling.
