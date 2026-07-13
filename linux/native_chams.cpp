@@ -35,8 +35,20 @@ constexpr std::size_t kColorOffset = 0x40;
 std::array<std::atomic<C_CSPlayerPawn*>, 128> targets{};
 funchook_t* hook = nullptr;
 DrawArrayFn original = nullptr;
-material2_t* visibleMaterial = nullptr;
-material2_t* hiddenMaterial = nullptr;
+struct MaterialPair
+{
+    material2_t* visible = nullptr;
+    material2_t* hidden = nullptr;
+};
+
+enum class MaterialStyle : std::size_t
+{
+    Flat,
+    Metallic,
+    Count
+};
+
+std::array<MaterialPair, static_cast<std::size_t>(MaterialStyle::Count)> materials{};
 bool materialLoadAttempted = false;
 
 void Log(const char* message, ...)
@@ -52,7 +64,7 @@ void Log(const char* message, ...)
     std::fflush(file);
 }
 
-material2_t* CreateMaterial(const char* name, bool ignoreDepth)
+material2_t* CreateMaterial(const char* name, MaterialStyle style, bool ignoreDepth)
 {
     if (I::MaterialSystem2 == nullptr)
         return nullptr;
@@ -63,33 +75,65 @@ material2_t* CreateMaterial(const char* name, bool ignoreDepth)
     if (loadKv3 == nullptr)
         return nullptr;
 
-    static constexpr char visibleVmat[] = R"(<!-- kv3 encoding:text:version{e21c7f3c-8a33-41c5-9977-a76d3a32aa0d} format:generic:version{7412167c-06e9-4698-aff2-e63eb59037e7} -->
+    static constexpr char flatVisibleVmat[] = R"(<!-- kv3 encoding:text:version{e21c7f3c-8a33-41c5-9977-a76d3a32aa0d} format:generic:version{7412167c-06e9-4698-aff2-e63eb59037e7} -->
 {
     shader = "csgo_unlitgeneric.vfx"
     F_PAINT_VERTEX_COLORS = 1
-    F_TRANSLUCENT = 1
-    F_BLEND_MODE = 1
     g_vColorTint = [1, 1, 1, 1]
     g_tColor = resource:"materials/default/default_mask_tga_fde710a5.vtex"
     g_tNormal = resource:"materials/default/default_mask_tga_fde710a5.vtex"
 })";
-    static constexpr char hiddenVmat[] = R"(<!-- kv3 encoding:text:version{e21c7f3c-8a33-41c5-9977-a76d3a32aa0d} format:generic:version{7412167c-06e9-4698-aff2-e63eb59037e7} -->
+    static constexpr char flatHiddenVmat[] = R"(<!-- kv3 encoding:text:version{e21c7f3c-8a33-41c5-9977-a76d3a32aa0d} format:generic:version{7412167c-06e9-4698-aff2-e63eb59037e7} -->
 {
     shader = "csgo_unlitgeneric.vfx"
     F_PAINT_VERTEX_COLORS = 1
-    F_TRANSLUCENT = 1
-    F_BLEND_MODE = 1
+    F_IGNOREZ = 1
     F_DISABLE_Z_WRITE = 1
     F_DISABLE_Z_BUFFERING = 1
     g_vColorTint = [1, 1, 1, 1]
     g_tColor = resource:"materials/default/default_mask_tga_fde710a5.vtex"
     g_tNormal = resource:"materials/default/default_mask_tga_b3f4ec4c.vtex"
 })";
+    static constexpr char metallicVisibleVmat[] = R"(<!-- kv3 encoding:text:version{e21c7f3c-8a33-41c5-9977-a76d3a32aa0d} format:generic:version{7412167c-06e9-4698-aff2-e63eb59037e7} -->
+{
+    shader = "csgo_complex.vfx"
+    F_PAINT_VERTEX_COLORS = 1
+    F_METALNESS_TEXTURE = 0
+    F_ROUGHNESS_TEXTURE = 0
+    g_vColorTint = [1, 1, 1, 1]
+    g_flMetalness = 1.0
+    g_flRoughness = 0.18
+    g_tColor = resource:"materials/default/default_mask_tga_fde710a5.vtex"
+    g_tNormal = resource:"materials/default/default_normal_tga_b3f4ec4c.vtex"
+    g_tAmbientOcclusion = resource:"materials/default/default_mask_tga_fde710a5.vtex"
+})";
+    static constexpr char metallicHiddenVmat[] = R"(<!-- kv3 encoding:text:version{e21c7f3c-8a33-41c5-9977-a76d3a32aa0d} format:generic:version{7412167c-06e9-4698-aff2-e63eb59037e7} -->
+{
+    shader = "csgo_complex.vfx"
+    F_PAINT_VERTEX_COLORS = 1
+    F_METALNESS_TEXTURE = 0
+    F_ROUGHNESS_TEXTURE = 0
+    F_IGNOREZ = 1
+    F_DISABLE_Z_WRITE = 1
+    F_DISABLE_Z_BUFFERING = 1
+    g_vColorTint = [1, 1, 1, 1]
+    g_flMetalness = 1.0
+    g_flRoughness = 0.18
+    g_tColor = resource:"materials/default/default_mask_tga_fde710a5.vtex"
+    g_tNormal = resource:"materials/default/default_normal_tga_b3f4ec4c.vtex"
+    g_tAmbientOcclusion = resource:"materials/default/default_mask_tga_fde710a5.vtex"
+})";
+
+    const char* vmat = nullptr;
+    if (style == MaterialStyle::Metallic)
+        vmat = ignoreDepth ? metallicHiddenVmat : metallicVisibleVmat;
+    else
+        vmat = ignoreDepth ? flatHiddenVmat : flatVisibleVmat;
 
     alignas(16) std::array<std::byte, 0x100 + sizeof(CKeyValues3)> storage{};
     auto* kv3 = reinterpret_cast<CKeyValues3*>(storage.data() + 0x100);
     const KV3IVD_t id{name, 0x469806E97412167CULL, 0xE73790B53EE6F2AFULL};
-    if (!loadKv3(kv3, nullptr, ignoreDepth ? hiddenVmat : visibleVmat, &id, nullptr, 0))
+    if (!loadKv3(kv3, nullptr, vmat, &id, nullptr, 0))
         return nullptr;
 
     // The native VMaterialSystem2_001 ABI returns a strong resource binding
@@ -104,9 +148,40 @@ void LoadMaterials()
     if (materialLoadAttempted)
         return;
     materialLoadAttempted = true;
-    visibleMaterial = CreateMaterial("materials/axion/player_visible.vmat", false);
-    hiddenMaterial = CreateMaterial("materials/axion/player_hidden.vmat", true);
-    Log("materials visible=%p hidden_noz=%p", visibleMaterial, hiddenMaterial);
+    materials[static_cast<std::size_t>(MaterialStyle::Flat)] = {
+        CreateMaterial("materials/axion/player_flat_visible.vmat", MaterialStyle::Flat, false),
+        CreateMaterial("materials/axion/player_flat_hidden.vmat", MaterialStyle::Flat, true)};
+    materials[static_cast<std::size_t>(MaterialStyle::Metallic)] = {
+        CreateMaterial("materials/axion/player_metallic_visible.vmat", MaterialStyle::Metallic, false),
+        CreateMaterial("materials/axion/player_metallic_hidden.vmat", MaterialStyle::Metallic, true)};
+    Log("materials flat=%p/%p metallic=%p/%p",
+        materials[0].visible, materials[0].hidden, materials[1].visible, materials[1].hidden);
+}
+
+bool IsTrackedTarget(const C_BaseEntity* entity)
+{
+    if (entity == nullptr)
+        return false;
+    for (const auto& target : targets)
+        if (target.load(std::memory_order_relaxed) == entity)
+            return true;
+    return false;
+}
+
+bool ResolvesToTarget(C_BaseEntity* entity)
+{
+    auto* entitySystem = I::GameResourceService->pGameEntitySystem;
+    for (int depth = 0; entity != nullptr && depth < 3; ++depth)
+    {
+        if (IsTrackedTarget(entity))
+            return true;
+        const CBaseHandle ownerHandle = entity->GetOwnerHandle();
+        C_BaseEntity* owner = entitySystem->Get<C_BaseEntity>(ownerHandle);
+        if (owner == entity)
+            break;
+        entity = owner;
+    }
+    return false;
 }
 
 bool IsTarget(void* mesh)
@@ -124,12 +199,9 @@ bool IsTarget(void* mesh)
     for (const std::size_t ownerOffset : {0xB0U, 0xB8U, 0xC0U})
     {
         const auto handle = *reinterpret_cast<const CBaseHandle*>(sceneAnimatable + ownerOffset);
-        C_CSPlayerPawn* owner = I::GameResourceService->pGameEntitySystem->Get<C_CSPlayerPawn>(handle);
-        if (owner == nullptr)
-            continue;
-        for (const auto& target : targets)
-            if (target.load(std::memory_order_relaxed) == owner)
-                return true;
+        C_BaseEntity* owner = I::GameResourceService->pGameEntitySystem->Get<C_BaseEntity>(handle);
+        if (ResolvesToTarget(owner))
+            return true;
     }
     return false;
 }
@@ -176,24 +248,31 @@ void DrawArray(void* descriptor, void* renderContext, void* meshArray, int count
         return;
     }
 
-    if (C_GET(bool, Vars.bVisualChamsIgnoreZ) && hiddenMaterial != nullptr)
+    const int selectedStyle = std::clamp(C_GET(int, Vars.nVisualChamMaterial), 0,
+        static_cast<int>(MaterialStyle::Count) - 1);
+    const MaterialPair& selectedMaterials = materials[static_cast<std::size_t>(selectedStyle)];
+
+    if (C_GET(bool, Vars.bVisualChamsIgnoreZ) && selectedMaterials.hidden != nullptr)
     {
         const Color_t hiddenColor = C_GET(ColorPickerVar_t, Vars.colVisualChamsIgnoreZ).colValue;
         for (int index = 0; index < changedCount; ++index)
         {
             auto* mesh = static_cast<std::uint8_t*>(changed[index].mesh);
-            *reinterpret_cast<material2_t**>(mesh + kMaterialOffset) = hiddenMaterial;
+            *reinterpret_cast<material2_t**>(mesh + kMaterialOffset) = selectedMaterials.hidden;
             SetMeshColor(mesh, hiddenColor);
-            original(descriptor, renderContext, mesh, 1, sceneView, sceneLayer, drawContext, frameStats);
         }
+        // DrawArray's descriptor describes the entire submitted mesh batch.
+        // Replaying individual records produces only a thin partial shell, so
+        // the no-depth pass must preserve the original array and count.
+        original(descriptor, renderContext, meshArray, count, sceneView, sceneLayer, drawContext, frameStats);
     }
 
     const Color_t visibleColor = C_GET(ColorPickerVar_t, Vars.colVisualChams).colValue;
     for (int index = 0; index < changedCount; ++index)
     {
         auto* mesh = static_cast<std::uint8_t*>(changed[index].mesh);
-        if (visibleMaterial != nullptr)
-            *reinterpret_cast<material2_t**>(mesh + kMaterialOffset) = visibleMaterial;
+        if (selectedMaterials.visible != nullptr)
+            *reinterpret_cast<material2_t**>(mesh + kMaterialOffset) = selectedMaterials.visible;
         SetMeshColor(mesh, visibleColor);
     }
     original(descriptor, renderContext, meshArray, count, sceneView, sceneLayer, drawContext, frameStats);
@@ -248,8 +327,7 @@ void Destroy()
     funchook_destroy(hook);
     hook = nullptr;
     original = nullptr;
-    visibleMaterial = nullptr;
-    hiddenMaterial = nullptr;
+    materials = {};
     materialLoadAttempted = false;
     UpdateTargets(nullptr, 0);
 }

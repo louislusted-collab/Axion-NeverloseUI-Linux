@@ -428,7 +428,9 @@ void MENU::RenderMainWindow()
 					const char* chams[3]{ CS_XOR("Flat"), CS_XOR("Default"),CS_XOR("Illumin") };
 					edited::Combo(CS_XOR("Models"), CS_XOR(""), &C_GET(int, Vars.nVisualChamMaterial), chams, IM_ARRAYSIZE(chams), 3);
 				#else
-					ImGui::TextDisabled("Native Linux: visible + no-depth material passes.");
+					const char* chams[2]{ CS_XOR("Flat"), CS_XOR("Metallic") };
+					edited::Combo(CS_XOR("Material"), CS_XOR("Flat is solid color; Metallic reflects map lighting"),
+						&C_GET(int, Vars.nVisualChamMaterial), chams, IM_ARRAYSIZE(chams), 2);
 				#endif
 
 				}
