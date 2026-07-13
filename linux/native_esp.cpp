@@ -322,9 +322,21 @@ void ApplyThirdPerson(C_CSPlayerPawn* localPawn)
 
 void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localController, C_CSPlayerPawn* localPawn)
 {
-    if (!C_GET(bool, Vars.legit_ui_enable) || !C_GET(bool, Vars.legit_ui_aim) ||
-        MENU::bMainWindowOpened || native_thirdperson_active || localPawn == nullptr)
+    if (!C_GET(bool, Vars.legit_ui_enable) || !C_GET(bool, Vars.legit_ui_aim))
         return;
+
+    static std::uint64_t nextDiagnostic = 0;
+    const std::uint64_t now = SDL_GetTicks();
+    const bool diagnose = now >= nextDiagnostic;
+    if (diagnose)
+        nextDiagnostic = now + 1000;
+    if (MENU::bMainWindowOpened || native_thirdperson_active || localPawn == nullptr)
+    {
+        if (diagnose)
+            EspLog("[legit] blocked menu=%d thirdperson=%d pawn=%p",
+                MENU::bMainWindowOpened, native_thirdperson_active, localPawn);
+        return;
+    }
 
     static bool previousKey = false;
     static bool toggled = false;
@@ -338,17 +350,23 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
     previousKey = keyDown;
     previousToggleMode = toggleMode;
     if (!(toggleMode ? toggled : keyDown))
+    {
+        if (diagnose)
+            EspLog("[legit] waiting key=%d down=%d toggle=%d active=%d",
+                C_GET(int, Vars.legit_ui_key), keyDown, toggleMode, toggled);
         return;
+    }
 
     CGameSceneNode* localScene = localPawn != nullptr ? localPawn->GetGameSceneNode() : nullptr;
     if (localScene == nullptr)
         return;
     const Vector_t localEye = localScene->GetAbsOrigin() + localPawn->m_vecViewOffset();
     static const std::uint32_t pawnViewAngleOffset = SCHEMA::GetOffset("C_BasePlayerPawn->v_angle");
-    if (pawnViewAngleOffset == 0)
+    if (pawnViewAngleOffset == 0 && native_view_angles == nullptr)
         return;
-    const QAngle_t current = *reinterpret_cast<QAngle_t*>(
-        reinterpret_cast<std::uint8_t*>(localPawn) + pawnViewAngleOffset);
+    QAngle_t current = native_view_angles != nullptr
+        ? *native_view_angles
+        : *reinterpret_cast<QAngle_t*>(reinterpret_cast<std::uint8_t*>(localPawn) + pawnViewAngleOffset);
     if (!current.IsValid())
         return;
 
@@ -423,7 +441,12 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
         }
     }
     if (!found)
+    {
+        if (diagnose)
+            EspLog("[legit] key active but no target in %.1f degree fov current=%.1f,%.1f",
+                C_GET(float, Vars.legit_ui_fov_size), current.x, current.y);
         return;
+    }
 
     if (C_GET(bool, Vars.legit_ui_auto_shoot) && bestFov < 2.f && I::Input != nullptr)
         *reinterpret_cast<std::uint64_t*>(reinterpret_cast<std::uint8_t*>(I::Input) + 0x240) |= 1ULL;
@@ -447,60 +470,134 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
     QueueNativeAimDelta(-(bestDelta.y * step) / (sensitivity * yawScale),
                          (bestDelta.x * step) / (sensitivity * pitchScale));
 
-    *reinterpret_cast<QAngle_t*>(reinterpret_cast<std::uint8_t*>(localPawn) + pawnViewAngleOffset) = result;
+    if (pawnViewAngleOffset != 0)
+        *reinterpret_cast<QAngle_t*>(reinterpret_cast<std::uint8_t*>(localPawn) + pawnViewAngleOffset) = result;
     if (native_view_angles != nullptr)
         *native_view_angles = result;
-    // Keep the verified old-internal input-angle path in sync as a same-frame
-    // fallback; the pawn schema angle remains authoritative.
-    if (I::Input != nullptr)
-        *reinterpret_cast<QAngle_t*>(reinterpret_cast<std::uint8_t*>(I::Input) + 0x2D8) = result;
+    else if (I::Input != nullptr)
+        *reinterpret_cast<QAngle_t*>(reinterpret_cast<std::uint8_t*>(I::Input) + 0x548) = result;
+
+    if (diagnose)
+        EspLog("[legit] applied fov=%.2f step=%.3f current=%.1f,%.1f result=%.1f,%.1f view=%p input=%p",
+            bestFov, step, current.x, current.y, result.x, result.y, native_view_angles, I::Input);
 }
 
-void ApplyNativeSkin(CGameEntitySystem* entities, C_CSPlayerPawn* localPawn)
+void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localController, C_CSPlayerPawn* localPawn)
 {
-    if (!C_GET(bool, Vars.skin_ui_enable) || entities == nullptr || localPawn == nullptr)
+    if (!C_GET(bool, Vars.skin_ui_enable) || entities == nullptr ||
+        localController == nullptr || localPawn == nullptr)
         return;
     CPlayer_WeaponServices* services = localPawn->GetWeaponServices();
-    C_CSWeaponBase* weapon = services != nullptr ? entities->Get<C_CSWeaponBase>(services->m_hActiveWeapon()) : nullptr;
-    if (weapon == nullptr)
+    if (services == nullptr)
         return;
 
+    static const std::uint32_t myWeapons = SCHEMA::GetOffset("CPlayer_WeaponServices->m_hMyWeapons");
     static const std::uint32_t attributeManager = SCHEMA::GetOffset("C_EconEntity->m_AttributeManager");
+    static const std::uint32_t attributesInitialized = SCHEMA::GetOffset("C_EconEntity->m_bAttributesInitialized");
+    static const std::uint32_t attachmentDirty = SCHEMA::GetOffset("C_EconEntity->m_bAttachmentDirty");
     static const std::uint32_t itemOffset = SCHEMA::GetOffset("C_AttributeContainer->m_Item");
     static const std::uint32_t idHigh = SCHEMA::GetOffset("C_EconItemView->m_iItemIDHigh");
     static const std::uint32_t idLow = SCHEMA::GetOffset("C_EconItemView->m_iItemIDLow");
+    static const std::uint32_t accountId = SCHEMA::GetOffset("C_EconItemView->m_iAccountID");
+    static const std::uint32_t definitionIndex = SCHEMA::GetOffset("C_EconItemView->m_iItemDefinitionIndex");
+    static const std::uint32_t entityQuality = SCHEMA::GetOffset("C_EconItemView->m_iEntityQuality");
     static const std::uint32_t initialized = SCHEMA::GetOffset("C_EconItemView->m_bInitialized");
+    static const std::uint32_t disallowSoc = SCHEMA::GetOffset("C_EconItemView->m_bDisallowSOC");
+    static const std::uint32_t storeItem = SCHEMA::GetOffset("C_EconItemView->m_bIsStoreItem");
     static const std::uint32_t restoreMaterial =
         SCHEMA::GetOffset("C_EconItemView->m_bRestoreCustomMaterialAfterPrecache");
     static const std::uint32_t paintKit = SCHEMA::GetOffset("C_EconEntity->m_nFallbackPaintKit");
     static const std::uint32_t seed = SCHEMA::GetOffset("C_EconEntity->m_nFallbackSeed");
     static const std::uint32_t wear = SCHEMA::GetOffset("C_EconEntity->m_flFallbackWear");
     static const std::uint32_t statTrak = SCHEMA::GetOffset("C_EconEntity->m_nFallbackStatTrak");
+    static const std::uint32_t steamId = SCHEMA::GetOffset("CBasePlayerController->m_steamID");
     if (attributeManager == 0 || itemOffset == 0 || idHigh == 0 || paintKit == 0)
         return;
 
-    auto* base = reinterpret_cast<std::uint8_t*>(weapon);
-    auto* item = base + attributeManager + itemOffset;
-    *reinterpret_cast<std::int32_t*>(item + idHigh) = -1;
-    if (idLow != 0)
-        *reinterpret_cast<std::int32_t*>(item + idLow) = -1;
-    if (initialized != 0)
-        *reinterpret_cast<bool*>(item + initialized) = true;
-    if (restoreMaterial != 0)
-        *reinterpret_cast<bool*>(item + restoreMaterial) = true;
-    *reinterpret_cast<std::int32_t*>(base + paintKit) = std::max(0, C_GET(int, Vars.skin_ui_paint_kit));
-    if (seed != 0)
-        *reinterpret_cast<std::int32_t*>(base + seed) = std::clamp(C_GET(int, Vars.skin_ui_seed), 0, 1000);
-    if (wear != 0)
-        *reinterpret_cast<float*>(base + wear) = std::clamp(C_GET(float, Vars.skin_ui_wear), 0.000001f, 1.f);
-    if (statTrak != 0)
-        *reinterpret_cast<std::int32_t*>(base + statTrak) = C_GET(int, Vars.skin_ui_stattrak);
-
-    CGameSceneNode* weaponScene = weapon->GetGameSceneNode();
     static const std::uint32_t modelState = SCHEMA::GetOffset("CSkeletonInstance->m_modelState");
     static const std::uint32_t meshGroupMask = SCHEMA::GetOffset("CModelState->m_MeshGroupMask");
-    if (weaponScene != nullptr && modelState != 0 && meshGroupMask != 0)
-        *reinterpret_cast<std::uint64_t*>(reinterpret_cast<std::uint8_t*>(weaponScene) + modelState + meshGroupMask) = 2;
+    const int desiredPaint = std::max(0, C_GET(int, Vars.skin_ui_paint_kit));
+    const int desiredSeed = std::clamp(C_GET(int, Vars.skin_ui_seed), 0, 1000);
+    const float desiredWear = std::clamp(C_GET(float, Vars.skin_ui_wear), 0.000001f, 1.f);
+    const int desiredStatTrak = C_GET(int, Vars.skin_ui_stattrak);
+    const std::uint32_t ownerAccount = steamId == 0 ? 0U : static_cast<std::uint32_t>(
+        *reinterpret_cast<const std::uint64_t*>(reinterpret_cast<std::uint8_t*>(localController) + steamId));
+    static int dirtyId = -1;
+    static bool loggedOffsets = false;
+    if (!loggedOffsets)
+    {
+        EspLog("[skin] offsets weapons=0x%x attr=0x%x item=0x%x paint=0x%x wear=0x%x account=0x%x",
+            myWeapons, attributeManager, itemOffset, paintKit, wear, accountId);
+        loggedOffsets = true;
+    }
+
+    const auto applyWeapon = [&](C_CSWeaponBase* weapon) {
+        if (weapon == nullptr)
+            return;
+        auto* base = reinterpret_cast<std::uint8_t*>(weapon);
+        auto* item = base + attributeManager + itemOffset;
+        const int previousPaint = *reinterpret_cast<const std::int32_t*>(base + paintKit);
+        const bool changed = previousPaint != desiredPaint ||
+            (seed != 0 && *reinterpret_cast<const std::int32_t*>(base + seed) != desiredSeed) ||
+            (wear != 0 && std::fabs(*reinterpret_cast<const float*>(base + wear) - desiredWear) > 0.000001f);
+        if (changed)
+            dirtyId = dirtyId == -1 ? -2 : -1;
+
+        *reinterpret_cast<std::int32_t*>(item + idHigh) = dirtyId;
+        if (idLow != 0)
+            *reinterpret_cast<std::int32_t*>(item + idLow) = -1;
+        if (accountId != 0)
+            *reinterpret_cast<std::uint32_t*>(item + accountId) = ownerAccount;
+        if (initialized != 0)
+            *reinterpret_cast<bool*>(item + initialized) = true;
+        if (disallowSoc != 0)
+            *reinterpret_cast<bool*>(item + disallowSoc) = false;
+        if (storeItem != 0)
+            *reinterpret_cast<bool*>(item + storeItem) = false;
+        if (restoreMaterial != 0)
+            *reinterpret_cast<bool*>(item + restoreMaterial) = true;
+        if (attributesInitialized != 0)
+            *reinterpret_cast<bool*>(base + attributesInitialized) = true;
+        if (attachmentDirty != 0)
+            *reinterpret_cast<bool*>(base + attachmentDirty) = true;
+        if (entityQuality != 0 && definitionIndex != 0)
+        {
+            const std::uint16_t definition = *reinterpret_cast<const std::uint16_t*>(item + definitionIndex);
+            if (definition >= 500 || definition == 42 || definition == 59)
+                *reinterpret_cast<std::uint32_t*>(item + entityQuality) = 4;
+        }
+
+        *reinterpret_cast<std::int32_t*>(base + paintKit) = desiredPaint;
+        if (seed != 0)
+            *reinterpret_cast<std::int32_t*>(base + seed) = desiredSeed;
+        if (wear != 0)
+            *reinterpret_cast<float*>(base + wear) = desiredWear;
+        if (statTrak != 0)
+            *reinterpret_cast<std::int32_t*>(base + statTrak) = desiredStatTrak;
+
+        CGameSceneNode* weaponScene = weapon->GetGameSceneNode();
+        if (weaponScene != nullptr && modelState != 0 && meshGroupMask != 0)
+            *reinterpret_cast<std::uint64_t*>(reinterpret_cast<std::uint8_t*>(weaponScene) + modelState + meshGroupMask) = 2;
+        if (changed)
+            EspLog("[skin] applied weapon=%p paint=%d previous=%d seed=%d wear=%.6f account=%u",
+                weapon, desiredPaint, previousPaint, desiredSeed, desiredWear, ownerAccount);
+    };
+
+    bool appliedCollection = false;
+    if (myWeapons != 0)
+    {
+        auto* collection = reinterpret_cast<C_NetworkUtlVectorBase<CBaseHandle>*>(
+            reinterpret_cast<std::uint8_t*>(services) + myWeapons);
+        const std::uint32_t count = std::min(collection->nSize, 64U);
+        if (collection->pElements != nullptr && count > 0)
+        {
+            for (std::uint32_t index = 0; index < count; ++index)
+                applyWeapon(entities->Get<C_CSWeaponBase>(collection->pElements[index]));
+            appliedCollection = true;
+        }
+    }
+    if (!appliedCollection)
+        applyWeapon(entities->Get<C_CSWeaponBase>(services->m_hActiveWeapon()));
 }
 }
 
@@ -547,7 +644,10 @@ void LinuxNativeEsp::Render()
     ApplyThirdPerson(local_pawn);
     DrawLegitFov();
     ApplyLegitAim(entities, local_controller, local_pawn);
-    ApplyNativeSkin(entities, local_pawn);
+    ApplyNativeSkin(entities, local_controller, local_pawn);
+    NativeChams::UpdateColors(
+        C_GET(ColorPickerVar_t, Vars.colVisualChams).colValue,
+        C_GET(ColorPickerVar_t, Vars.colVisualChamsIgnoreZ).colValue);
 
     ImDrawList* draw = ImGui::GetBackgroundDrawList();
     if (draw == nullptr)

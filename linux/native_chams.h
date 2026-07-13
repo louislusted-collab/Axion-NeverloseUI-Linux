@@ -5,12 +5,14 @@
 #include <cstddef>
 
 class C_CSPlayerPawn;
+struct Color_t;
 
 namespace NativeChams
 {
 bool Install();
 void Destroy();
 void UpdateTargets(C_CSPlayerPawn* const* targets, std::size_t count);
+void UpdateColors(const Color_t& visible, const Color_t& hidden);
 }
 
 #endif

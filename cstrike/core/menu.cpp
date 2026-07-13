@@ -733,7 +733,7 @@ void MENU::RenderMainWindow()
 					{
 						ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "Native skin changer");
 						ImGui::TextWrapped("Applies a paint kit to the weapon currently in your hands. The old Add all items page was a fake-inventory changer and depended on Windows-only hooks, so it is disabled on native Linux instead of pretending to work.");
-						edited::Checkbox("Apply to active weapon", "Keeps the selected fallback skin applied after weapon switches", &C_GET(bool, Vars.skin_ui_enable));
+						edited::Checkbox("Apply fallback skin", "Applies the paint kit to owned weapons and refreshes them after switching", &C_GET(bool, Vars.skin_ui_enable));
 						ImGui::SetNextItemWidth(240.f);
 						ImGui::InputInt("Paint kit ID", &C_GET(int, Vars.skin_ui_paint_kit));
 						ImGui::SetNextItemWidth(240.f);
@@ -742,7 +742,7 @@ void MENU::RenderMainWindow()
 						ImGui::SliderFloat("Wear", &C_GET(float, Vars.skin_ui_wear), 0.000001f, 1.f, "%.6f", ImGuiSliderFlags_Logarithmic);
 						ImGui::SetNextItemWidth(240.f);
 						ImGui::InputInt("StatTrak (-1 off)", &C_GET(int, Vars.skin_ui_stattrak));
-						ImGui::TextDisabled("Switch weapons once if the material cache was already loaded.");
+						ImGui::TextDisabled("Use a paint kit ID supported by the weapon; switching weapons forces another refresh.");
 					}
 					edited::EndChild();
 				#else

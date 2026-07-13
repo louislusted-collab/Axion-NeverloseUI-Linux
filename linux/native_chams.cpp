@@ -15,11 +15,13 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <dlfcn.h>
+#include <string>
 
 namespace NativeChams
 {
@@ -50,6 +52,13 @@ enum class MaterialStyle : std::size_t
 
 std::array<MaterialPair, static_cast<std::size_t>(MaterialStyle::Count)> materials{};
 bool materialLoadAttempted = false;
+bool colorsInitialized = false;
+Color_t activeVisibleColor{255, 255, 255, 255};
+Color_t activeHiddenColor{255, 255, 255, 255};
+Color_t pendingVisibleColor{255, 255, 255, 255};
+Color_t pendingHiddenColor{255, 255, 255, 255};
+std::chrono::steady_clock::time_point pendingColorSince{};
+unsigned int materialGeneration = 0;
 
 void Log(const char* message, ...)
 {
@@ -64,7 +73,7 @@ void Log(const char* message, ...)
     std::fflush(file);
 }
 
-material2_t* CreateMaterial(const char* name, MaterialStyle style, bool ignoreDepth)
+material2_t* CreateMaterial(const char* name, MaterialStyle style, bool ignoreDepth, const Color_t& color)
 {
     if (I::MaterialSystem2 == nullptr)
         return nullptr;
@@ -124,16 +133,28 @@ material2_t* CreateMaterial(const char* name, MaterialStyle style, bool ignoreDe
     g_tAmbientOcclusion = resource:"materials/default/default_mask_tga_fde710a5.vtex"
 })";
 
-    const char* vmat = nullptr;
+    const char* vmatTemplate = nullptr;
     if (style == MaterialStyle::Metallic)
-        vmat = ignoreDepth ? metallicHiddenVmat : metallicVisibleVmat;
+        vmatTemplate = ignoreDepth ? metallicHiddenVmat : metallicVisibleVmat;
     else
-        vmat = ignoreDepth ? flatHiddenVmat : flatVisibleVmat;
+        vmatTemplate = ignoreDepth ? flatHiddenVmat : flatVisibleVmat;
+
+    std::string vmat(vmatTemplate);
+    constexpr char tintPlaceholder[] = "g_vColorTint = [1, 1, 1, 1]";
+    const std::size_t tintPosition = vmat.find(tintPlaceholder);
+    if (tintPosition != std::string::npos)
+    {
+        char tint[160];
+        std::snprintf(tint, sizeof(tint), "g_vColorTint = [%.6f, %.6f, %.6f, %.6f]",
+            static_cast<float>(color.r) / 255.f, static_cast<float>(color.g) / 255.f,
+            static_cast<float>(color.b) / 255.f, static_cast<float>(color.a) / 255.f);
+        vmat.replace(tintPosition, sizeof(tintPlaceholder) - 1, tint);
+    }
 
     alignas(16) std::array<std::byte, 0x100 + sizeof(CKeyValues3)> storage{};
     auto* kv3 = reinterpret_cast<CKeyValues3*>(storage.data() + 0x100);
     const KV3IVD_t id{name, 0x469806E97412167CULL, 0xE73790B53EE6F2AFULL};
-    if (!loadKv3(kv3, nullptr, vmat, &id, nullptr, 0))
+    if (!loadKv3(kv3, nullptr, vmat.c_str(), &id, nullptr, 0))
         return nullptr;
 
     // The native VMaterialSystem2_001 ABI returns a strong resource binding
@@ -143,19 +164,52 @@ material2_t* CreateMaterial(const char* name, MaterialStyle style, bool ignoreDe
     return binding != nullptr ? *binding : nullptr;
 }
 
+bool RebuildMaterials(const Color_t& visibleColor, const Color_t& hiddenColor)
+{
+    const unsigned int generation = ++materialGeneration;
+    std::array<MaterialPair, static_cast<std::size_t>(MaterialStyle::Count)> replacement{};
+    char flatVisibleName[96], flatHiddenName[96], metallicVisibleName[96], metallicHiddenName[96];
+    std::snprintf(flatVisibleName, sizeof(flatVisibleName),
+        "materials/axion/player_flat_visible_%u.vmat", generation);
+    std::snprintf(flatHiddenName, sizeof(flatHiddenName),
+        "materials/axion/player_flat_hidden_%u.vmat", generation);
+    std::snprintf(metallicVisibleName, sizeof(metallicVisibleName),
+        "materials/axion/player_metallic_visible_%u.vmat", generation);
+    std::snprintf(metallicHiddenName, sizeof(metallicHiddenName),
+        "materials/axion/player_metallic_hidden_%u.vmat", generation);
+
+    replacement[static_cast<std::size_t>(MaterialStyle::Flat)] = {
+        CreateMaterial(flatVisibleName, MaterialStyle::Flat, false, visibleColor),
+        CreateMaterial(flatHiddenName, MaterialStyle::Flat, true, hiddenColor)};
+    replacement[static_cast<std::size_t>(MaterialStyle::Metallic)] = {
+        CreateMaterial(metallicVisibleName, MaterialStyle::Metallic, false, visibleColor),
+        CreateMaterial(metallicHiddenName, MaterialStyle::Metallic, true, hiddenColor)};
+    for (const MaterialPair& pair : replacement)
+        if (pair.visible == nullptr || pair.hidden == nullptr)
+            return false;
+
+    materials = replacement;
+    activeVisibleColor = visibleColor;
+    activeHiddenColor = hiddenColor;
+    colorsInitialized = true;
+    Log("materials generation=%u flat=%p/%p metallic=%p/%p colors=%u,%u,%u/%u,%u,%u",
+        generation, materials[0].visible, materials[0].hidden,
+        materials[1].visible, materials[1].hidden,
+        visibleColor.r, visibleColor.g, visibleColor.b,
+        hiddenColor.r, hiddenColor.g, hiddenColor.b);
+    return true;
+}
+
 void LoadMaterials()
 {
     if (materialLoadAttempted)
         return;
     materialLoadAttempted = true;
-    materials[static_cast<std::size_t>(MaterialStyle::Flat)] = {
-        CreateMaterial("materials/axion/player_flat_visible.vmat", MaterialStyle::Flat, false),
-        CreateMaterial("materials/axion/player_flat_hidden.vmat", MaterialStyle::Flat, true)};
-    materials[static_cast<std::size_t>(MaterialStyle::Metallic)] = {
-        CreateMaterial("materials/axion/player_metallic_visible.vmat", MaterialStyle::Metallic, false),
-        CreateMaterial("materials/axion/player_metallic_hidden.vmat", MaterialStyle::Metallic, true)};
-    Log("materials flat=%p/%p metallic=%p/%p",
-        materials[0].visible, materials[0].hidden, materials[1].visible, materials[1].hidden);
+    const Color_t visible = C_GET(ColorPickerVar_t, Vars.colVisualChams).colValue;
+    const Color_t hidden = C_GET(ColorPickerVar_t, Vars.colVisualChamsIgnoreZ).colValue;
+    RebuildMaterials(visible, hidden);
+    pendingVisibleColor = visible;
+    pendingHiddenColor = hidden;
 }
 
 bool IsTrackedTarget(const C_BaseEntity* entity)
@@ -254,12 +308,11 @@ void DrawArray(void* descriptor, void* renderContext, void* meshArray, int count
 
     if (C_GET(bool, Vars.bVisualChamsIgnoreZ) && selectedMaterials.hidden != nullptr)
     {
-        const Color_t hiddenColor = C_GET(ColorPickerVar_t, Vars.colVisualChamsIgnoreZ).colValue;
         for (int index = 0; index < changedCount; ++index)
         {
             auto* mesh = static_cast<std::uint8_t*>(changed[index].mesh);
             *reinterpret_cast<material2_t**>(mesh + kMaterialOffset) = selectedMaterials.hidden;
-            SetMeshColor(mesh, hiddenColor);
+            SetMeshColor(mesh, Color_t(255, 255, 255, 255));
         }
         // DrawArray's descriptor describes the entire submitted mesh batch.
         // Replaying individual records produces only a thin partial shell, so
@@ -267,13 +320,12 @@ void DrawArray(void* descriptor, void* renderContext, void* meshArray, int count
         original(descriptor, renderContext, meshArray, count, sceneView, sceneLayer, drawContext, frameStats);
     }
 
-    const Color_t visibleColor = C_GET(ColorPickerVar_t, Vars.colVisualChams).colValue;
     for (int index = 0; index < changedCount; ++index)
     {
         auto* mesh = static_cast<std::uint8_t*>(changed[index].mesh);
         if (selectedMaterials.visible != nullptr)
             *reinterpret_cast<material2_t**>(mesh + kMaterialOffset) = selectedMaterials.visible;
-        SetMeshColor(mesh, visibleColor);
+        SetMeshColor(mesh, Color_t(255, 255, 255, 255));
     }
     original(descriptor, renderContext, meshArray, count, sceneView, sceneLayer, drawContext, frameStats);
 
@@ -329,6 +381,8 @@ void Destroy()
     original = nullptr;
     materials = {};
     materialLoadAttempted = false;
+    colorsInitialized = false;
+    materialGeneration = 0;
     UpdateTargets(nullptr, 0);
 }
 
@@ -337,6 +391,32 @@ void UpdateTargets(C_CSPlayerPawn* const* newTargets, std::size_t count)
     const std::size_t safeCount = std::min(count, targets.size());
     for (std::size_t index = 0; index < targets.size(); ++index)
         targets[index].store(index < safeCount ? newTargets[index] : nullptr, std::memory_order_relaxed);
+}
+
+void UpdateColors(const Color_t& visible, const Color_t& hidden)
+{
+    if (!materialLoadAttempted || !colorsInitialized)
+        return;
+    if (visible == activeVisibleColor && hidden == activeHiddenColor)
+        return;
+
+    const auto now = std::chrono::steady_clock::now();
+    if (visible != pendingVisibleColor || hidden != pendingHiddenColor)
+    {
+        pendingVisibleColor = visible;
+        pendingHiddenColor = hidden;
+        pendingColorSince = now;
+        return;
+    }
+    // Avoid compiling four materials for every intermediate mouse movement in
+    // the color picker. Rebuild once the selected color has settled briefly.
+    if (now - pendingColorSince < std::chrono::milliseconds(150))
+        return;
+    if (!RebuildMaterials(pendingVisibleColor, pendingHiddenColor))
+    {
+        pendingColorSince = now;
+        Log("material color rebuild failed; retaining previous generation");
+    }
 }
 }
 
