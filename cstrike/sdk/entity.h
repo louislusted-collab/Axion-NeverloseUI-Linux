@@ -592,14 +592,7 @@ public:
 	SCHEMA_ADD_OFFSET(CTransform*, BoneTransform, 0x80);
 
 	bone_data* GetHitboxData() noexcept {
-		bone_data* boneDataPtr = *reinterpret_cast<bone_data**>(this + 0x80);
-
-		if (boneDataPtr == nullptr)
-			boneDataPtr = *reinterpret_cast<bone_data**>(reinterpret_cast<uintptr_t>(this) + 0x80);
-
-		CS_ASSERT(boneDataPtr != nullptr);
-
-		return boneDataPtr;
+		return *reinterpret_cast<bone_data**>(reinterpret_cast<std::uint8_t*>(this) + 0x80);
 	}
 
 

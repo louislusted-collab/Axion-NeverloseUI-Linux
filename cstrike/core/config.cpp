@@ -5,6 +5,8 @@
 #include <windows.h>
 #endif
 
+#include <cstdio>
+
 #include "config.h"
 // used: getworkingpath
 #include "../core.h"
@@ -338,6 +340,62 @@ bool C::CreateFile(const wchar_t* wszFileName)
 	delete[] vecFileNames.back();
 	vecFileNames.pop_back();
 	return false;
+}
+
+bool C::RenameFile(const std::size_t nFileIndex, const wchar_t* wszNewFileName)
+{
+	if (!IsValidFileIndex(nFileIndex) || wszNewFileName == nullptr || *wszNewFileName == L'\0')
+		return false;
+	if (CRT::StringCompare(vecFileNames[nFileIndex], CS_XOR(CS_CONFIGURATION_DEFAULT_FILE_NAME CS_CONFIGURATION_FILE_EXTENSION)) == 0)
+		return false;
+	for (const wchar_t* cursor = wszNewFileName; *cursor != L'\0'; ++cursor)
+		if (*cursor == L'/' || *cursor == L'\\')
+			return false;
+
+	const wchar_t* extension = CRT::StringCharR(wszNewFileName, L'.');
+	const std::size_t stemLength = extension != nullptr
+		? static_cast<std::size_t>(extension - wszNewFileName)
+		: CRT::StringLength(wszNewFileName);
+	if (stemLength == 0U)
+		return false;
+	wchar_t* fullName = new wchar_t[stemLength + CRT::StringLength(CS_CONFIGURATION_FILE_EXTENSION) + 1U];
+	wchar_t* end = CRT::StringCopyN(fullName, wszNewFileName, stemLength);
+	*end = L'\0';
+	CRT::StringCat(end, CS_XOR(CS_CONFIGURATION_FILE_EXTENSION));
+	for (std::size_t i = 0; i < vecFileNames.size(); ++i)
+	{
+		if (i != nFileIndex && CRT::StringCompare(vecFileNames[i], fullName) == 0)
+		{
+			delete[] fullName;
+			return false;
+		}
+	}
+
+	wchar_t source[MAX_PATH] = {}, destination[MAX_PATH] = {};
+	CRT::StringCat(CRT::StringCopy(source, wszConfigurationsPath), vecFileNames[nFileIndex]);
+	CRT::StringCat(CRT::StringCopy(destination, wszConfigurationsPath), fullName);
+#ifdef _WIN32
+	const bool renamed = ::MoveFileExW(source, destination, MOVEFILE_WRITE_THROUGH) != FALSE;
+#else
+	auto narrow = [](const wchar_t* input, char* output, std::size_t capacity) {
+		std::size_t i = 0;
+		for (; input[i] != L'\0' && i + 1 < capacity; ++i)
+			output[i] = static_cast<char>(input[i]);
+		output[i] = '\0';
+	};
+	char sourcePath[MAX_PATH * 2] = {}, destinationPath[MAX_PATH * 2] = {};
+	narrow(source, sourcePath, sizeof(sourcePath));
+	narrow(destination, destinationPath, sizeof(destinationPath));
+	const bool renamed = std::rename(sourcePath, destinationPath) == 0;
+#endif
+	if (!renamed)
+	{
+		delete[] fullName;
+		return false;
+	}
+	delete[] vecFileNames[nFileIndex];
+	vecFileNames[nFileIndex] = fullName;
+	return true;
 }
 
 bool C::SaveFile(const std::size_t nFileIndex)

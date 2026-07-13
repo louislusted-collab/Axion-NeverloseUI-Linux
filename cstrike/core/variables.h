@@ -136,9 +136,28 @@ struct Variables_t
 	// Compact native-Linux Legitbot controls.
 	C_ADD_VARIABLE(bool, legit_ui_enable, false);
 	C_ADD_VARIABLE(bool, legit_ui_aim, false);
-	C_ADD_VARIABLE(float, legit_ui_smoothness, 1.f);
+	C_ADD_VARIABLE(int, legit_ui_key, VK_LBUTTON);
+	C_ADD_VARIABLE(bool, legit_ui_toggle, false);
+	C_ADD_VARIABLE(float, legit_ui_smoothness, 120.f);
 	C_ADD_VARIABLE(bool, legit_ui_draw_fov, false);
 	C_ADD_VARIABLE(float, legit_ui_fov_size, 5.f);
+	C_ADD_VARIABLE(bool, legit_ui_recoil, false);
+	C_ADD_VARIABLE(bool, legit_ui_prediction, false);
+	C_ADD_VARIABLE(float, legit_ui_prediction_ms, 50.f);
+	C_ADD_VARIABLE(bool, legit_ui_auto_shoot, false);
+	C_ADD_VARIABLE(bool, legit_ui_bone_head, true);
+	C_ADD_VARIABLE(bool, legit_ui_bone_torso, false);
+	C_ADD_VARIABLE(bool, legit_ui_bone_arms, false);
+	C_ADD_VARIABLE(bool, legit_ui_bone_legs, false);
+
+	// Native Linux active-weapon skin override. This is intentionally separate
+	// from the legacy fake-inventory implementation, whose Windows hooks are not
+	// installed on native Linux.
+	C_ADD_VARIABLE(bool, skin_ui_enable, false);
+	C_ADD_VARIABLE(int, skin_ui_paint_kit, 0);
+	C_ADD_VARIABLE(int, skin_ui_seed, 1);
+	C_ADD_VARIABLE(float, skin_ui_wear, 0.01f);
+	C_ADD_VARIABLE(int, skin_ui_stattrak, -1);
 
 	C_ADD_VARIABLE(bool, legit_enable, false);
 	C_ADD_VARIABLE(int, legit_weapon_selection, 0);
@@ -390,6 +409,7 @@ struct Variables_t
 	C_ADD_VARIABLE(bool, bAutoBHop, false);
 	C_ADD_VARIABLE(bool, bThirdperson, false);
 	C_ADD_VARIABLE(float, flThirdperson, 90.0f);
+	C_ADD_VARIABLE(int, thirdperson_ui_key, VK_XBUTTON2);
 	C_ADD_VARIABLE(float, flSetViewModelFOV, 40.0f);
 	C_ADD_VARIABLE(float, fFOVAmount, 30.0f);
 	C_ADD_VARIABLE(bool, bThirdpersonNoInterp, true);

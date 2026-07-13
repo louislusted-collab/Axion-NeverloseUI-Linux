@@ -39,15 +39,18 @@ last-known-good copy. Network or validation failures never replace the active
 manifest. The loader also has an explicit **Update full Linux dump** button.
 With native CS2 running, it builds and runs the bundled Linux branch of
 `catpetter1999/cs2-dumper`, then saves JSON for offsets/signatures, interfaces,
-buttons, and runtime schema fields under `.axion-cache/cs2-dumper-output`.
+buttons, and every runtime schema field under `.axion-cache/cs2-dumper-output`.
+It also writes `everything.json`, a single unfiltered bundle of every JSON
+artifact emitted by the dumper, including entries Axion does not currently use.
 The upstream Linux `config.json` is checked on every run and its live offsets
 are imported into Axion's runtime cache. Set
 `AXION_SKIP_UPDATE=1` to skip the automatic check.
 
 Clone this repository with `--recurse-submodules`, or run
 `git submodule update --init` once. The full dumper requires native CS2 to be
-running. It does not enumerate cvars; cvars require a separate, current native
-`ICvar` registry implementation and are not reported as updated by the loader.
+running. After injection, the current native `VEngineCvar007` linked registry is
+enumerated separately into `~/.cs2/convars.txt`; the full dumper imports that
+file into its output directory when available.
 
 The validator rejects Windows modules and manifests that do not require a
 unique match. Windows `client.dll` dumps are never applied to native Linux

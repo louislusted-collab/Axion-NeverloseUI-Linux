@@ -83,20 +83,32 @@ bool IsReadableString(const char* text)
 std::vector<CConVar*> GetNativeConVars()
 {
 	std::vector<CConVar*> result;
-	if (I::Cvar == nullptr || !IsReadable(I::Cvar, 0xA8))
+	if (I::Cvar == nullptr || !IsReadable(I::Cvar, 0x168))
 		return result;
 
 	const auto base = reinterpret_cast<const std::uint8_t*>(I::Cvar);
-	const auto entries = *reinterpret_cast<const std::uint8_t* const*>(base + 0x48);
-	const std::uint64_t count = *reinterpret_cast<const std::uint64_t*>(base + 0xA0);
-	if (entries == nullptr || count == 0 || count > 65536 || !IsReadable(entries, static_cast<std::size_t>(count) * 0x10))
+	// Current native VEngineCvar007 linked registry: allocation at 0x4A,
+	// 0x10-byte node storage at 0x50, and the first uint16 index at 0x58.
+	const std::uint16_t allocation = *reinterpret_cast<const std::uint16_t*>(base + 0x4A);
+	const auto entries = (allocation & 0x7FFFU) != 0
+		? *reinterpret_cast<const std::uint8_t* const*>(base + 0x50)
+		: nullptr;
+	std::uint16_t index = *reinterpret_cast<const std::uint16_t*>(base + 0x58);
+	if (entries == nullptr || index == 0xFFFFU)
 		return result;
 
-	result.reserve(static_cast<std::size_t>(count));
+	result.reserve(4096);
 	std::unordered_set<CConVar*> seen;
-	for (std::uint64_t index = 0; index < count; ++index)
+	std::unordered_set<std::uint16_t> seenIndices;
+	for (std::size_t visited = 0; index != 0xFFFFU && visited < 65536; ++visited)
 	{
-		auto* convar = *reinterpret_cast<CConVar* const*>(entries + index * 0x10);
+		if (!seenIndices.insert(index).second)
+			break;
+		const auto* node = entries + static_cast<std::size_t>(index) * 0x10;
+		if (!IsReadable(node, 0x10))
+			break;
+		auto* convar = *reinterpret_cast<CConVar* const*>(node);
+		index = *reinterpret_cast<const std::uint16_t*>(node + 0xA);
 		if (convar == nullptr || !IsReadable(convar, 0x58))
 			continue;
 		const char* name = *reinterpret_cast<const char* const*>(convar);
@@ -284,6 +296,7 @@ bool CONVAR::Setup()
 	cam_idealdist = Find("cam_idealdist");
 	cam_collision = Find("cam_collision");
 	cam_snapto = Find("cam_snapto");
+	cl_thirdperson = Find("cl_thirdperson");
 	c_thirdpersonshoulder = Find("c_thirdpersonshoulder");
 	c_thirdpersonshoulderaimdist = Find("c_thirdpersonshoulderaimdist");
 	c_thirdpersonshoulderdist = Find("c_thirdpersonshoulderdist");
@@ -328,6 +341,8 @@ bool CONVAR::Setup()
 
 	cam_snapto = I::Cvar->Find(FNV1A::HashConst("cam_snapto")); // flaot
 	bSuccess &= cam_snapto != nullptr;
+
+	cl_thirdperson = I::Cvar->Find(FNV1A::HashConst("cl_thirdperson"));
 
 	c_thirdpersonshoulder = I::Cvar->Find(FNV1A::HashConst("c_thirdpersonshoulder")); // flaot
 	bSuccess &= c_thirdpersonshoulder != nullptr;

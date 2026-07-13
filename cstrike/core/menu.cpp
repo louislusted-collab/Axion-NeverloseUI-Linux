@@ -365,9 +365,20 @@ void MENU::RenderMainWindow()
 					ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "Legitbot");
 					edited::Checkbox("Enable", "Master switch for every Legitbot feature", &C_GET(bool, Vars.legit_ui_enable));
 					edited::Checkbox("Legit Aim", "Smooth aim assistance while firing", &C_GET(bool, Vars.legit_ui_aim));
-					edited::SliderFloat("Smoothness", "Aim smoothing amount", &C_GET(float, Vars.legit_ui_smoothness), 1.f, 100.f, "%.0f");
+					edited::Keybind("Aim key", "Click the button, then press mouse 1-5", &C_GET(int, Vars.legit_ui_key));
+					edited::Checkbox("Toggle aim key", "Press once for on/off instead of holding", &C_GET(bool, Vars.legit_ui_toggle));
+					edited::SliderFloat("Smoothness (ms)", "Time used to settle onto the target", &C_GET(float, Vars.legit_ui_smoothness), 1.f, 500.f, "%.0f ms");
 					edited::Checkbox("Draw FoV", "Draw the active aim field of view", &C_GET(bool, Vars.legit_ui_draw_fov));
 					edited::SliderFloat("FoV Size", "Field of view size", &C_GET(float, Vars.legit_ui_fov_size), 5.f, 60.f, "%.0f°");
+					edited::Checkbox("Recoil compensation", "Compensate the current camera punch", &C_GET(bool, Vars.legit_ui_recoil));
+					edited::Checkbox("Velocity prediction", "Lead moving targets", &C_GET(bool, Vars.legit_ui_prediction));
+					if (C_GET(bool, Vars.legit_ui_prediction))
+						edited::SliderFloat("Prediction (ms)", "Target lead time", &C_GET(float, Vars.legit_ui_prediction_ms), 0.f, 250.f, "%.0f ms");
+					edited::Checkbox("Auto shoot", "Fire when the selected bone is centered", &C_GET(bool, Vars.legit_ui_auto_shoot));
+					edited::Checkbox("Target head", "Highest target priority", &C_GET(bool, Vars.legit_ui_bone_head));
+					edited::Checkbox("Target torso", "Fallback to upper spine", &C_GET(bool, Vars.legit_ui_bone_torso));
+					edited::Checkbox("Target arms", "Fallback to elbows", &C_GET(bool, Vars.legit_ui_bone_arms));
+					edited::Checkbox("Target legs", "Fallback to knees", &C_GET(bool, Vars.legit_ui_bone_legs));
 				}
 				edited::EndChild();
 			}
@@ -406,16 +417,20 @@ void MENU::RenderMainWindow()
 				
 					ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "Chams");
 
-					edited::Checkbox(CS_XOR("Chams"), CS_XOR("Shows player chams"), &C_GET(bool, Vars.bVisualChams));
+					edited::Checkbox(CS_XOR("Model material tint"), CS_XOR("Colors the rendered player model surface; this is not glow"), &C_GET(bool, Vars.bVisualChams));
 					if (C_GET(bool, Vars.bVisualChams))
 						edited::Color(CS_XOR("##chamscolor"), CS_XOR("Change chams color"), &C_GET(ColorPickerVar_t, Vars.colVisualChams).colValue, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
 			
+				#ifdef _WIN32
 					edited::Checkbox(CS_XOR("Invisible"), CS_XOR("Shows player xqz chams"), &C_GET(bool, Vars.bVisualChamsIgnoreZ));
 					if (C_GET(bool, Vars.bVisualChamsIgnoreZ))
 						edited::Color(CS_XOR("##chamscolorxqz"), CS_XOR("Change xqz chams color"), &C_GET(ColorPickerVar_t, Vars.colVisualChamsIgnoreZ).colValue, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
 
 					const char* chams[3]{ CS_XOR("Flat"), CS_XOR("Default"),CS_XOR("Illumin") };
 					edited::Combo(CS_XOR("Models"), CS_XOR(""), &C_GET(int, Vars.nVisualChamMaterial), chams, IM_ARRAYSIZE(chams), 3);
+				#else
+					ImGui::TextDisabled("Ignore-Z/custom-material chams require the native scene render hook.");
+				#endif
 
 				}
 				edited::EndChild();
@@ -531,7 +546,8 @@ void MENU::RenderMainWindow()
 				edited::Checkbox(CS_XOR("Thirdperson"), CS_XOR("Puts you in thirdperson"), &C_GET(bool, Vars.bThirdperson));
 				if (C_GET(bool, Vars.bThirdperson))
 				{
-					edited::SliderFloat(CS_XOR("Thirdperson distance"), CS_XOR("Thirdperson cam distance"), &C_GET(float, Vars.flThirdperson), 0.f, 150.f);
+					edited::Keybind("Thirdperson key", "Press once to toggle the camera", &C_GET(int, Vars.thirdperson_ui_key));
+					edited::SliderFloat(CS_XOR("Thirdperson distance"), CS_XOR("Thirdperson cam distance"), &C_GET(float, Vars.flThirdperson), 50.f, 300.f, "%.0f");
 				}
 
 				edited::Checkbox(CS_XOR("FOV Changer"), CS_XOR("Makes your FOV bigger"), &C_GET(bool, Vars.bFOV));
@@ -606,7 +622,8 @@ void MENU::RenderMainWindow()
 				{
 					ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(ImGui::GetStyle().FramePadding.x, 0));
 					ImGui::PushItemWidth(-1);
-					if (ImGui::InputTextWithHint(CS_XOR("##config.file"), "create new...", szConfigFile, sizeof(szConfigFile), ImGuiInputTextFlags_EnterReturnsTrue))
+					const bool createOnEnter = ImGui::InputTextWithHint(CS_XOR("##config.file"), "config name...", szConfigFile, sizeof(szConfigFile), ImGuiInputTextFlags_EnterReturnsTrue);
+					if (ImGui::Button(CS_XOR("create"), ImVec2(-1, 15 * MENU::flDpiScale)) || createOnEnter)
 					{
 						// check if the filename isn't empty
 						if (const std::size_t nConfigFileLength = CRT::StringLength(szConfigFile); nConfigFileLength > 0U)
@@ -622,10 +639,24 @@ void MENU::RenderMainWindow()
 						}
 					}
 					if (ImGui::IsItemHovered())
-						ImGui::SetTooltip(CS_XOR("press enter to create new configuration"));
+						ImGui::SetTooltip(CS_XOR("type a name, then click create or press enter"));
 
 					const bool hasSelectedConfig = nSelectedConfig < C::vecFileNames.size();
 					ImGui::BeginDisabled(!hasSelectedConfig);
+					if (ImGui::Button(CS_XOR("rename"), ImVec2(-1, 15 * MENU::flDpiScale)))
+					{
+						if (CRT::StringLength(szConfigFile) > 0U)
+						{
+							CRT::WString_t newName(szConfigFile);
+							if (C::RenameFile(nSelectedConfig, newName.Data()))
+							{
+								NOTIFY::Push({ N_TYPE_SUCCESS, CS_XOR("config renamed") });
+								CRT::MemorySet(szConfigFile, 0U, sizeof(szConfigFile));
+							}
+							else
+								NOTIFY::Push({ N_TYPE_ERROR, CS_XOR("config rename failed") });
+						}
+					}
 					if (ImGui::Button(CS_XOR("save"), ImVec2(-1, 15 * MENU::flDpiScale)))
 					{
 						if (C::SaveFile(nSelectedConfig))
@@ -696,8 +727,25 @@ void MENU::RenderMainWindow()
 			edited::EndChild();
 			}
 			else if (active_tab == 4) {
-
-				edited::BeginChild("##Container0", ImVec2((600), c::background::size.y), 0);
+				#ifdef __linux__
+					edited::BeginChild("##NativeSkinChanger", ImVec2(600, c::background::size.y), 0);
+					{
+						ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "Native skin changer");
+						ImGui::TextWrapped("Applies a paint kit to the weapon currently in your hands. The old Add all items page was a fake-inventory changer and depended on Windows-only hooks, so it is disabled on native Linux instead of pretending to work.");
+						edited::Checkbox("Apply to active weapon", "Keeps the selected fallback skin applied after weapon switches", &C_GET(bool, Vars.skin_ui_enable));
+						ImGui::SetNextItemWidth(240.f);
+						ImGui::InputInt("Paint kit ID", &C_GET(int, Vars.skin_ui_paint_kit));
+						ImGui::SetNextItemWidth(240.f);
+						ImGui::SliderInt("Pattern seed", &C_GET(int, Vars.skin_ui_seed), 0, 1000);
+						ImGui::SetNextItemWidth(240.f);
+						ImGui::SliderFloat("Wear", &C_GET(float, Vars.skin_ui_wear), 0.000001f, 1.f, "%.6f", ImGuiSliderFlags_Logarithmic);
+						ImGui::SetNextItemWidth(240.f);
+						ImGui::InputInt("StatTrak (-1 off)", &C_GET(int, Vars.skin_ui_stattrak));
+						ImGui::TextDisabled("Switch weapons once if the material cache was already loaded.");
+					}
+					edited::EndChild();
+				#else
+					edited::BeginChild("##Container0", ImVec2((600), c::background::size.y), 0);
 				{					
 					if (edited::Button(CS_XOR("Full update"), ImVec2(120, 50), 0)) {
 						Vars.full_update = true;
@@ -992,7 +1040,8 @@ void MENU::RenderMainWindow()
 						}
 					}
 				}
-				edited::EndChild();
+					edited::EndChild();
+				#endif
 
 			}
 		}

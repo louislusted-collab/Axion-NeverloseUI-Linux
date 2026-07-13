@@ -27,6 +27,7 @@ namespace CONVAR
 	inline CConVar* cam_collision = nullptr;
 
 	inline CConVar* cam_snapto = nullptr;
+	inline CConVar* cl_thirdperson = nullptr;
 
 	inline CConVar* c_thirdpersonshoulder = nullptr;
 

@@ -374,6 +374,7 @@ namespace C
 	/// @param[in] wszFileName file name of configuration file to save and write in
 	/// @returns: true if file has been successfully created and all variables were written to it, false otherwise
 	bool CreateFile(const wchar_t* wszFileName);
+	bool RenameFile(std::size_t nFileIndex, const wchar_t* wszNewFileName);
 	/// serialize variables into the configuration file
 	/// @param[in] nFileIndex index of the exist configuration file name
 	/// @returns: true if all variables were successfully written to the file, false otherwise

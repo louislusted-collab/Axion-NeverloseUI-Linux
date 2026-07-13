@@ -14,6 +14,7 @@
 #include "../cstrike/sdk/interfaces/ienginecvar.h"
 #include "../cstrike/sdk/interfaces/iengineclient.h"
 #include "../cstrike/utilities/draw.h"
+#include "../cstrike/utilities/inputsystem.h"
 #include "../cstrike/utilities/memory.h"
 #include "../dependencies/json.hpp"
 
@@ -36,6 +37,7 @@ CCSPlayerController** native_local_controller = nullptr;
 QAngle_t* native_view_angles = nullptr;
 bool attempted_matrix_lookup = false;
 std::uint64_t frame_counter = 0;
+bool native_thirdperson_active = false;
 
 void EspLog(const char* message, ...)
 {
@@ -138,57 +140,73 @@ void DrawOutlinedText(ImDrawList* draw, const ImVec2& position, const char* text
     draw->AddText(position, color, text);
 }
 
-void DrawSkeleton(ImDrawList* draw, const ImVec2& minimum, const ImVec2& maximum)
+bone_data* GetLiveBoneData(CGameSceneNode* scene)
 {
-    const float width = maximum.x - minimum.x;
-    const float height = maximum.y - minimum.y;
-    const ImVec2 head((minimum.x + maximum.x) * 0.5f, minimum.y + height * 0.08f);
-    const ImVec2 neck(head.x, minimum.y + height * 0.19f);
-    const ImVec2 chest(head.x, minimum.y + height * 0.36f);
-    const ImVec2 pelvis(head.x, minimum.y + height * 0.56f);
-    const ImVec2 leftShoulder(head.x - width * 0.30f, neck.y + height * 0.03f);
-    const ImVec2 rightShoulder(head.x + width * 0.30f, neck.y + height * 0.03f);
-    const ImVec2 leftElbow(head.x - width * 0.42f, minimum.y + height * 0.39f);
-    const ImVec2 rightElbow(head.x + width * 0.42f, minimum.y + height * 0.39f);
-    const ImVec2 leftHand(head.x - width * 0.36f, minimum.y + height * 0.57f);
-    const ImVec2 rightHand(head.x + width * 0.36f, minimum.y + height * 0.57f);
-    const ImVec2 leftKnee(head.x - width * 0.19f, minimum.y + height * 0.77f);
-    const ImVec2 rightKnee(head.x + width * 0.19f, minimum.y + height * 0.77f);
-    const ImVec2 leftFoot(head.x - width * 0.23f, maximum.y);
-    const ImVec2 rightFoot(head.x + width * 0.23f, maximum.y);
-    const ImVec2 segments[][2] = {
-        {head, neck}, {neck, chest}, {chest, pelvis},
-        {neck, leftShoulder}, {leftShoulder, leftElbow}, {leftElbow, leftHand},
-        {neck, rightShoulder}, {rightShoulder, rightElbow}, {rightElbow, rightHand},
-        {pelvis, leftKnee}, {leftKnee, leftFoot}, {pelvis, rightKnee}, {rightKnee, rightFoot},
+    static const std::uint32_t modelStateOffset = SCHEMA::GetOffset("CSkeletonInstance->m_modelState");
+    static const std::uint32_t boneCacheOffset =
+        SCHEMA::GetOffset("CBodyComponentSkeletonInstance->m_skeletonInstance");
+    if (scene == nullptr || modelStateOffset == 0 || boneCacheOffset == 0)
+        return nullptr;
+    return *reinterpret_cast<bone_data**>(reinterpret_cast<std::uint8_t*>(scene) + modelStateOffset + boneCacheOffset);
+}
+
+bool GetLiveBonePosition(CGameSceneNode* scene, int index, Vector_t& output)
+{
+    bone_data* bones = GetLiveBoneData(scene);
+    if (bones == nullptr || index < 0 || index > 128)
+        return false;
+    output = bones[index].pos;
+    const Vector_t origin = scene->GetAbsOrigin();
+    return output.IsValid() && output.DistToSqr(origin) < 90000.f;
+}
+
+void DrawSkeleton(ImDrawList* draw, CGameSceneNode* scene)
+{
+    // CS2's live humanoid bone cache. These are parent/child joints, not
+    // points synthesized from the ESP bounding box.
+    static constexpr int segments[][2] = {
+        {6, 5}, {5, 4}, {4, 3}, {3, 2}, {2, 1}, {1, 0},
+        {5, 8}, {8, 9}, {9, 10},
+        {5, 13}, {13, 14}, {14, 15},
+        {0, 22}, {22, 23}, {23, 24},
+        {0, 25}, {25, 26}, {26, 27},
     };
     const ImU32 outline = C_GET(ColorPickerVar_t, Vars.colSkeletonOutline).colValue.GetU32();
     const ImU32 color = C_GET(ColorPickerVar_t, Vars.colSkeleton).colValue.GetU32();
     for (const auto& segment : segments)
     {
-        draw->AddLine(segment[0], segment[1], outline, 3.f);
-        draw->AddLine(segment[0], segment[1], color, 1.f);
+        Vector_t start{}, end{};
+        ImVec2 startScreen{}, endScreen{};
+        if (!GetLiveBonePosition(scene, segment[0], start) ||
+            !GetLiveBonePosition(scene, segment[1], end) ||
+            !D::WorldToScreen(start, startScreen) || !D::WorldToScreen(end, endScreen))
+            continue;
+        draw->AddLine(startScreen, endScreen, outline, 3.f);
+        draw->AddLine(startScreen, endScreen, color, 1.f);
     }
 }
 
-void SetNativeGlow(C_CSPlayerPawn* pawn, bool enabled)
+void SetNativeModelTint(C_CSPlayerPawn* pawn, bool enabled)
 {
-    static const std::uint32_t glowOffset = SCHEMA::GetOffset("C_BaseModelEntity->m_Glow");
-    static const std::uint32_t glowingOffset = SCHEMA::GetOffset("CGlowProperty->m_bGlowing");
-    static const std::uint32_t eligibleOffset = SCHEMA::GetOffset("CGlowProperty->m_bEligibleForScreenHighlight");
-    static const std::uint32_t colorOffset = SCHEMA::GetOffset("CGlowProperty->m_glowColorOverride");
-    if (pawn == nullptr || glowOffset == 0 || glowingOffset == 0)
+    static const std::uint32_t colorOffset = SCHEMA::GetOffset("C_BaseModelEntity->m_clrRender");
+    if (pawn == nullptr || colorOffset == 0)
         return;
-    auto* glow = reinterpret_cast<std::uint8_t*>(pawn) + glowOffset;
-    *reinterpret_cast<bool*>(glow + glowingOffset) = enabled;
-    if (eligibleOffset != 0)
-        *reinterpret_cast<bool*>(glow + eligibleOffset) = enabled;
-    if (enabled && colorOffset != 0)
+    const Color_t color = enabled ? C_GET(ColorPickerVar_t, Vars.colVisualChams).colValue : Color_t(255, 255, 255, 255);
+    *reinterpret_cast<Color_t*>(reinterpret_cast<std::uint8_t*>(pawn) + colorOffset) = color;
+}
+
+bool IsNativeButtonDown(int key)
+{
+    float x = 0.f, y = 0.f;
+    const SDL_MouseButtonFlags buttons = SDL_GetMouseState(&x, &y);
+    switch (key)
     {
-        const Color_t color = C_GET(bool, Vars.bVisualChamsIgnoreZ)
-            ? C_GET(ColorPickerVar_t, Vars.colVisualChamsIgnoreZ).colValue
-            : C_GET(ColorPickerVar_t, Vars.colVisualChams).colValue;
-        *reinterpret_cast<Color_t*>(glow + colorOffset) = color;
+    case VK_LBUTTON: return (buttons & SDL_BUTTON_LMASK) != 0;
+    case VK_RBUTTON: return (buttons & SDL_BUTTON_RMASK) != 0;
+    case VK_MBUTTON: return (buttons & SDL_BUTTON_MMASK) != 0;
+    case VK_XBUTTON1: return (buttons & SDL_BUTTON_X1MASK) != 0;
+    case VK_XBUTTON2: return (buttons & SDL_BUTTON_X2MASK) != 0;
+    default: return key > 0 && IPT::IsKeyDown(static_cast<std::uint32_t>(key));
     }
 }
 
@@ -235,16 +253,35 @@ void DrawLegitFov()
 
 void ApplyThirdPerson(C_CSPlayerPawn* localPawn)
 {
-    const bool enabled = C_GET(bool, Vars.bThirdperson);
-    const float distance = std::clamp(C_GET(float, Vars.flThirdperson), 0.f, 150.f);
+    const bool featureEnabled = C_GET(bool, Vars.bThirdperson);
+    static bool wasPressed = false;
+    static bool wasEnabled = false;
+    if (!featureEnabled)
+    {
+        native_thirdperson_active = false;
+        wasPressed = false;
+    }
+    else
+    {
+        const bool pressed = IsNativeButtonDown(C_GET(int, Vars.thirdperson_ui_key));
+        if (!wasEnabled)
+            native_thirdperson_active = false;
+        if (pressed && !wasPressed && !MENU::bMainWindowOpened)
+            native_thirdperson_active = !native_thirdperson_active;
+        wasPressed = pressed;
+    }
+    wasEnabled = featureEnabled;
+
+    const bool enabled = featureEnabled && native_thirdperson_active;
+    const float distance = std::clamp(C_GET(float, Vars.flThirdperson), 50.f, 300.f);
     if (I::Input != nullptr)
     {
         auto* input = reinterpret_cast<std::uint8_t*>(I::Input);
         *reinterpret_cast<bool*>(input + 0x229) = enabled;
-        if (enabled)
-            reinterpret_cast<QAngle_t*>(input + 0x230)->z = distance;
     }
 
+    if (CONVAR::cl_thirdperson != nullptr)
+        CONVAR::cl_thirdperson->GetValue<bool>() = enabled;
     if (CONVAR::cam_idealdist != nullptr)
         CONVAR::cam_idealdist->GetValue<float>() = distance;
     if (CONVAR::cam_collision != nullptr)
@@ -279,20 +316,40 @@ void ApplyThirdPerson(C_CSPlayerPawn* localPawn)
     }();
     if (localPawn != nullptr && thirdPersonOffset != 0)
         *reinterpret_cast<bool*>(reinterpret_cast<std::uint8_t*>(localPawn) + thirdPersonOffset) = enabled;
+
+    static std::uint64_t lastConfirmation = 0;
+    if (enabled && SDL_GetTicks() - lastConfirmation > 2000)
+    {
+        lastConfirmation = SDL_GetTicks();
+        EspLog("[thirdperson] writing ON input=%p schema=0x%x cvar=%p distance=%.0f",
+               I::Input, thirdPersonOffset, CONVAR::cl_thirdperson, distance);
+    }
 }
 
 void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localController, C_CSPlayerPawn* localPawn)
 {
     if (!C_GET(bool, Vars.legit_ui_enable) || !C_GET(bool, Vars.legit_ui_aim) ||
-        MENU::bMainWindowOpened || native_view_angles == nullptr)
+        MENU::bMainWindowOpened || native_thirdperson_active || native_view_angles == nullptr)
         return;
-    float mouseX = 0.f, mouseY = 0.f;
-    if ((SDL_GetMouseState(&mouseX, &mouseY) & SDL_BUTTON_LMASK) == 0)
+
+    static bool previousKey = false;
+    static bool toggled = false;
+    static bool previousToggleMode = false;
+    const bool toggleMode = C_GET(bool, Vars.legit_ui_toggle);
+    const bool keyDown = IsNativeButtonDown(C_GET(int, Vars.legit_ui_key));
+    if (toggleMode != previousToggleMode)
+        toggled = false;
+    if (toggleMode && keyDown && !previousKey)
+        toggled = !toggled;
+    previousKey = keyDown;
+    previousToggleMode = toggleMode;
+    if (!(toggleMode ? toggled : keyDown))
         return;
+
     CGameSceneNode* localScene = localPawn != nullptr ? localPawn->GetGameSceneNode() : nullptr;
     if (localScene == nullptr)
         return;
-    const Vector_t localEye = localScene->GetAbsOrigin() + Vector_t(0.f, 0.f, 64.f);
+    const Vector_t localEye = localScene->GetAbsOrigin() + localPawn->m_vecViewOffset();
     const QAngle_t current = *native_view_angles;
     if (!current.IsValid())
         return;
@@ -312,13 +369,51 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
         CGameSceneNode* scene = pawn->GetGameSceneNode();
         if (scene == nullptr || scene->IsDormant())
             continue;
-        const Vector_t target = scene->GetAbsOrigin() + Vector_t(0.f, 0.f, 64.f);
+
+        Vector_t target{};
+        const int candidates[] = {
+            C_GET(bool, Vars.legit_ui_bone_head) ? 5 : -1,
+            C_GET(bool, Vars.legit_ui_bone_torso) ? 3 : -1,
+            C_GET(bool, Vars.legit_ui_bone_arms) ? 9 : -1,
+            C_GET(bool, Vars.legit_ui_bone_arms) ? 14 : -1,
+            C_GET(bool, Vars.legit_ui_bone_legs) ? 23 : -1,
+            C_GET(bool, Vars.legit_ui_bone_legs) ? 26 : -1,
+        };
+        bool foundBone = false;
+        for (const int bone : candidates)
+        {
+            if (bone >= 0 && GetLiveBonePosition(scene, bone, target))
+            {
+                foundBone = true;
+                break;
+            }
+        }
+        if (!foundBone)
+            target = scene->GetAbsOrigin() + pawn->m_vecViewOffset();
+        if (C_GET(bool, Vars.legit_ui_prediction))
+            target += pawn->GetAbsVelocity() *
+                (std::clamp(C_GET(float, Vars.legit_ui_prediction_ms), 0.f, 250.f) / 1000.f);
+
         const Vector_t difference = target - localEye;
         const float horizontal = std::hypot(difference.x, difference.y);
         if (horizontal < 0.001f)
             continue;
-        const QAngle_t wanted(-std::atan2(difference.z, horizontal) * degrees,
-                              std::atan2(difference.y, difference.x) * degrees, 0.f);
+
+        QAngle_t wanted(-std::atan2(difference.z, horizontal) * degrees,
+                        std::atan2(difference.y, difference.x) * degrees, 0.f);
+        if (C_GET(bool, Vars.legit_ui_recoil))
+        {
+            static const std::uint32_t cameraPunchOffset =
+                SCHEMA::GetOffset("CPlayer_CameraServices->m_vecCsViewPunchAngle");
+            CPlayer_CameraServices* camera = localPawn->GetCameraServices();
+            if (camera != nullptr && cameraPunchOffset != 0)
+            {
+                const auto punch = *reinterpret_cast<QAngle_t*>(
+                    reinterpret_cast<std::uint8_t*>(camera) + cameraPunchOffset);
+                wanted.x -= punch.x * 2.f;
+                wanted.y -= punch.y * 2.f;
+            }
+        }
         const QAngle_t delta(std::remainder(wanted.x - current.x, 360.f),
                              std::remainder(wanted.y - current.y, 360.f), 0.f);
         const float fov = std::hypot(delta.x, delta.y);
@@ -331,10 +426,66 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
     }
     if (!found)
         return;
-    const float smoothness = std::max(1.f, C_GET(float, Vars.legit_ui_smoothness));
-    QAngle_t result(current.x + bestDelta.x / smoothness, current.y + bestDelta.y / smoothness, 0.f);
+
+    if (C_GET(bool, Vars.legit_ui_auto_shoot) && bestFov < 2.f && I::Input != nullptr)
+        *reinterpret_cast<std::uint64_t*>(reinterpret_cast<std::uint8_t*>(I::Input) + 0x240) |= 1ULL;
+
+    const float smoothnessMs = std::max(1.f, C_GET(float, Vars.legit_ui_smoothness));
+    const float frameMs = std::max(0.1f, ImGui::GetIO().DeltaTime * 1000.f);
+    const float step = std::clamp(frameMs / smoothnessMs, 0.f, 1.f);
+    QAngle_t result(current.x + bestDelta.x * step, current.y + bestDelta.y * step, 0.f);
     result.Clamp();
     *native_view_angles = result;
+    static const std::uint32_t pawnViewAngleOffset = SCHEMA::GetOffset("C_BasePlayerPawn->v_angle");
+    if (pawnViewAngleOffset != 0)
+        *reinterpret_cast<QAngle_t*>(reinterpret_cast<std::uint8_t*>(localPawn) + pawnViewAngleOffset) = result;
+}
+
+void ApplyNativeSkin(CGameEntitySystem* entities, C_CSPlayerPawn* localPawn)
+{
+    if (!C_GET(bool, Vars.skin_ui_enable) || entities == nullptr || localPawn == nullptr)
+        return;
+    CPlayer_WeaponServices* services = localPawn->GetWeaponServices();
+    C_CSWeaponBase* weapon = services != nullptr ? entities->Get<C_CSWeaponBase>(services->m_hActiveWeapon()) : nullptr;
+    if (weapon == nullptr)
+        return;
+
+    static const std::uint32_t attributeManager = SCHEMA::GetOffset("C_EconEntity->m_AttributeManager");
+    static const std::uint32_t itemOffset = SCHEMA::GetOffset("C_AttributeContainer->m_Item");
+    static const std::uint32_t idHigh = SCHEMA::GetOffset("C_EconItemView->m_iItemIDHigh");
+    static const std::uint32_t idLow = SCHEMA::GetOffset("C_EconItemView->m_iItemIDLow");
+    static const std::uint32_t initialized = SCHEMA::GetOffset("C_EconItemView->m_bInitialized");
+    static const std::uint32_t restoreMaterial =
+        SCHEMA::GetOffset("C_EconItemView->m_bRestoreCustomMaterialAfterPrecache");
+    static const std::uint32_t paintKit = SCHEMA::GetOffset("C_EconEntity->m_nFallbackPaintKit");
+    static const std::uint32_t seed = SCHEMA::GetOffset("C_EconEntity->m_nFallbackSeed");
+    static const std::uint32_t wear = SCHEMA::GetOffset("C_EconEntity->m_flFallbackWear");
+    static const std::uint32_t statTrak = SCHEMA::GetOffset("C_EconEntity->m_nFallbackStatTrak");
+    if (attributeManager == 0 || itemOffset == 0 || idHigh == 0 || paintKit == 0)
+        return;
+
+    auto* base = reinterpret_cast<std::uint8_t*>(weapon);
+    auto* item = base + attributeManager + itemOffset;
+    *reinterpret_cast<std::int32_t*>(item + idHigh) = -1;
+    if (idLow != 0)
+        *reinterpret_cast<std::int32_t*>(item + idLow) = -1;
+    if (initialized != 0)
+        *reinterpret_cast<bool*>(item + initialized) = true;
+    if (restoreMaterial != 0)
+        *reinterpret_cast<bool*>(item + restoreMaterial) = true;
+    *reinterpret_cast<std::int32_t*>(base + paintKit) = std::max(0, C_GET(int, Vars.skin_ui_paint_kit));
+    if (seed != 0)
+        *reinterpret_cast<std::int32_t*>(base + seed) = std::clamp(C_GET(int, Vars.skin_ui_seed), 0, 1000);
+    if (wear != 0)
+        *reinterpret_cast<float*>(base + wear) = std::clamp(C_GET(float, Vars.skin_ui_wear), 0.000001f, 1.f);
+    if (statTrak != 0)
+        *reinterpret_cast<std::int32_t*>(base + statTrak) = C_GET(int, Vars.skin_ui_stattrak);
+
+    CGameSceneNode* weaponScene = weapon->GetGameSceneNode();
+    static const std::uint32_t modelState = SCHEMA::GetOffset("CSkeletonInstance->m_modelState");
+    static const std::uint32_t meshGroupMask = SCHEMA::GetOffset("CModelState->m_MeshGroupMask");
+    if (weaponScene != nullptr && modelState != 0 && meshGroupMask != 0)
+        *reinterpret_cast<std::uint64_t*>(reinterpret_cast<std::uint8_t*>(weaponScene) + modelState + meshGroupMask) = 2;
 }
 }
 
@@ -381,6 +532,7 @@ void LinuxNativeEsp::Render()
     ApplyThirdPerson(local_pawn);
     DrawLegitFov();
     ApplyLegitAim(entities, local_controller, local_pawn);
+    ApplyNativeSkin(entities, local_pawn);
 
     ImDrawList* draw = ImGui::GetBackgroundDrawList();
     if (draw == nullptr)
@@ -411,9 +563,8 @@ void LinuxNativeEsp::Render()
         ++alive_pawns;
 
         const bool isEnemy = pawn->GetTeam() != local_pawn->GetTeam();
-        const bool glowEnabled = enabled && isEnemy &&
-            (C_GET(bool, Vars.bVisualChams) || C_GET(bool, Vars.bVisualChamsIgnoreZ));
-        SetNativeGlow(pawn, glowEnabled);
+        const bool tintEnabled = enabled && isEnemy && C_GET(bool, Vars.bVisualChams);
+        SetNativeModelTint(pawn, tintEnabled);
         if (!isEnemy)
             continue;
         ++enemy_pawns;
@@ -493,7 +644,7 @@ void LinuxNativeEsp::Render()
         }
 
         if (C_GET(bool, Vars.bSkeleton))
-            DrawSkeleton(draw, min, max);
+            DrawSkeleton(draw, scene);
 
         float flagOffset = 0.f;
         const unsigned int flags = C_GET(unsigned int, Vars.pEspFlags);
