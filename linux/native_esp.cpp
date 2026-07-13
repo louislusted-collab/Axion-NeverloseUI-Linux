@@ -274,14 +274,15 @@ bool IsNativeButtonDown(int key)
 {
     float x = 0.f, y = 0.f;
     const SDL_MouseButtonFlags buttons = SDL_GetMouseState(&x, &y);
+    const bool tracked = key > 0 && IPT::IsKeyDown(static_cast<std::uint32_t>(key));
     switch (key)
     {
-    case VK_LBUTTON: return (buttons & SDL_BUTTON_LMASK) != 0;
-    case VK_RBUTTON: return (buttons & SDL_BUTTON_RMASK) != 0;
-    case VK_MBUTTON: return (buttons & SDL_BUTTON_MMASK) != 0;
-    case VK_XBUTTON1: return (buttons & SDL_BUTTON_X1MASK) != 0;
-    case VK_XBUTTON2: return (buttons & SDL_BUTTON_X2MASK) != 0;
-    default: return key > 0 && IPT::IsKeyDown(static_cast<std::uint32_t>(key));
+    case VK_LBUTTON: return tracked || (buttons & SDL_BUTTON_LMASK) != 0;
+    case VK_RBUTTON: return tracked || (buttons & SDL_BUTTON_RMASK) != 0;
+    case VK_MBUTTON: return tracked || (buttons & SDL_BUTTON_MMASK) != 0;
+    case VK_XBUTTON1: return tracked || (buttons & SDL_BUTTON_X1MASK) != 0;
+    case VK_XBUTTON2: return tracked || (buttons & SDL_BUTTON_X2MASK) != 0;
+    default: return tracked;
     }
 }
 
@@ -538,29 +539,22 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
     QAngle_t result(current.x + bestDelta.x * step, current.y + bestDelta.y * step, 0.f);
     result.Clamp();
 
-    // Copy the old native internal's proven input path: feed the angular
-    // adjustment into SDL_GetRelativeMouseState so CreateMove consumes it as
-    // ordinary mouse input. Direct angle writes remain synchronized below as
-    // a visual/same-frame fallback.
+    // Convert the desired angular step back into physical relative-mouse units.
+    // Linux uses the old internal's proven uinput path first and the hooked SDL
+    // relative-mouse sampler as its fallback.
     const float sensitivity = CONVAR::sensitivity != nullptr
         ? std::max(0.01f, CONVAR::sensitivity->GetValue<float>()) : 2.f;
     const float yawScale = CONVAR::m_yaw != nullptr
         ? std::max(0.0001f, std::fabs(CONVAR::m_yaw->GetValue<float>())) : 0.022f;
     const float pitchScale = CONVAR::m_pitch != nullptr
         ? std::max(0.0001f, std::fabs(CONVAR::m_pitch->GetValue<float>())) : 0.022f;
-    QueueNativeAimDelta(-(bestDelta.y * step) / (sensitivity * yawScale),
-                         (bestDelta.x * step) / (sensitivity * pitchScale));
-
-    if (pawnViewAngleOffset != 0)
-        *reinterpret_cast<QAngle_t*>(reinterpret_cast<std::uint8_t*>(localPawn) + pawnViewAngleOffset) = result;
-    if (native_view_angles != nullptr)
-        *native_view_angles = result;
-    else if (I::Input != nullptr)
-        *reinterpret_cast<QAngle_t*>(reinterpret_cast<std::uint8_t*>(I::Input) + 0x548) = result;
+    const float mouseX = -(bestDelta.y * step) / (sensitivity * yawScale);
+    const float mouseY = (bestDelta.x * step) / (sensitivity * pitchScale);
+    const bool inputAccepted = QueueNativeAimDelta(mouseX, mouseY);
 
     if (diagnose)
-        EspLog("[legit] applied fov=%.2f step=%.3f current=%.1f,%.1f result=%.1f,%.1f view=%p input=%p",
-            bestFov, step, current.x, current.y, result.x, result.y, native_view_angles, I::Input);
+        EspLog("[legit] mouse fov=%.2f step=%.3f delta=%.2f,%.2f accepted=%d current=%.1f,%.1f result=%.1f,%.1f",
+            bestFov, step, mouseX, mouseY, inputAccepted, current.x, current.y, result.x, result.y);
 }
 
 void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localController, C_CSPlayerPawn* localPawn)

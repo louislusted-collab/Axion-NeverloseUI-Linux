@@ -24,6 +24,15 @@ if [ "$EUID" -ne 0 ]; then
     exec sudo env AXION_UPDATE_DONE=1 "$0" "$@"
 fi
 
+# The legitbot prefers a kernel relative-mouse device, matching the old Linux
+# internal. Grant only the running game's owner access; SDL injection remains
+# available when uinput or POSIX ACL support is absent.
+TARGET_UID="$(awk '/^Uid:/{print $2; exit}' "/proc/$PID/status" 2>/dev/null || true)"
+if [ -n "$TARGET_UID" ] && [ -c /dev/uinput ] && command -v setfacl >/dev/null 2>&1; then
+    setfacl -m "u:$TARGET_UID:rw" /dev/uinput || \
+        echo "Warning: could not grant uinput access; using SDL mouse fallback." >&2
+fi
+
 rm -f /tmp/cs2_vulkan_debug.log /tmp/cs2_inject_debug.log /tmp/cs2_init_debug.log /tmp/cs2_hook_debug.log /tmp/cs2_esp_debug.log
 echo "Injecting $LIBRARY into CS2 pid $PID..."
 gdb -n --batch \
