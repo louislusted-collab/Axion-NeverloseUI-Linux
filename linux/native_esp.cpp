@@ -153,6 +153,27 @@ void LegitLog(const char* message, ...)
     std::fputc('\n', file);
 }
 
+void RefreshNativeInputObject()
+{
+    static CCSGOInput** inputStorage = nullptr;
+    static bool searched = false;
+    if (!searched)
+    {
+        searched = true;
+        std::uint8_t* match = MEM::FindPattern(CLIENT_DLL,
+            "F3 41 0F 7E 06 F3 0F 7E 4D B0 48 8D 05 ? ? ? ? 0F 58 C1");
+        if (match != nullptr)
+            inputStorage = reinterpret_cast<CCSGOInput**>(
+                MEM::GetAbsoluteAddress(match + 10, 3, 0) + 0x10);
+    }
+    if (inputStorage != nullptr && *inputStorage != nullptr)
+    {
+        I::Input = *inputStorage;
+        native_view_angles = reinterpret_cast<QAngle_t*>(
+            reinterpret_cast<std::uint8_t*>(I::Input) + 0x2D8);
+    }
+}
+
 bool LoadResolvedOffsets()
 {
     Dl_info library_info{};
@@ -181,7 +202,12 @@ bool LoadResolvedOffsets()
         native_view_matrix = reinterpret_cast<ViewMatrix_t*>(resolve("dwViewMatrixNative", "dwViewMatrix"));
         native_local_controller = reinterpret_cast<CCSPlayerController**>(
             resolve("dwLocalPlayerControllerNative", "dwLocalPlayerController"));
-        native_view_angles = reinterpret_cast<QAngle_t*>(resolve("dwViewAnglesNative", "dwViewAngles"));
+        // The dumper's native dwViewAngles export is a static staging area in
+        // current Linux builds. The live command angles are inside the
+        // dereferenced CCSGOInput object.
+        native_view_angles = I::Input != nullptr
+            ? reinterpret_cast<QAngle_t*>(reinterpret_cast<std::uint8_t*>(I::Input) + 0x2D8)
+            : nullptr;
         return native_view_matrix != nullptr && native_local_controller != nullptr;
     }
     catch (const std::exception&)
@@ -192,6 +218,7 @@ bool LoadResolvedOffsets()
 
 void ResolveViewMatrix()
 {
+    RefreshNativeInputObject();
     if (attempted_matrix_lookup)
         return;
     attempted_matrix_lookup = true;
@@ -225,8 +252,14 @@ void ResolveViewMatrix()
         std::uint8_t* input_match = MEM::FindPattern(CLIENT_DLL, "F3 41 0F 7E 06 F3 0F 7E 4D B0 48 8D 05 ? ? ? ? 0F 58 C1");
         if (input_match != nullptr)
         {
-            auto* input_base = MEM::GetAbsoluteAddress(input_match + 10, 3, 0);
-            native_view_angles = reinterpret_cast<QAngle_t*>(input_base + 0x558);
+            auto* inputTable = MEM::GetAbsoluteAddress(input_match + 10, 3, 0) + 0x10;
+            CCSGOInput* inputObject = *reinterpret_cast<CCSGOInput**>(inputTable);
+            if (inputObject != nullptr)
+            {
+                I::Input = inputObject;
+                native_view_angles = reinterpret_cast<QAngle_t*>(
+                    reinterpret_cast<std::uint8_t*>(inputObject) + 0x2D8);
+            }
         }
     }
     EspLog("[ESP] view_matrix=%p local_controller_ptr=%p view_angles=%p",
@@ -346,21 +379,52 @@ void DrawLegitFov()
 
 void ApplySmokeRemoval(CGameEntitySystem* entities, C_CSPlayerPawn* localPawn)
 {
-    if (!C_GET(bool, Vars.bRemoveSmoke) || entities == nullptr || localPawn == nullptr)
-        return;
-
     static const std::uint32_t overlayAlpha =
         SCHEMA::GetOffset("C_CSPlayerPawnBase->m_flLastSmokeOverlayAlpha");
     static const std::uint32_t smokeAge =
         SCHEMA::GetOffset("C_CSPlayerPawnBase->m_flLastSmokeAge");
-    static const std::uint32_t effectTick =
-        SCHEMA::GetOffset("C_SmokeGrenadeProjectile->m_nSmokeEffectTickBegin");
-    static const std::uint32_t didEffect =
-        SCHEMA::GetOffset("C_SmokeGrenadeProjectile->m_bDidSmokeEffect");
-    static const std::uint32_t volumeReceived =
-        SCHEMA::GetOffset("C_SmokeGrenadeProjectile->m_bSmokeVolumeDataReceived");
-    static const std::uint32_t effectSpawned =
-        SCHEMA::GetOffset("C_SmokeGrenadeProjectile->m_bSmokeEffectSpawned");
+    static CConVar* smokeVolume = CONVAR::Find("cl_smoke_volumeprop");
+    static CConVar* smokeFullResolution = CONVAR::Find("r_csgo_smoke_fullres_pass");
+    static CConVar* smokeEnhance = CONVAR::Find("r_csgo_smoke_fullres_enhance");
+    static CConVar* smokeShadow = CONVAR::Find("r_csgo_smoke_shadow");
+    static CConVar* drawParticles = CONVAR::Find("r_drawparticles");
+    static bool previousEnabled = false;
+    static bool originalVolume = true;
+    static bool originalFullResolution = true;
+    static bool originalEnhance = true;
+    static bool originalShadow = true;
+    static bool originalDrawParticles = true;
+
+    const bool enabled = C_GET(bool, Vars.bRemoveSmoke);
+    if (enabled && !previousEnabled)
+    {
+        if (smokeVolume != nullptr) originalVolume = smokeVolume->GetValue<bool>();
+        if (smokeFullResolution != nullptr) originalFullResolution = smokeFullResolution->GetValue<bool>();
+        if (smokeEnhance != nullptr) originalEnhance = smokeEnhance->GetValue<bool>();
+        if (smokeShadow != nullptr) originalShadow = smokeShadow->GetValue<bool>();
+        if (drawParticles != nullptr) originalDrawParticles = drawParticles->GetValue<bool>();
+    }
+    else if (!enabled && previousEnabled)
+    {
+        if (smokeVolume != nullptr) smokeVolume->GetValue<bool>() = originalVolume;
+        if (smokeFullResolution != nullptr) smokeFullResolution->GetValue<bool>() = originalFullResolution;
+        if (smokeEnhance != nullptr) smokeEnhance->GetValue<bool>() = originalEnhance;
+        if (smokeShadow != nullptr) smokeShadow->GetValue<bool>() = originalShadow;
+        if (drawParticles != nullptr) drawParticles->GetValue<bool>() = originalDrawParticles;
+    }
+    previousEnabled = enabled;
+    if (!enabled || localPawn == nullptr)
+        return;
+
+    // Do not iterate raw entity slots or mutate projectile internals here.
+    // Those handles can disappear on the particle thread exactly when smoke
+    // blooms, which was the source of the reported crash. These are stable
+    // client render controls plus the local pawn's schema-resolved overlay.
+    if (smokeVolume != nullptr) smokeVolume->GetValue<bool>() = false;
+    if (smokeFullResolution != nullptr) smokeFullResolution->GetValue<bool>() = false;
+    if (smokeEnhance != nullptr) smokeEnhance->GetValue<bool>() = false;
+    if (smokeShadow != nullptr) smokeShadow->GetValue<bool>() = false;
+    if (drawParticles != nullptr) drawParticles->GetValue<bool>() = false;
 
     auto* pawnBytes = reinterpret_cast<std::uint8_t*>(localPawn);
     if (overlayAlpha != 0)
@@ -368,43 +432,14 @@ void ApplySmokeRemoval(CGameEntitySystem* entities, C_CSPlayerPawn* localPawn)
     if (smokeAge != 0)
         *reinterpret_cast<float*>(pawnBytes + smokeAge) = 100000.f;
 
-    // The projectile fields only need periodic refresh. This avoids scanning
-    // thousands of entity slots on every Vulkan present while still clearing
-    // a newly bloomed smoke in at most one tenth of a second.
-    static std::uint64_t nextScan = 0;
     const std::uint64_t now = SDL_GetTicks();
-    if (now < nextScan)
-        return;
-    nextScan = now + 100;
-
-    int removed = 0;
-    for (int index = 1; index < 4096; ++index)
-    {
-        C_BaseEntity* entity = entities->Get<C_BaseEntity>(index);
-        CEntityIdentity* identity = entity != nullptr ? entity->GetIdentity() : nullptr;
-        const char* name = identity != nullptr ? identity->GetDesignerName() : nullptr;
-        if (name == nullptr || std::strcmp(name, "smokegrenade_projectile") != 0)
-            continue;
-
-        auto* bytes = reinterpret_cast<std::uint8_t*>(entity);
-        if (effectTick != 0)
-            *reinterpret_cast<std::int32_t*>(bytes + effectTick) = 0;
-        if (didEffect != 0)
-            *reinterpret_cast<bool*>(bytes + didEffect) = true;
-        if (volumeReceived != 0)
-            *reinterpret_cast<bool*>(bytes + volumeReceived) = false;
-        if (effectSpawned != 0)
-            *reinterpret_cast<bool*>(bytes + effectSpawned) = false;
-        ++removed;
-    }
-
     static std::uint64_t nextLog = 0;
     if (now >= nextLog)
     {
         nextLog = now + 2000;
-        EspLog("[removals] smoke active=%d removed=%d offsets overlay=0x%x age=0x%x tick=0x%x did=0x%x volume=0x%x spawned=0x%x",
-            C_GET(bool, Vars.bRemoveSmoke), removed, overlayAlpha, smokeAge,
-            effectTick, didEffect, volumeReceived, effectSpawned);
+        EspLog("[removals] smoke safe_path active=1 overlay=0x%x age=0x%x cvars volume=%p fullres=%p enhance=%p shadow=%p particles=%p",
+            overlayAlpha, smokeAge, smokeVolume, smokeFullResolution,
+            smokeEnhance, smokeShadow, drawParticles);
     }
 }
 
@@ -597,9 +632,9 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
         return;
     }
 
-    // The current Linux dwViewAngles export resolves to a zero-filled global
-    // in live CS2. The pawn fields are the authoritative angles used by the
-    // old working internal and are schema-resolved every update.
+    // Pawn view angles are the best read source; the corrected CCSGOInput
+    // mirror is written during CreateMove so the command builder consumes the
+    // same result rather than immediately overwriting this pawn field.
     QAngle_t current{};
     const char* angleSource = "none";
     const auto usableAngle = [](const QAngle_t& angle) {
@@ -790,10 +825,11 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
     QAngle_t* angleDestination = pawnViewAngleOffset != 0
         ? reinterpret_cast<QAngle_t*>(reinterpret_cast<std::uint8_t*>(localPawn) + pawnViewAngleOffset)
         : native_view_angles;
+    const bool inputHookInstalled = IsNativeInputHookInstalled();
     bool presentWrite = false;
     bool readbackVerified = false;
     QAngle_t readback{};
-    if (angleDestination != nullptr)
+    if (angleDestination != nullptr && !inputHookInstalled)
     {
         *angleDestination = result;
         presentWrite = true;
@@ -808,14 +844,14 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
     const bool createMoveQueued = QueueNativeAimAngles(
         angleDestination, result.x, result.y, result.z);
 
-    LegitLog("[%llu] MOVE_ATTEMPT target=%p bone=%d scan controllers=%d enemies=%d bones=%d valid=%d fov=%.3f delta=(%.3f,%.3f) smooth_ms=%.1f frame_s=%.4f response=%.4f step=(%.3f,%.3f) result=(%.3f,%.3f) destination=%p present_write=%d readback=(%.3f,%.3f) verified=%d create_move_queued=%d create_move_calls=%llu applied=%llu source=%s",
+    LegitLog("[%llu] MOVE_ATTEMPT target=%p bone=%d scan controllers=%d enemies=%d bones=%d valid=%d fov=%.3f delta=(%.3f,%.3f) smooth_ms=%.1f frame_s=%.4f response=%.4f step=(%.3f,%.3f) result=(%.3f,%.3f) destination=%p hook_installed=%d present_fallback=%d readback=(%.3f,%.3f) verified=%d command_queued=%d create_move_calls=%llu applied=%llu source=%s",
         static_cast<unsigned long long>(currentSequence),
         reinterpret_cast<void*>(chosen.pawn), chosen.bone,
         controllersScanned, enemiesScanned, bonesTested, validCandidates,
         chosen.fov, chosen.delta.x, chosen.delta.y,
         C_GET(float, Vars.legit_ui_smoothness), frameSeconds, response,
         stepPitch, stepYaw, result.x, result.y, angleDestination,
-        presentWrite, readback.x, readback.y, readbackVerified,
+        inputHookInstalled, presentWrite, readback.x, readback.y, readbackVerified,
         createMoveQueued,
         GetNativeCreateMoveCalls(), GetNativeAimAngleApplications(), angleSource);
 }
@@ -1361,6 +1397,14 @@ void LinuxNativeEsp::Render()
         return;
 
     SDK::ViewMatrix = *native_view_matrix;
+
+    static std::uint64_t nextInputHookRetry = 0;
+    if (!IsNativeInputHookInstalled() && SDL_GetTicks() >= nextInputHookRetry)
+    {
+        nextInputHookRetry = SDL_GetTicks() + 2000;
+        RefreshNativeInputObject();
+        InstallNativeInputHook();
+    }
 
     CCSPlayerController* local_controller = native_local_controller != nullptr ? *native_local_controller : nullptr;
     if (local_controller == nullptr)

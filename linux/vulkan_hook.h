@@ -25,6 +25,7 @@ void ClearNativeAimDelta();
 bool QueueNativeAimAngles(void* destination, float pitch, float yaw, float roll);
 unsigned long long GetNativeCreateMoveCalls();
 unsigned long long GetNativeAimAngleApplications();
+bool IsNativeInputHookInstalled();
 
 // Keeps CS2's native third-person input flag synchronized during the game's
 // SDL input sample. Writing this only from Vulkan present is too late for the

@@ -223,7 +223,7 @@ void MENU::RenderMainWindow()
 		ImGui::BeginGroup();
 		{
 			std::vector<std::vector<std::string>> tab_columns = {
-				{ "c", "", "b", "d", "f", "o", "e" },
+				{ "c", "a", "b", "d", "f", "o", "e" },
 				{ "Ragebot", "Legitbot", "Antiaim", "Removals", "Visuals", "Skins", "Misc" },
 				{ "Aims agressively at targets...", "Subtle aim assistance...", "Accuracy assistance...", "Remove obstructive effects...", "Visualisation", "Items customization...", "Save/Load configs, engine..." },
 				{ "", "", "", "", "", "", "" }
@@ -401,7 +401,7 @@ void MENU::RenderMainWindow()
 				edited::BeginChild("##RemovalsContainer", ImVec2(c::background::size.x - 200, c::background::size.y), 0);
 				{
 					ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "Removals");
-					edited::Checkbox("Remove Smoke", "Suppress active smoke volumes and the local smoke overlay", &C_GET(bool, Vars.bRemoveSmoke));
+					edited::Checkbox("Remove Smoke", "Uses the safe particle-render path; other particle effects may also be hidden", &C_GET(bool, Vars.bRemoveSmoke));
 				}
 				edited::EndChild();
 			}

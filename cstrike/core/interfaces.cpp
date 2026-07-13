@@ -224,21 +224,29 @@ bool I::Setup()
 	// Linux: capture via sig scans and CreateInterface
 	L_PRINT(LOG_INFO) << CS_XOR("[I::Setup] Linux: capturing remaining interfaces via patterns");
 
-	// Input (CCSGOInput*) - sig scan in libclient.so
-	// Pattern from known working Linux internal: 48 8D 05 ? ? ? ? C3 CC CC CC CC CC CC CC CC 55 48 89 E5 41 55
+	// Input (CCSGOInput*) - sig scan in libclient.so. The current native
+	// signature resolves a global CCSGOInput* storage slot, not the object
+	// itself. Treating the slot as an object produced an all-zero vtable and
+	// made every CreateMove/third-person hook silently unavailable.
 	{
-		auto addr = MEM::FindPattern(CLIENT_DLL, CS_XOR("48 8D 05 ? ? ? ? C3 CC CC CC CC CC CC CC CC 55 48 89 E5 41 55"));
-		if (addr != nullptr) {
-			// Native Linux uses a tiny accessor which returns the CCSGOInput object
-			// itself: lea rax, [rip + displacement]; ret.  The resolved LEA target
-			// is therefore the object, not a CCSGOInput* storage slot.
-			Input = reinterpret_cast<CCSGOInput*>(MEM::ResolveRelativeAddress(addr, 0x3, 0x7));
+		bool foundCurrentStorage = false;
+		auto addr = MEM::FindPattern(CLIENT_DLL,
+			CS_XOR("F3 41 0F 7E 06 F3 0F 7E 4D B0 48 8D 05 ? ? ? ? 0F 58 C1"));
+		if (addr != nullptr)
+		{
+			foundCurrentStorage = true;
+			auto* inputTable = MEM::ResolveRelativeAddress(addr + 0xA, 0x3, 0x7) + 0x10;
+			Input = *reinterpret_cast<CCSGOInput**>(inputTable);
+			L_PRINT(LOG_INFO) << CS_XOR("native Input storage at: ")
+				<< L::AddFlags(LOG_MODE_INT_SHOWBASE | LOG_MODE_INT_FORMAT_HEX)
+				<< reinterpret_cast<std::uintptr_t>(inputTable);
 		}
-		if (Input == nullptr) {
-			// Fallback: sig from OLD project
-			addr = MEM::FindPattern(CLIENT_DLL, CS_XOR("48 8B 0D ? ? ? ? E8 ? ? ? ? 8B BE ? ? ? ? 44 8B F0 85 FF 78 04 FF C7 EB 03"));
+		if (Input == nullptr && !foundCurrentStorage) {
+			// Older builds exposed the object through a short LEA accessor.
+			addr = MEM::FindPattern(CLIENT_DLL,
+				CS_XOR("48 8D 05 ? ? ? ? C3 CC CC CC CC CC CC CC CC 55 48 89 E5 41 55"));
 			if (addr != nullptr)
-				Input = *reinterpret_cast<CCSGOInput**>(MEM::ResolveRelativeAddress(addr, 0x3, 0x7));
+				Input = reinterpret_cast<CCSGOInput*>(MEM::ResolveRelativeAddress(addr, 0x3, 0x7));
 		}
 	}
 	bSuccess &= (Input != nullptr);

@@ -163,6 +163,18 @@ static bool NativeInputCreateMove(void* input, int slot, bool active)
             angles[0] = std::clamp(pitch, -89.f, 89.f);
             angles[1] = std::remainder(yaw, 360.f);
             angles[2] = 0.f;
+            // Current native CCSGOInput mirrors command angles here. Writing
+            // both this command source and the pawn field before the original
+            // CreateMove prevents the engine from replacing our pawn-only
+            // write with its stale input angle on the same tick.
+            if (input != nullptr)
+            {
+                auto* inputAngles = reinterpret_cast<float*>(
+                    reinterpret_cast<std::uint8_t*>(input) + 0x2D8);
+                inputAngles[0] = angles[0];
+                inputAngles[1] = angles[1];
+                inputAngles[2] = 0.f;
+            }
             native_aim_angle_applications.fetch_add(1, std::memory_order_relaxed);
         }
     }
@@ -1271,7 +1283,16 @@ bool InstallNativeInputHook()
     }
 
     auto** vtable = *reinterpret_cast<void***>(I::Input);
-    void* target = vtable != nullptr ? vtable[6] : nullptr;
+    Dl_info vtableInfo{};
+    if (vtable == nullptr || dladdr(vtable, &vtableInfo) == 0)
+    {
+        PreviewDebug("[INPUT] CreateMove hook unavailable: invalid vtable=%p input=%p", vtable, I::Input);
+        return false;
+    }
+    void* target = vtable[6];
+    Dl_info targetInfo{};
+    if (target != nullptr && dladdr(target, &targetInfo) == 0)
+        target = nullptr;
     if (target == nullptr)
     {
         VulkanDebug("[INPUT] CreateMove hook unavailable: vtable[6] is null");
@@ -1331,13 +1352,27 @@ void ClearNativeAimDelta()
 
 bool QueueNativeAimAngles(void* destination, float pitch, float yaw, float roll)
 {
-    if (native_input_hooks == nullptr || destination == nullptr ||
+    if (destination == nullptr ||
         !std::isfinite(pitch) || !std::isfinite(yaw) || !std::isfinite(roll))
         return false;
     native_aim_angle_pitch.store(pitch, std::memory_order_relaxed);
     native_aim_angle_yaw.store(yaw, std::memory_order_relaxed);
     native_aim_angle_roll.store(roll, std::memory_order_relaxed);
-    native_aim_angle_destination.store(destination, std::memory_order_release);
+    if (native_input_hooks != nullptr)
+        native_aim_angle_destination.store(destination, std::memory_order_release);
+    else if (I::Input != nullptr)
+    {
+        // Timing fallback for builds where the vtable index has moved. The
+        // resolved input object is still the command source, so keep its angle
+        // mirror current until a verified CreateMove target is available.
+        auto* inputAngles = reinterpret_cast<float*>(
+            reinterpret_cast<std::uint8_t*>(I::Input) + 0x2D8);
+        inputAngles[0] = std::clamp(pitch, -89.f, 89.f);
+        inputAngles[1] = std::remainder(yaw, 360.f);
+        inputAngles[2] = 0.f;
+    }
+    else
+        return false;
     return true;
 }
 
@@ -1349,6 +1384,11 @@ unsigned long long GetNativeCreateMoveCalls()
 unsigned long long GetNativeAimAngleApplications()
 {
     return native_aim_angle_applications.load(std::memory_order_relaxed);
+}
+
+bool IsNativeInputHookInstalled()
+{
+    return native_input_hooks != nullptr;
 }
 
 void SetNativeThirdPersonInput(bool enabled)
