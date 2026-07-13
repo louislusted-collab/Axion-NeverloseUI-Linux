@@ -7,6 +7,7 @@
 #include <dlfcn.h>
 #include <sys/mman.h>
 #include <cstring>
+#include <cstddef>
 #include <cstdio>
 #include <cstdarg>
 #include <algorithm>
@@ -27,6 +28,7 @@
 #include "../dependencies/imgui/backends/imgui_impl_sdl3.h"
 #include "../dependencies/imgui/backends/imgui_impl_vulkan.h"
 #include "../cstrike/font.h"
+#include "../resources/game_icons.h"
 
 #include "../cstrike/utilities/inputsystem.h"
 #include "../cstrike/utilities/log.h"
@@ -84,7 +86,7 @@ static std::atomic<float> native_aim_mouse_x{0.f};
 static std::atomic<float> native_aim_mouse_y{0.f};
 static std::atomic<std::uint64_t> native_aim_sdl_samples{0};
 static std::atomic<bool> native_thirdperson_input{false};
-using InputCreateMoveFn = bool(*)(void*, int, bool);
+using InputCreateMoveFn = bool(*)(void*, int, bool, std::byte);
 static InputCreateMoveFn native_input_create_move_original = nullptr;
 static funchook_t* native_input_hooks = nullptr;
 static std::atomic<void*> native_aim_angle_destination{nullptr};
@@ -144,7 +146,7 @@ static void PreviewDebug(const char* format, ...)
     VulkanDebug(buffer);
 }
 
-static bool NativeInputCreateMove(void* input, int slot, bool active)
+static bool NativeInputCreateMove(void* input, int slot, bool active, std::byte unknown)
 {
     native_create_move_calls.fetch_add(1, std::memory_order_relaxed);
     const bool thirdPerson = native_thirdperson_input.load(std::memory_order_acquire);
@@ -180,7 +182,7 @@ static bool NativeInputCreateMove(void* input, int slot, bool active)
     }
 
     const bool result = native_input_create_move_original != nullptr
-        ? native_input_create_move_original(input, slot, active) : false;
+        ? native_input_create_move_original(input, slot, active, unknown) : false;
     if (input != nullptr)
         *reinterpret_cast<bool*>(reinterpret_cast<std::uint8_t*>(input) + 0x229) = thirdPerson;
     return result;
@@ -823,6 +825,9 @@ static VkResult Hooked_QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pI
         font::icomoon_widget2 = io.Fonts->AddFontFromMemoryTTF(
             icomoon, sizeof(icomoon), 16.f, &font_cfg,
             io.Fonts->GetGlyphRangesCyrillic());
+        ImFont* game_icons = io.Fonts->AddFontFromMemoryCompressedTTF(
+            game_icons_compressed_data, game_icons_compressed_size, 16.f,
+            nullptr, io.Fonts->GetGlyphRangesDefault());
 
         if (!font::lexend_regular || !font::lexend_bold || !font::icomoon || !font::icomoon_widget) {
             ImFont* fallback = io.Fonts->AddFontDefault();
@@ -839,7 +844,10 @@ static VkResult Hooked_QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pI
         FONT::pEspFlagsName = font::lexend_regular;
         FONT::pEspWepName = font::lexend_regular;
         FONT::pEspHealth = font::lexend_regular;
-        FONT::pEspIcons = font::icomoon_widget;
+        // Weapon ESP uses the dedicated CS2 gun font. The previous Linux path
+        // pointed at the four-glyph widget font, so every weapon except a few
+        // coincidental letters rendered as the fallback/missing glyph.
+        FONT::pEspIcons = game_icons != nullptr ? game_icons : font::icomoon_widget;
         FONT::pExtra = font::lexend_regular;
         FONT::pMenuTabsDesc = font::lexend_regular;
         for (ImFont*& menu_font : FONT::pMenu)

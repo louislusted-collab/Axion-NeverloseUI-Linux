@@ -998,22 +998,21 @@ void OVERLAY::OnPlayer(CCSPlayerController* player, const ImVec4& out) {
 
 			const char* weaponPrefix = CS_XOR("weapon_");
 			const char* weaponNameStart = strstr(szWeaponName, weaponPrefix);
-			const char* extractedWeaponName;
-
-			if (!weaponNameStart)
-				extractedWeaponName = szWeaponName;
-
-			weaponNameStart += strlen(weaponPrefix);
-			extractedWeaponName = weaponNameStart;
+			const char* extractedWeaponName = weaponNameStart != nullptr
+				? weaponNameStart + strlen(weaponPrefix)
+				: szWeaponName;
 
 			if (const auto& weaponOverlayConfig = C_GET(TextOverlayVar_t, Vars.Weaponesp); weaponOverlayConfig.bEnable) {
 
 				if (weaponOverlayConfig.bIcon) {
 #ifdef _DEBUG
-					context.AddComponent(new CTextComponent(true, false, SIDE_BOTTOM, DIR_BOTTOM, FONT::pEspWepName, CS_XOR(extractedWeaponName), Vars.Weaponesp, 1.f));
+					context.AddComponent(new CTextComponent(true, false, SIDE_BOTTOM, DIR_BOTTOM, FONT::pEspWepName, extractedWeaponName, Vars.Weaponesp, 1.f));
 #else
-					const char weaponIconsName = WeaponsIcons::get(szWeaponName);
-					context.AddComponent(new CTextComponent(true, true, SIDE_BOTTOM, DIR_BOTTOM, FONT::pEspIcons, &weaponIconsName, Vars.Weaponesp, mAlpha[idx]));
+					const char weaponIconsName[2] = { WeaponsIcons::get(szWeaponName), '\0' };
+					if (weaponIconsName[0] != '\0')
+						context.AddComponent(new CTextComponent(true, true, SIDE_BOTTOM, DIR_BOTTOM, FONT::pEspIcons, weaponIconsName, Vars.Weaponesp, mAlpha[idx]));
+					else
+						context.AddComponent(new CTextComponent(true, false, SIDE_BOTTOM, DIR_BOTTOM, FONT::pEspWepName, extractedWeaponName, Vars.Weaponesp, 1.f));
 #endif
 				}
 				else {

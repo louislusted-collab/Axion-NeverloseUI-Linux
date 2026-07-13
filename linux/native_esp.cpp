@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cfloat>
 #include <cmath>
 #include <cstdio>
 #include <cstdarg>
@@ -31,6 +32,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <SDL3/SDL.h>
@@ -43,6 +45,7 @@ QAngle_t* native_view_angles = nullptr;
 bool attempted_matrix_lookup = false;
 std::uint64_t frame_counter = 0;
 bool native_thirdperson_active = false;
+bool native_aim_command_queued = false;
 std::uint16_t active_skin_weapon_definition = 0;
 bool native_skin_regenerator_ready = false;
 bool native_skin_refresh_requested = false;
@@ -274,6 +277,15 @@ void DrawOutlinedText(ImDrawList* draw, const ImVec2& position, const char* text
     draw->AddText(position, color, text);
 }
 
+void DrawOutlinedText(ImDrawList* draw, ImFont* font, const ImVec2& position,
+                      const char* text, ImU32 color, ImU32 outline)
+{
+    if (draw == nullptr || font == nullptr || text == nullptr || text[0] == '\0')
+        return;
+    draw->AddText(font, font->FontSize, position + ImVec2(1.f, 1.f), outline, text);
+    draw->AddText(font, font->FontSize, position, color, text);
+}
+
 bone_data* GetLiveBoneData(CGameSceneNode* scene)
 {
     static const std::uint32_t modelStateOffset = SCHEMA::GetOffset("CSkeletonInstance->m_modelState");
@@ -363,6 +375,50 @@ bool GetWeaponDisplay(CGameEntitySystem* entities, C_CSPlayerPawn* pawn, std::st
     }
     maximumAmmo = clipOffset == 0 ? 0 : *reinterpret_cast<const int*>(reinterpret_cast<std::uint8_t*>(data) + clipOffset);
     return !name.empty() || maximumAmmo > 0;
+}
+
+char GetWeaponIcon(std::string_view name)
+{
+    struct IconEntry { std::string_view name; char glyph; };
+    static constexpr IconEntry icons[] = {
+        {"deagle", 'A'}, {"elite", 'B'}, {"fiveseven", 'C'}, {"glock", 'D'},
+        {"hkp2000", 'E'}, {"p250", 'F'}, {"usp_silencer", 'G'}, {"tec9", 'H'},
+        {"cz75a", 'I'}, {"revolver", 'J'}, {"mac10", 'K'}, {"ump45", 'L'},
+        {"bizon", 'M'}, {"mp7", 'N'}, {"mp9", 'O'}, {"mp5sd", 'O'}, {"p90", 'P'},
+        {"galilar", 'Q'}, {"famas", 'R'}, {"m4a1", 'S'}, {"m4a1_silencer", 'T'},
+        {"aug", 'U'}, {"sg556", 'V'}, {"ak47", 'W'}, {"g3sg1", 'X'},
+        {"scar20", 'Y'}, {"awp", 'Z'}, {"ssg08", 'a'}, {"xm1014", 'b'},
+        {"sawedoff", 'c'}, {"mag7", 'd'}, {"nova", 'e'}, {"negev", 'f'},
+        {"m249", 'g'}, {"taser", 'h'}, {"flashbang", 'i'}, {"hegrenade", 'j'},
+        {"smokegrenade", 'k'}, {"molotov", 'l'}, {"decoy", 'm'},
+        {"incgrenade", 'n'}, {"c4", 'o'},
+    };
+    if (name == "knife" || name.starts_with("knife_") || name == "bayonet")
+        return ']';
+    for (const IconEntry& icon : icons)
+        if (icon.name == name)
+            return icon.glyph;
+    return '\0';
+}
+
+int GetRageWeaponGroup(std::string_view name)
+{
+    if (name == "deagle" || name == "revolver")
+        return 2; // Heavy pistols
+    if (name == "glock" || name == "hkp2000" || name == "usp_silencer" ||
+        name == "p250" || name == "tec9" || name == "fiveseven" ||
+        name == "cz75a" || name == "elite")
+        return 1; // Pistols
+    if (name == "ak47" || name == "m4a1" || name == "m4a1_silencer" ||
+        name == "galilar" || name == "famas" || name == "aug" || name == "sg556")
+        return 3; // Assault rifles
+    if (name == "g3sg1" || name == "scar20")
+        return 4; // Auto snipers
+    if (name == "ssg08")
+        return 5;
+    if (name == "awp")
+        return 6;
+    return 0;
 }
 
 void DrawLegitFov()
@@ -538,12 +594,22 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
     static bool previousToggleMode = false;
     static int previousKeyCode = 0;
     static std::uint64_t sequence = 0;
+    static std::uint64_t lockStartedAt = 0;
+    static std::uint64_t recoveryUntil = 0;
+    static QAngle_t previousDelta{};
+    static std::uintptr_t previousDeltaPawn = 0;
+    static int previousDeltaBone = -2;
     const auto stopAim = [&](bool releaseTarget) {
         ClearNativeAimDelta();
         if (releaseTarget)
         {
             lockedPawn = 0;
             lockedBone = -2;
+            lockStartedAt = 0;
+            recoveryUntil = 0;
+            previousDelta = {};
+            previousDeltaPawn = 0;
+            previousDeltaBone = -2;
         }
     };
 
@@ -787,15 +853,39 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
                 C_GET(float, Vars.legit_ui_fov_size), current.x, current.y, angleSource);
         return;
     }
+    constexpr float angularDeadZone = 0.04f;
+    const bool newLock = chosen.pawn != lockedPawn || chosen.bone != lockedBone;
+    if (newLock)
+    {
+        lockStartedAt = now;
+        recoveryUntil = 0;
+    }
+    else if (previousDeltaPawn == chosen.pawn && previousDeltaBone == chosen.bone)
+    {
+        // Detect a real sign change after crossing a bone. Recovery only
+        // corrects naturally occurring overshoot; it never creates one.
+        const bool crossedPitch = previousDelta.x * chosen.delta.x < 0.f &&
+            std::fabs(previousDelta.x) > angularDeadZone * 2.f;
+        const bool crossedYaw = previousDelta.y * chosen.delta.y < 0.f &&
+            std::fabs(previousDelta.y) > angularDeadZone * 2.f;
+        if (crossedPitch || crossedYaw)
+        {
+            const float recoveryMs = std::clamp(
+                C_GET(float, Vars.legit_ui_recovery_ms), 5.f, 250.f);
+            recoveryUntil = now + static_cast<std::uint64_t>(recoveryMs * 2.f);
+        }
+    }
     lockedPawn = chosen.pawn;
     lockedBone = chosen.bone;
+    previousDelta = chosen.delta;
+    previousDeltaPawn = chosen.pawn;
+    previousDeltaBone = chosen.bone;
 
     if (C_GET(bool, Vars.legit_ui_auto_shoot) && chosen.fov < 2.f && I::Input != nullptr)
         *reinterpret_cast<std::uint64_t*>(reinterpret_cast<std::uint8_t*>(I::Input) + 0x240) |= 1ULL;
 
     // A sub-count dead zone prevents the bot from constantly correcting bone
     // animation/noise after it is already centered.
-    constexpr float angularDeadZone = 0.04f;
     if (chosen.fov <= angularDeadZone)
     {
         stopAim(false);
@@ -810,7 +900,39 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
     const float smoothnessSeconds = std::max(0.005f,
         C_GET(float, Vars.legit_ui_smoothness) / 1000.f);
     const float frameSeconds = std::clamp(ImGui::GetIO().DeltaTime, 0.001f, 1.f / 30.f);
-    const float response = 1.f - std::exp(-frameSeconds / smoothnessSeconds);
+    const float baseResponse = 1.f - std::exp(-frameSeconds / smoothnessSeconds);
+
+    float accelerationFactor = 1.f;
+    const float accelerationMs = std::clamp(
+        C_GET(float, Vars.legit_ui_acceleration_ms), 0.f, 500.f);
+    if (accelerationMs > 0.f && lockStartedAt != 0)
+    {
+        const float elapsed = static_cast<float>(now - lockStartedAt);
+        const float linear = std::clamp(elapsed / accelerationMs, 0.f, 1.f);
+        const float eased = linear * linear * (3.f - 2.f * linear);
+        accelerationFactor = 0.20f + 0.80f * eased;
+    }
+
+    float decelerationFactor = 1.f;
+    const float decelerationZone = std::clamp(
+        C_GET(float, Vars.legit_ui_deceleration_degrees), 0.f, 10.f);
+    if (decelerationZone > angularDeadZone && chosen.fov < decelerationZone)
+    {
+        const float normalized = std::clamp(
+            (chosen.fov - angularDeadZone) / (decelerationZone - angularDeadZone), 0.f, 1.f);
+        decelerationFactor = 0.15f + 0.85f * normalized;
+    }
+
+    float response = std::clamp(
+        baseResponse * accelerationFactor * decelerationFactor, 0.0005f, 1.f);
+    const bool recovering = now < recoveryUntil;
+    if (recovering)
+    {
+        const float recoverySeconds = std::max(0.005f,
+            C_GET(float, Vars.legit_ui_recovery_ms) / 1000.f);
+        response = std::max(response,
+            1.f - std::exp(-frameSeconds / recoverySeconds));
+    }
     constexpr float maxDegreesPerSample = 3.f;
     const float stepPitch = std::clamp(chosen.delta.x * response,
         -maxDegreesPerSample, maxDegreesPerSample);
@@ -843,17 +965,207 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
     ClearNativeAimDelta();
     const bool createMoveQueued = QueueNativeAimAngles(
         angleDestination, result.x, result.y, result.z);
+    native_aim_command_queued = createMoveQueued;
 
-    LegitLog("[%llu] MOVE_ATTEMPT target=%p bone=%d scan controllers=%d enemies=%d bones=%d valid=%d fov=%.3f delta=(%.3f,%.3f) smooth_ms=%.1f frame_s=%.4f response=%.4f step=(%.3f,%.3f) result=(%.3f,%.3f) destination=%p hook_installed=%d present_fallback=%d readback=(%.3f,%.3f) verified=%d command_queued=%d create_move_calls=%llu applied=%llu source=%s",
+    LegitLog("[%llu] MOVE_ATTEMPT target=%p bone=%d scan controllers=%d enemies=%d bones=%d valid=%d fov=%.3f delta=(%.3f,%.3f) smooth_ms=%.1f frame_s=%.4f response=%.4f accel=%.3f decel=%.3f recovery=%d step=(%.3f,%.3f) result=(%.3f,%.3f) destination=%p hook_installed=%d present_fallback=%d readback=(%.3f,%.3f) verified=%d command_queued=%d create_move_calls=%llu applied=%llu source=%s",
         static_cast<unsigned long long>(currentSequence),
         reinterpret_cast<void*>(chosen.pawn), chosen.bone,
         controllersScanned, enemiesScanned, bonesTested, validCandidates,
         chosen.fov, chosen.delta.x, chosen.delta.y,
         C_GET(float, Vars.legit_ui_smoothness), frameSeconds, response,
+        accelerationFactor, decelerationFactor, recovering,
         stepPitch, stepYaw, result.x, result.y, angleDestination,
         inputHookInstalled, presentWrite, readback.x, readback.y, readbackVerified,
         createMoveQueued,
         GetNativeCreateMoveCalls(), GetNativeAimAngleApplications(), angleSource);
+}
+
+void ApplyNativeAntiAim(C_CSPlayerPawn* localPawn)
+{
+    if (!C_GET(bool, Vars.bAntiAim) || native_aim_command_queued ||
+        MENU::bMainWindowOpened || localPawn == nullptr || localPawn->GetHealth() <= 0)
+        return;
+
+    const int pitchType = std::clamp(C_GET(int, Vars.iPitchType), 0, 3);
+    const int yawType = std::clamp(C_GET(int, Vars.iBaseYawType), 0, 2);
+    if (pitchType == 0 && yawType == 0)
+        return;
+
+    static const std::uint32_t pawnViewAngleOffset =
+        SCHEMA::GetOffset("C_BasePlayerPawn->v_angle");
+    QAngle_t* destination = pawnViewAngleOffset != 0
+        ? reinterpret_cast<QAngle_t*>(reinterpret_cast<std::uint8_t*>(localPawn) + pawnViewAngleOffset)
+        : native_view_angles;
+    if (destination == nullptr || !destination->IsValid())
+        return;
+
+    QAngle_t result = *destination;
+    switch (pitchType)
+    {
+    case 1: result.x = 89.f; break;
+    case 2: result.x = -89.f; break;
+    case 3: result.x = 0.f; break;
+    default: break;
+    }
+    if (yawType == 1)
+        result.y = std::remainder(result.y + 180.f, 360.f);
+    // Forward yaw intentionally preserves the current yaw.
+    result.z = 0.f;
+    result.Clamp();
+
+    if (!IsNativeInputHookInstalled())
+        *destination = result;
+    const bool queued = QueueNativeAimAngles(
+        destination, result.x, result.y, result.z);
+    native_aim_command_queued = queued;
+
+    static std::uint64_t nextLog = 0;
+    const std::uint64_t now = SDL_GetTicks();
+    if (now >= nextLog)
+    {
+        nextLog = now + 2000;
+        LegitLog("[antiaim] pitch_type=%d yaw_type=%d result=(%.1f,%.1f) destination=%p hook=%d queued=%d",
+            pitchType, yawType, result.x, result.y, destination,
+            IsNativeInputHookInstalled(), queued);
+    }
+}
+
+void ApplyNativeRage(CGameEntitySystem* entities, CCSPlayerController* localController,
+                     C_CSPlayerPawn* localPawn)
+{
+    if (!C_GET(bool, Vars.rage_enable) || MENU::bMainWindowOpened ||
+        entities == nullptr || localController == nullptr || localPawn == nullptr ||
+        localPawn->GetHealth() <= 0)
+    {
+        ClearNativeAimDelta();
+        return;
+    }
+
+    CGameSceneNode* localScene = localPawn->GetGameSceneNode();
+    if (localScene == nullptr)
+        return;
+    const Vector_t localEye = localScene->GetAbsOrigin() + localPawn->m_vecViewOffset();
+    static const std::uint32_t pawnViewAngleOffset =
+        SCHEMA::GetOffset("C_BasePlayerPawn->v_angle");
+    QAngle_t* destination = pawnViewAngleOffset != 0
+        ? reinterpret_cast<QAngle_t*>(reinterpret_cast<std::uint8_t*>(localPawn) + pawnViewAngleOffset)
+        : native_view_angles;
+    if (destination == nullptr || !destination->IsValid())
+        return;
+    const QAngle_t current = *destination;
+
+    std::string activeWeapon;
+    int ammo = 0;
+    int maximumAmmo = 0;
+    GetWeaponDisplay(entities, localPawn, activeWeapon, ammo, maximumAmmo);
+    const int weaponGroup = GetRageWeaponGroup(activeWeapon);
+    const bool hitscan = C_GET(bool, Vars.rage_hitscan);
+    const int selection = std::clamp(
+        C_GET_ARRAY(int, 7, Vars.rage_target_select, weaponGroup), 0, 2);
+
+    struct Candidate
+    {
+        C_CSPlayerPawn* pawn = nullptr;
+        int bone = -1;
+        QAngle_t delta{};
+        float fov = 9999.f;
+        float score = 9999999.f;
+    } best;
+    constexpr float degrees = 180.f / 3.14159265358979323846f;
+    int pawnsScanned = 0;
+    int pointsScanned = 0;
+
+    for (int index = 1; index <= 128; ++index)
+    {
+        CCSPlayerController* controller = entities->Get<CCSPlayerController>(index);
+        if (controller == nullptr || controller == localController)
+            continue;
+        C_CSPlayerPawn* pawn = entities->Get<C_CSPlayerPawn>(controller->GetPawnHandle());
+        if (pawn == nullptr || pawn == localPawn || pawn->GetHealth() <= 0 ||
+            pawn->GetTeam() == localPawn->GetTeam())
+            continue;
+        CGameSceneNode* scene = pawn->GetGameSceneNode();
+        if (scene == nullptr || scene->IsDormant())
+            continue;
+        ++pawnsScanned;
+
+        const bool anyConfigured =
+            C_GET_ARRAY(bool, 7, Vars.hitbox_head, weaponGroup) ||
+            C_GET_ARRAY(bool, 7, Vars.hitbox_neck, weaponGroup) ||
+            C_GET_ARRAY(bool, 7, Vars.hitbox_uppeer_chest, weaponGroup) ||
+            C_GET_ARRAY(bool, 7, Vars.hitbox_chest, weaponGroup) ||
+            C_GET_ARRAY(bool, 7, Vars.hitbox_stomach, weaponGroup) ||
+            C_GET_ARRAY(bool, 7, Vars.hitbox_legs, weaponGroup) ||
+            C_GET_ARRAY(bool, 7, Vars.hitbox_feet, weaponGroup);
+        const int bones[] = {
+            (!anyConfigured || C_GET_ARRAY(bool, 7, Vars.hitbox_head, weaponGroup)) ? 5 : -1,
+            C_GET_ARRAY(bool, 7, Vars.hitbox_neck, weaponGroup) ? 4 : -1,
+            C_GET_ARRAY(bool, 7, Vars.hitbox_uppeer_chest, weaponGroup) ? 3 : -1,
+            C_GET_ARRAY(bool, 7, Vars.hitbox_chest, weaponGroup) ? 6 : -1,
+            C_GET_ARRAY(bool, 7, Vars.hitbox_stomach, weaponGroup) ? 2 : -1,
+            C_GET_ARRAY(bool, 7, Vars.hitbox_legs, weaponGroup) ? 23 : -1,
+            C_GET_ARRAY(bool, 7, Vars.hitbox_legs, weaponGroup) ? 26 : -1,
+            C_GET_ARRAY(bool, 7, Vars.hitbox_feet, weaponGroup) ? 27 : -1,
+            C_GET_ARRAY(bool, 7, Vars.hitbox_feet, weaponGroup) ? 30 : -1,
+        };
+
+        for (const int bone : bones)
+        {
+            Vector_t target{};
+            if (bone < 0 || !GetLiveBonePosition(scene, bone, target))
+                continue;
+            ++pointsScanned;
+            const Vector_t difference = target - localEye;
+            const float horizontal = std::hypot(difference.x, difference.y);
+            if (horizontal < 0.001f)
+                continue;
+            QAngle_t wanted(-std::atan2(difference.z, horizontal) * degrees,
+                             std::atan2(difference.y, difference.x) * degrees, 0.f);
+            const QAngle_t delta(std::remainder(wanted.x - current.x, 360.f),
+                                 std::remainder(wanted.y - current.y, 360.f), 0.f);
+            const float fov = std::hypot(delta.x, delta.y);
+            float score = fov;
+            if (selection == 0)
+                score = difference.Length();
+            else if (selection == 1)
+                score = static_cast<float>(pawn->GetHealth()) + (bone == 5 ? -20.f : 0.f);
+            if (std::isfinite(score) && score < best.score)
+                best = { pawn, bone, delta, fov, score };
+            if (!hitscan)
+                break;
+        }
+    }
+
+    if (best.pawn == nullptr)
+    {
+        ClearNativeAimDelta();
+        return;
+    }
+
+    // Rage is deliberately faster than Legitbot, but still bounded per frame
+    // so a stale bone or one long frame cannot spin the camera uncontrollably.
+    constexpr float maxDegreesPerFrame = 15.f;
+    const float stepPitch = std::clamp(best.delta.x, -maxDegreesPerFrame, maxDegreesPerFrame);
+    const float stepYaw = std::clamp(best.delta.y, -maxDegreesPerFrame, maxDegreesPerFrame);
+    QAngle_t result(current.x + stepPitch, current.y + stepYaw, 0.f);
+    result.Clamp();
+
+    if (!IsNativeInputHookInstalled())
+        *destination = result;
+    ClearNativeAimDelta();
+    const bool queued = QueueNativeAimAngles(destination, result.x, result.y, 0.f);
+    native_aim_command_queued = queued;
+
+    static std::uint64_t nextLog = 0;
+    const std::uint64_t now = SDL_GetTicks();
+    if (now >= nextLog)
+    {
+        nextLog = now + 250;
+        LegitLog("[rage] weapon=%s group=%d hitscan=%d selection=%d pawns=%d points=%d target=%p bone=%d fov=%.2f score=%.2f step=(%.2f,%.2f) hook=%d queued=%d",
+            activeWeapon.c_str(), weaponGroup, hitscan, selection, pawnsScanned,
+            pointsScanned, best.pawn, best.bone, best.fov, best.score,
+            stepPitch, stepYaw, IsNativeInputHookInstalled(), queued);
+    }
 }
 
 void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localController, C_CSPlayerPawn* localPawn)
@@ -1424,7 +1736,12 @@ void LinuxNativeEsp::Render()
     ApplyThirdPerson(local_pawn);
     ApplySmokeRemoval(entities, local_pawn);
     DrawLegitFov();
-    ApplyLegitAim(entities, local_controller, local_pawn);
+    native_aim_command_queued = false;
+    if (C_GET(bool, Vars.rage_enable))
+        ApplyNativeRage(entities, local_controller, local_pawn);
+    else
+        ApplyLegitAim(entities, local_controller, local_pawn);
+    ApplyNativeAntiAim(local_pawn);
     ApplyNativeSkin(entities, local_controller, local_pawn);
     NativeChams::UpdateColors(
         C_GET(ColorPickerVar_t, Vars.colVisualChams).colValue,
@@ -1537,9 +1854,23 @@ void LinuxNativeEsp::Render()
             }
             if (const auto& weaponConfig = C_GET(TextOverlayVar_t, Vars.Weaponesp); weaponConfig.bEnable && !weaponName.empty())
             {
-                const ImVec2 textSize = ImGui::CalcTextSize(weaponName.c_str());
-                DrawOutlinedText(draw, ImVec2((min.x + max.x - textSize.x) * 0.5f, max.y + bottomOffset),
-                                 weaponName.c_str(), weaponConfig.colPrimary.GetU32(), weaponConfig.colOutline.GetU32());
+                const char glyph = GetWeaponIcon(weaponName);
+                if (weaponConfig.bIcon && glyph != '\0' && FONT::pEspIcons != nullptr)
+                {
+                    const char iconText[2] = { glyph, '\0' };
+                    const ImVec2 textSize = FONT::pEspIcons->CalcTextSizeA(
+                        FONT::pEspIcons->FontSize, FLT_MAX, 0.f, iconText);
+                    DrawOutlinedText(draw, FONT::pEspIcons,
+                        ImVec2((min.x + max.x - textSize.x) * 0.5f, max.y + bottomOffset),
+                        iconText, weaponConfig.colPrimary.GetU32(), weaponConfig.colOutline.GetU32());
+                }
+                else
+                {
+                    const ImVec2 textSize = ImGui::CalcTextSize(weaponName.c_str());
+                    DrawOutlinedText(draw,
+                        ImVec2((min.x + max.x - textSize.x) * 0.5f, max.y + bottomOffset),
+                        weaponName.c_str(), weaponConfig.colPrimary.GetU32(), weaponConfig.colOutline.GetU32());
+                }
             }
         }
 

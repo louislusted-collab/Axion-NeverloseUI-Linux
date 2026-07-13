@@ -80,6 +80,7 @@ struct Variables_t
 	C_ADD_VARIABLE_ARRAY(int, 7, rage_minimum_hitchance, 0);
 
 	C_ADD_VARIABLE(bool, rage_enable, false);
+	C_ADD_VARIABLE(bool, rage_hitscan, true);
 	C_ADD_VARIABLE_ARRAY(bool, 7, rage_hitchance, 0);
 	C_ADD_VARIABLE_ARRAY(bool, 7, rapid_fire, 0);
 	C_ADD_VARIABLE_ARRAY(bool, 7, rage_penetration, 0);
@@ -140,6 +141,9 @@ struct Variables_t
 	C_ADD_VARIABLE(int, legit_ui_key, VK_LBUTTON);
 	C_ADD_VARIABLE(bool, legit_ui_toggle, false);
 	C_ADD_VARIABLE(float, legit_ui_smoothness, 120.f);
+	C_ADD_VARIABLE(float, legit_ui_acceleration_ms, 80.f);
+	C_ADD_VARIABLE(float, legit_ui_deceleration_degrees, 1.5f);
+	C_ADD_VARIABLE(float, legit_ui_recovery_ms, 45.f);
 	C_ADD_VARIABLE(bool, legit_ui_draw_fov, false);
 	C_ADD_VARIABLE(float, legit_ui_fov_size, 5.f);
 	C_ADD_VARIABLE(bool, legit_ui_recoil, false);

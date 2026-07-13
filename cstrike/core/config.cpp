@@ -138,6 +138,7 @@ bool C::Setup(const wchar_t* wszDefaultFileName)
 	AddUserType(FNV1A::HashConst("TextOverlayVar_t"), 
 	{ 
 		UserDataMember_t{ FNV1A::HashConst("bEnable"), FNV1A::HashConst("bool"), &TextOverlayVar_t::bEnable },
+		UserDataMember_t{ FNV1A::HashConst("bIcon"), FNV1A::HashConst("bool"), &TextOverlayVar_t::bIcon },
 		UserDataMember_t{ FNV1A::HashConst("flThickness"), FNV1A::HashConst("float"), &TextOverlayVar_t::flThickness },
 		UserDataMember_t{ FNV1A::HashConst("colPrimary"), FNV1A::HashConst("Color_t"), &TextOverlayVar_t::colPrimary },
 		UserDataMember_t{ FNV1A::HashConst("colOutline"), FNV1A::HashConst("Color_t"), &TextOverlayVar_t::colOutline }

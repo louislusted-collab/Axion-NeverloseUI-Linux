@@ -259,6 +259,7 @@ void MENU::RenderMainWindow()
 					{
 						ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "General");
 						edited::Checkbox("Enabled", "Activate ragebot", &C_GET(bool, Vars.rage_enable));
+						edited::Checkbox("Hitscan", "Evaluate every enabled hitbox and use the best live point", &C_GET(bool, Vars.rage_hitscan));
 
 						const char* targets_select[3]{ CS_XOR("Distance"), CS_XOR("Damage"),CS_XOR("Crosshair") };
 						edited::Combo(CS_XOR("Target selection"), CS_XOR("Select target based on conditions"), &C_GET_ARRAY(int, 7, Vars.rage_target_select, current_weapon), targets_select, IM_ARRAYSIZE(targets_select), 6);
@@ -369,6 +370,9 @@ void MENU::RenderMainWindow()
 					edited::Keybind("Aim key", "Click the button, then press mouse 1-5", &C_GET(int, Vars.legit_ui_key));
 					edited::Checkbox("Toggle aim key", "Press once for on/off instead of holding", &C_GET(bool, Vars.legit_ui_toggle));
 					edited::SliderFloat("Smoothness (ms)", "Time used to settle onto the target", &C_GET(float, Vars.legit_ui_smoothness), 1.f, 500.f, "%.0f ms");
+					edited::SliderFloat("Acceleration (ms)", "Time to ramp from a gentle start to full aim speed; 0 disables the ramp", &C_GET(float, Vars.legit_ui_acceleration_ms), 0.f, 500.f, "%.0f ms");
+					edited::SliderFloat("Deceleration zone", "Start slowing this many degrees before the target; 0 disables it", &C_GET(float, Vars.legit_ui_deceleration_degrees), 0.f, 10.f, "%.1f deg");
+					edited::SliderFloat("Recovery (ms)", "Correction time after naturally crossing the target; this does not add artificial overshoot", &C_GET(float, Vars.legit_ui_recovery_ms), 5.f, 250.f, "%.0f ms");
 					edited::Checkbox("Draw FoV", "Draw the active aim field of view", &C_GET(bool, Vars.legit_ui_draw_fov));
 					edited::SliderFloat("FoV Size", "Field of view size", &C_GET(float, Vars.legit_ui_fov_size), 5.f, 60.f, "%.0f°");
 					edited::Checkbox("Recoil compensation", "Compensate the current camera punch", &C_GET(bool, Vars.legit_ui_recoil));
@@ -416,7 +420,9 @@ void MENU::RenderMainWindow()
 					edited::Checkbox(CS_XOR("Name"), CS_XOR("Shows player name"), &C_GET(TextOverlayVar_t, Vars.overlayName).bEnable);
 					edited::Checkbox(CS_XOR("Health bar"), CS_XOR("Shows player health"), &C_GET(BarOverlayVar_t, Vars.overlayHealthBar).bEnable);
 					edited::Checkbox(CS_XOR("Ammo bar"), CS_XOR("Shows player weapon ammo"), &C_GET(BarOverlayVar_t, Vars.AmmoBar).bEnable);
-					edited::Checkbox(CS_XOR("Weapon"), CS_XOR("Shows player weapon name"), &C_GET(TextOverlayVar_t, Vars.Weaponesp).bEnable);
+					edited::Checkbox(CS_XOR("Weapon"), CS_XOR("Shows the player's equipped weapon"), &C_GET(TextOverlayVar_t, Vars.Weaponesp).bEnable);
+					if (C_GET(TextOverlayVar_t, Vars.Weaponesp).bEnable)
+						edited::Checkbox(CS_XOR("Weapon icon"), CS_XOR("Use the equipped gun icon instead of text"), &C_GET(TextOverlayVar_t, Vars.Weaponesp).bIcon);
 					edited::Checkbox(CS_XOR("Skeleton"), CS_XOR("Shows player bones as skeleton"), &C_GET(bool, Vars.bSkeleton));
 
 					if (C_GET(bool, Vars.bSkeleton))
@@ -517,7 +523,12 @@ void MENU::RenderMainWindow()
 
 					// weapon
 					if (const auto& weaponOverlayConfig = C_GET(TextOverlayVar_t, Vars.Weaponesp); weaponOverlayConfig.bEnable)
-						context.AddComponent(new CTextComponent(true, true, SIDE_BOTTOM, DIR_BOTTOM, FONT::pVisual, CS_XOR("Weapon"), Vars.Weaponesp));
+					{
+						if (weaponOverlayConfig.bIcon && FONT::pEspIcons != nullptr)
+							context.AddComponent(new CTextComponent(true, true, SIDE_BOTTOM, DIR_BOTTOM, FONT::pEspIcons, CS_XOR("W"), Vars.Weaponesp));
+						else
+							context.AddComponent(new CTextComponent(true, true, SIDE_BOTTOM, DIR_BOTTOM, FONT::pVisual, CS_XOR("Weapon"), Vars.Weaponesp));
+					}
 
 					// armour
 					if (const auto& armorOverlayConfig = C_GET(BarOverlayVar_t, Vars.AmmoBar); armorOverlayConfig.bEnable)

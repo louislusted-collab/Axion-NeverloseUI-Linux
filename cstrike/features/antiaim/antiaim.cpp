@@ -36,10 +36,11 @@ void F::ANTIAIM::RunAA(CUserCmd* pCmd)
 	case 0:
 		break;
 	case 1:
-		flYaw += -180.f; // Backwards
+		flYaw += 180.f; // Backwards
 		break;
 	case 2:
-		flYaw += 180.f; // Forwards
+		// Forward keeps the current yaw. The previous +180 made both menu
+		// choices point backwards.
 		break;
 	default:
 		break;
@@ -50,10 +51,10 @@ void F::ANTIAIM::RunAA(CUserCmd* pCmd)
 	case 0:
 		break;
 	case 1: // Down
-		flPitch = 120.f;
+		flPitch = 89.f;
 		break;
 	case 2: // Up
-		flPitch = -120.f;
+		flPitch = -89.f;
 		break;
 	case 3: // Zero
 		flPitch = 0.f;
