@@ -574,17 +574,49 @@ namespace edited
         const float w = GetContentRegionMax().x - style.WindowPadding.x;
 
         const ImVec2 label_size = CalcTextSize(label, NULL, true);
-        const ImRect frame_bb(window->DC.CursorPos + ImVec2(180, 29), window->DC.CursorPos + ImVec2(w - 10, 39));
+        // The old widget registered a ten-pixel-high slider and then delegated
+        // activation to SliderBehavior without establishing a reliable active
+        // drag on SDL. Give the entire control a real hit target and map the
+        // held mouse position directly to the value.
+        const ImRect interaction_bb(window->DC.CursorPos + ImVec2(180, 12), window->DC.CursorPos + ImVec2(w - 10, 42));
+        const ImRect frame_bb(window->DC.CursorPos + ImVec2(180, 27), window->DC.CursorPos + ImVec2(w - 10, 37));
         const ImRect rect(window->DC.CursorPos, window->DC.CursorPos + ImVec2(w, 50));
 
-        const bool temp_input_allowed = (flags & ImGuiSliderFlags_NoInput) == 0;
         ItemSize(rect, 0.f);
-        if (!ItemAdd(frame_bb, id, &frame_bb)) return false;
+        if (!ItemAdd(interaction_bb, id, &interaction_bb)) return false;
 
         if (format == NULL) format = DataTypeGetInfo(data_type)->PrintFmt;
 
-        bool hovered = ItemHoverable(frame_bb, id), held, pressed = ButtonBehavior(frame_bb, id, &hovered, &held, 0);
-        bool temp_input_is_active = temp_input_allowed && TempInputIsActive(id);
+        bool hovered = false, held = false;
+        ButtonBehavior(interaction_bb, id, &hovered, &held, 0);
+
+        bool value_changed = false;
+        if (held && g.IO.MouseDown[0])
+        {
+            const float t = ImClamp((g.IO.MousePos.x - frame_bb.Min.x) / ImMax(1.f, frame_bb.GetWidth()), 0.f, 1.f);
+            if (data_type == ImGuiDataType_Float)
+            {
+                const float minimum = *static_cast<const float*>(p_min);
+                const float maximum = *static_cast<const float*>(p_max);
+                const float next = ImLerp(minimum, maximum, t);
+                if (*static_cast<float*>(p_data) != next)
+                {
+                    *static_cast<float*>(p_data) = next;
+                    value_changed = true;
+                }
+            }
+            else if (data_type == ImGuiDataType_S32)
+            {
+                const int minimum = *static_cast<const int*>(p_min);
+                const int maximum = *static_cast<const int*>(p_max);
+                const int next = minimum + static_cast<int>(ImFloor((maximum - minimum) * t + 0.5f));
+                if (*static_cast<int*>(p_data) != next)
+                {
+                    *static_cast<int*>(p_data) = next;
+                    value_changed = true;
+                }
+            }
+        }
 
         static std::map<ImGuiID, slider_state> anim;
         slider_state& state = anim[id];
@@ -598,13 +630,20 @@ namespace edited
 
         GetWindowDrawList()->AddRectFilled(frame_bb.Min, frame_bb.Max, GetColorU32(c::elements::background_widget), 2.f);
 
-        ImRect grab_bb;
-        const bool value_changed = SliderBehavior(ImRect(frame_bb.Min - ImVec2(0, 0), frame_bb.Max + ImVec2(6, 0)), id, data_type, p_data, p_min, p_max, format, flags, &grab_bb);
-
         if (value_changed) MarkItemEdited(id);
 
-        state.slow = ImLerp(state.slow, grab_bb.Min.x - (frame_bb.Min.x + 5), g.IO.DeltaTime * 25.f);
-        GetWindowDrawList()->AddRectFilled(frame_bb.Min, ImVec2(frame_bb.Min.x + 9, grab_bb.Max.y), VGetColorU32(c::accent, 1.f), 2.f);
+        float normalized = 0.f;
+        if (data_type == ImGuiDataType_Float)
+            normalized = (*static_cast<float*>(p_data) - *static_cast<const float*>(p_min)) /
+                ImMax(0.000001f, *static_cast<const float*>(p_max) - *static_cast<const float*>(p_min));
+        else if (data_type == ImGuiDataType_S32)
+            normalized = static_cast<float>(*static_cast<int*>(p_data) - *static_cast<const int*>(p_min)) /
+                ImMax(1.f, static_cast<float>(*static_cast<const int*>(p_max) - *static_cast<const int*>(p_min)));
+        normalized = ImClamp(normalized, 0.f, 1.f);
+        state.slow = ImLerp(state.slow, normalized, ImClamp(g.IO.DeltaTime * 18.f, 0.f, 1.f));
+        const float fill_x = ImLerp(frame_bb.Min.x, frame_bb.Max.x, state.slow);
+        GetWindowDrawList()->AddRectFilled(frame_bb.Min, ImVec2(fill_x, frame_bb.Max.y), VGetColorU32(c::accent, 1.f), 2.f);
+        GetWindowDrawList()->AddCircleFilled(ImVec2(fill_x, frame_bb.GetCenter().y), held ? 6.f : 5.f, VGetColorU32(c::accent, 1.f));
 
         char value_buf[64];
         const char* value_buf_end = value_buf + DataTypeFormatString(value_buf, IM_ARRAYSIZE(value_buf), data_type, p_data, format);

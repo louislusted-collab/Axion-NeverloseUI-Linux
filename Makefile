@@ -44,6 +44,7 @@ LDFLAGS = -Wl,-z,defs -lSDL3 -lvulkan -ldl -lpthread -lfreetype \
 OBJ_FILES  = linux/entry.cpp.o
 OBJ_FILES += linux/vulkan_hook.cpp.o
 OBJ_FILES += linux/native_esp.cpp.o
+OBJ_FILES += linux/native_chams.cpp.o
 OBJ_FILES += linux/stb_sprintf.cpp.o
 OBJ_FILES += cstrike/core/memory/cmodule.cpp.o
 OBJ_FILES += cstrike/core/memory/memadd.cpp.o

@@ -76,6 +76,9 @@ static VkResult (*orig_vkAcquireNextImage2KHR)(VkDevice,
                                                const VkAcquireNextImageInfoKHR*, uint32_t*) = nullptr;
 static bool (*orig_SDL_PollEvent)(SDL_Event*) = nullptr;
 static int (*orig_SDL_PeepEvents)(SDL_Event*, int, SDL_EventAction, Uint32, Uint32) = nullptr;
+static SDL_MouseButtonFlags (*orig_SDL_GetRelativeMouseState)(float*, float*) = nullptr;
+static std::atomic<float> native_aim_mouse_x{0.f};
+static std::atomic<float> native_aim_mouse_y{0.f};
 static funchook_t* late_hooks = nullptr;
 static VkInstance late_probe_instance = VK_NULL_HANDLE;
 static VkDevice late_probe_device = VK_NULL_HANDLE;
@@ -941,6 +944,21 @@ static int Late_SDL_PeepEvents(SDL_Event* events, int numevents,
     return result;
 }
 
+static SDL_MouseButtonFlags Late_SDL_GetRelativeMouseState(float* x, float* y)
+{
+    const SDL_MouseButtonFlags buttons = orig_SDL_GetRelativeMouseState(x, y);
+    const float aimX = native_aim_mouse_x.exchange(0.f, std::memory_order_acq_rel);
+    const float aimY = native_aim_mouse_y.exchange(0.f, std::memory_order_acq_rel);
+    if (!g_MenuOpen)
+    {
+        if (x != nullptr)
+            *x += aimX;
+        if (y != nullptr)
+            *y += aimY;
+    }
+    return buttons;
+}
+
 // ── LD_PRELOAD exports ─────────────────────────────────────────────────────
 extern "C" VkResult vkCreateInstance(const VkInstanceCreateInfo* ci, const VkAllocationCallbacks* alloc, VkInstance* inst)
 {
@@ -1148,6 +1166,12 @@ void InstallVulkanHook()
         orig_SDL_PeepEvents = reinterpret_cast<decltype(orig_SDL_PeepEvents)>(dlsym(sdl, "SDL_PeepEvents"));
         if (orig_SDL_PeepEvents)
             result = funchook_prepare(late_hooks, reinterpret_cast<void**>(&orig_SDL_PeepEvents), reinterpret_cast<void*>(Late_SDL_PeepEvents));
+        orig_SDL_GetRelativeMouseState = reinterpret_cast<decltype(orig_SDL_GetRelativeMouseState)>(
+            dlsym(sdl, "SDL_GetRelativeMouseState"));
+        PreviewDebug("[SDL] relative mouse aim hook target=%p", reinterpret_cast<void*>(orig_SDL_GetRelativeMouseState));
+        if (result == 0 && orig_SDL_GetRelativeMouseState)
+            result = funchook_prepare(late_hooks, reinterpret_cast<void**>(&orig_SDL_GetRelativeMouseState),
+                                      reinterpret_cast<void*>(Late_SDL_GetRelativeMouseState));
     }
     if (sdl) dlclose(sdl);
 
@@ -1170,6 +1194,12 @@ void EnableVulkanMenu()
 {
     g_MenuReady.store(true);
     L_PRINT(LOG_INFO) << "[VULKAN] Menu rendering enabled";
+}
+
+void QueueNativeAimDelta(float x, float y)
+{
+    native_aim_mouse_x.store(x, std::memory_order_release);
+    native_aim_mouse_y.store(y, std::memory_order_release);
 }
 
 #endif // __linux__

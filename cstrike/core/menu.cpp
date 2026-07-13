@@ -417,19 +417,18 @@ void MENU::RenderMainWindow()
 				
 					ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "Chams");
 
-					edited::Checkbox(CS_XOR("Model material tint"), CS_XOR("Colors the rendered player model surface; this is not glow"), &C_GET(bool, Vars.bVisualChams));
+					edited::Checkbox(CS_XOR("Player chams"), CS_XOR("Overrides enemy model materials; this is not glow"), &C_GET(bool, Vars.bVisualChams));
 					if (C_GET(bool, Vars.bVisualChams))
 						edited::Color(CS_XOR("##chamscolor"), CS_XOR("Change chams color"), &C_GET(ColorPickerVar_t, Vars.colVisualChams).colValue, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
-			
-				#ifdef _WIN32
-					edited::Checkbox(CS_XOR("Invisible"), CS_XOR("Shows player xqz chams"), &C_GET(bool, Vars.bVisualChamsIgnoreZ));
+					edited::Checkbox(CS_XOR("Through walls"), CS_XOR("Draws a second material pass with depth disabled"), &C_GET(bool, Vars.bVisualChamsIgnoreZ));
 					if (C_GET(bool, Vars.bVisualChamsIgnoreZ))
 						edited::Color(CS_XOR("##chamscolorxqz"), CS_XOR("Change xqz chams color"), &C_GET(ColorPickerVar_t, Vars.colVisualChamsIgnoreZ).colValue, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
 
+				#ifdef _WIN32
 					const char* chams[3]{ CS_XOR("Flat"), CS_XOR("Default"),CS_XOR("Illumin") };
 					edited::Combo(CS_XOR("Models"), CS_XOR(""), &C_GET(int, Vars.nVisualChamMaterial), chams, IM_ARRAYSIZE(chams), 3);
 				#else
-					ImGui::TextDisabled("Ignore-Z/custom-material chams require the native scene render hook.");
+					ImGui::TextDisabled("Native Linux: visible + no-depth material passes.");
 				#endif
 
 				}

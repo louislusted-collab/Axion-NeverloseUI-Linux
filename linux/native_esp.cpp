@@ -1,6 +1,8 @@
 #ifdef __linux__
 
 #include "native_esp.h"
+#include "native_chams.h"
+#include "vulkan_hook.h"
 
 #include "../dependencies/imgui/imgui.h"
 #include "../cstrike/core/interfaces.h"
@@ -20,6 +22,7 @@
 
 #include <cstring>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdarg>
@@ -186,15 +189,6 @@ void DrawSkeleton(ImDrawList* draw, CGameSceneNode* scene)
     }
 }
 
-void SetNativeModelTint(C_CSPlayerPawn* pawn, bool enabled)
-{
-    static const std::uint32_t colorOffset = SCHEMA::GetOffset("C_BaseModelEntity->m_clrRender");
-    if (pawn == nullptr || colorOffset == 0)
-        return;
-    const Color_t color = enabled ? C_GET(ColorPickerVar_t, Vars.colVisualChams).colValue : Color_t(255, 255, 255, 255);
-    *reinterpret_cast<Color_t*>(reinterpret_cast<std::uint8_t*>(pawn) + colorOffset) = color;
-}
-
 bool IsNativeButtonDown(int key)
 {
     float x = 0.f, y = 0.f;
@@ -329,7 +323,7 @@ void ApplyThirdPerson(C_CSPlayerPawn* localPawn)
 void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localController, C_CSPlayerPawn* localPawn)
 {
     if (!C_GET(bool, Vars.legit_ui_enable) || !C_GET(bool, Vars.legit_ui_aim) ||
-        MENU::bMainWindowOpened || native_thirdperson_active || native_view_angles == nullptr)
+        MENU::bMainWindowOpened || native_thirdperson_active || localPawn == nullptr)
         return;
 
     static bool previousKey = false;
@@ -350,7 +344,11 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
     if (localScene == nullptr)
         return;
     const Vector_t localEye = localScene->GetAbsOrigin() + localPawn->m_vecViewOffset();
-    const QAngle_t current = *native_view_angles;
+    static const std::uint32_t pawnViewAngleOffset = SCHEMA::GetOffset("C_BasePlayerPawn->v_angle");
+    if (pawnViewAngleOffset == 0)
+        return;
+    const QAngle_t current = *reinterpret_cast<QAngle_t*>(
+        reinterpret_cast<std::uint8_t*>(localPawn) + pawnViewAngleOffset);
     if (!current.IsValid())
         return;
 
@@ -435,10 +433,27 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
     const float step = std::clamp(frameMs / smoothnessMs, 0.f, 1.f);
     QAngle_t result(current.x + bestDelta.x * step, current.y + bestDelta.y * step, 0.f);
     result.Clamp();
-    *native_view_angles = result;
-    static const std::uint32_t pawnViewAngleOffset = SCHEMA::GetOffset("C_BasePlayerPawn->v_angle");
-    if (pawnViewAngleOffset != 0)
-        *reinterpret_cast<QAngle_t*>(reinterpret_cast<std::uint8_t*>(localPawn) + pawnViewAngleOffset) = result;
+
+    // Copy the old native internal's proven input path: feed the angular
+    // adjustment into SDL_GetRelativeMouseState so CreateMove consumes it as
+    // ordinary mouse input. Direct angle writes remain synchronized below as
+    // a visual/same-frame fallback.
+    const float sensitivity = CONVAR::sensitivity != nullptr
+        ? std::max(0.01f, CONVAR::sensitivity->GetValue<float>()) : 2.f;
+    const float yawScale = CONVAR::m_yaw != nullptr
+        ? std::max(0.0001f, std::fabs(CONVAR::m_yaw->GetValue<float>())) : 0.022f;
+    const float pitchScale = CONVAR::m_pitch != nullptr
+        ? std::max(0.0001f, std::fabs(CONVAR::m_pitch->GetValue<float>())) : 0.022f;
+    QueueNativeAimDelta(-(bestDelta.y * step) / (sensitivity * yawScale),
+                         (bestDelta.x * step) / (sensitivity * pitchScale));
+
+    *reinterpret_cast<QAngle_t*>(reinterpret_cast<std::uint8_t*>(localPawn) + pawnViewAngleOffset) = result;
+    if (native_view_angles != nullptr)
+        *native_view_angles = result;
+    // Keep the verified old-internal input-angle path in sync as a same-frame
+    // fallback; the pawn schema angle remains authoritative.
+    if (I::Input != nullptr)
+        *reinterpret_cast<QAngle_t*>(reinterpret_cast<std::uint8_t*>(I::Input) + 0x2D8) = result;
 }
 
 void ApplyNativeSkin(CGameEntitySystem* entities, C_CSPlayerPawn* localPawn)
@@ -544,6 +559,8 @@ void LinuxNativeEsp::Render()
     int enemy_pawns = 0;
     int projected_pawns = 0;
     int drawn = 0;
+    std::array<C_CSPlayerPawn*, 128> chamsTargets{};
+    std::size_t chamsTargetCount = 0;
     for (int index = 1; index <= 128; ++index)
     {
         CCSPlayerController* controller = entities->Get<CCSPlayerController>(index);
@@ -563,10 +580,10 @@ void LinuxNativeEsp::Render()
         ++alive_pawns;
 
         const bool isEnemy = pawn->GetTeam() != local_pawn->GetTeam();
-        const bool tintEnabled = enabled && isEnemy && C_GET(bool, Vars.bVisualChams);
-        SetNativeModelTint(pawn, tintEnabled);
         if (!isEnemy)
             continue;
+        if (chamsTargetCount < chamsTargets.size())
+            chamsTargets[chamsTargetCount++] = pawn;
         ++enemy_pawns;
 
         CGameSceneNode* scene = pawn->GetGameSceneNode();
@@ -664,6 +681,7 @@ void LinuxNativeEsp::Render()
         }
         ++drawn;
     }
+    NativeChams::UpdateTargets(chamsTargets.data(), chamsTargetCount);
 
     if ((++frame_counter % 300) == 0)
         EspLog("[ESP] local=%p entities=%d pawns=%d alive=%d enemies=%d projected=%d drawn=%d",

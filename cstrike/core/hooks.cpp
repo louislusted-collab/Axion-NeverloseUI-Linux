@@ -58,6 +58,7 @@
 #include <d3d11.h>
 #else
 #include "../linux/vulkan_hook.h"
+#include "../linux/native_chams.h"
 #endif
 #define SDK_SIG(sig) stb::simple_conversion::build<stb::fixed_string{sig}>::value
 #define MEMORY_VARIABLE(var) var, "H::" #var
@@ -135,9 +136,11 @@ bool H::Setup()
 	if (pIDXGIFactory) { pIDXGIFactory->Release(); pIDXGIFactory = nullptr; }
 #else
 	InstallVulkanHook();
+	if (!NativeChams::Install())
+		L_PRINT(LOG_WARNING) << CS_XOR("[Linux] Native scene chams hook was not installed");
 	L_PRINT(LOG_INFO) << CS_XOR("[Linux] Installed Vulkan hooks");
 	HLOG("[H::Setup] InstallVulkanHook OK\n");
-	HLOG("[H::Setup] Native Linux menu-only mode; skipping Windows gameplay hooks\n");
+	HLOG("[H::Setup] Native Linux Vulkan and scene hooks active; skipping Windows-only hooks\n");
 	HLOG("[H::Setup] returning true\n");
 	return true;
 
@@ -342,8 +345,7 @@ void H::Destroy()
 	SilentInput.UnhookAll();
 	SilentEntitySystem.UnhookAll();
 #else
-	// Native Linux currently installs only preload interposers; there are no
-	// gameplay hooks or skin state to tear down.
+	NativeChams::Destroy();
 	MH_Uninitialize();
 #endif
 }
