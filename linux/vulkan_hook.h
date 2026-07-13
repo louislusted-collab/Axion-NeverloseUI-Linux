@@ -18,6 +18,11 @@ void EnableVulkanMenu();
 bool QueueNativeAimDelta(float x, float y);
 void ClearNativeAimDelta();
 
+// Keeps CS2's native third-person input flag synchronized during the game's
+// SDL input sample. Writing this only from Vulkan present is too late for the
+// current Linux camera update and the game can discard it before use.
+void SetNativeThirdPersonInput(bool enabled);
+
 // Loads/unloads cs2.png after the ImGui Vulkan backend is ready.
 // AXION_PREVIEW_PNG may be used to override the image path.
 void LoadCheatPreviewTexture();

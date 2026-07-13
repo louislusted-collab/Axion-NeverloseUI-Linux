@@ -30,6 +30,7 @@
 #include "../cstrike/utilities/inputsystem.h"
 #include "../cstrike/utilities/log.h"
 #include "../cstrike/utilities/draw.h"
+#include "../cstrike/core/interfaces.h"
 #include "../cstrike/core/menu.h"
 #include "native_esp.h"
 
@@ -81,6 +82,7 @@ static SDL_MouseButtonFlags (*orig_SDL_GetRelativeMouseState)(float*, float*) = 
 static std::atomic<float> native_aim_mouse_x{0.f};
 static std::atomic<float> native_aim_mouse_y{0.f};
 static std::atomic<std::uint64_t> native_aim_sdl_samples{0};
+static std::atomic<bool> native_thirdperson_input{false};
 static funchook_t* late_hooks = nullptr;
 static VkInstance late_probe_instance = VK_NULL_HANDLE;
 static VkDevice late_probe_device = VK_NULL_HANDLE;
@@ -948,7 +950,20 @@ static int Late_SDL_PeepEvents(SDL_Event* events, int numevents,
 
 static SDL_MouseButtonFlags Late_SDL_GetRelativeMouseState(float* x, float* y)
 {
+    const auto syncThirdPerson = [] {
+        if (I::Input != nullptr)
+        {
+            auto* input = reinterpret_cast<std::uint8_t*>(I::Input);
+            *reinterpret_cast<bool*>(input + 0x229) =
+                native_thirdperson_input.load(std::memory_order_acquire);
+        }
+    };
+
+    // CS2 may refresh the input object inside the original sampler. Apply on
+    // both sides so the camera update that follows always observes our state.
+    syncThirdPerson();
     const SDL_MouseButtonFlags buttons = orig_SDL_GetRelativeMouseState(x, y);
+    syncThirdPerson();
     native_aim_sdl_samples.fetch_add(1, std::memory_order_relaxed);
     const float aimX = native_aim_mouse_x.exchange(0.f, std::memory_order_acq_rel);
     const float aimY = native_aim_mouse_y.exchange(0.f, std::memory_order_acq_rel);
@@ -1220,6 +1235,18 @@ void ClearNativeAimDelta()
 {
     native_aim_mouse_x.store(0.f, std::memory_order_release);
     native_aim_mouse_y.store(0.f, std::memory_order_release);
+}
+
+void SetNativeThirdPersonInput(bool enabled)
+{
+    native_thirdperson_input.store(enabled, std::memory_order_release);
+    // Also update immediately. The SDL hook repeats this at the correct camera
+    // input timing and is the authoritative path.
+    if (I::Input != nullptr)
+    {
+        auto* input = reinterpret_cast<std::uint8_t*>(I::Input);
+        *reinterpret_cast<bool*>(input + 0x229) = enabled;
+    }
 }
 
 #endif // __linux__

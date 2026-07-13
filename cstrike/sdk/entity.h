@@ -1217,7 +1217,9 @@ public:
 	SCHEMA_ADD_FIELD(float, GetFlashDuration, CS_XOR("C_CSPlayerPawnBase->m_flFlashDuration"));
 	SCHEMA_ADD_FIELD(Vector_t, GetLastSmokeOverlayColor, CS_XOR("C_CSPlayerPawnBase->m_vLastSmokeOverlayColor"));
 	SCHEMA_ADD_FIELD(int, GetSurvivalTeam, CS_XOR("C_CSPlayerPawnBase->m_nSurvivalTeam")); // danger zone
-	SCHEMA_ADD_FIELD(std::int32_t, GetArmorValue, CS_XOR("C_CSPlayerPawnBase->m_ArmorValue"));
+	// m_ArmorValue moved to C_CSPlayerPawn in the current client schema. Using
+	// the former base class resolves to offset zero on Linux, breaking armor ESP.
+	SCHEMA_ADD_FIELD(std::int32_t, GetArmorValue, CS_XOR("C_CSPlayerPawn->m_ArmorValue"));
 	SCHEMA_ADD_OFFSET(bool, m_bInLanding, 0x17C0);
 	SCHEMA_ADD_FIELD(float, m_flLandingTime, CS_XOR("C_CSPlayerPawnBase->m_flLandingTime"));
 

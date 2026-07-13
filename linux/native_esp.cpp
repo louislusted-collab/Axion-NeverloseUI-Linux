@@ -341,8 +341,13 @@ void ApplyThirdPerson(C_CSPlayerPawn* localPawn)
     {
         const bool pressed = IsNativeButtonDown(C_GET(int, Vars.thirdperson_ui_key));
         if (!wasEnabled)
-            native_thirdperson_active = false;
-        if (pressed && !wasPressed && !MENU::bMainWindowOpened)
+        {
+            // Enabling the checkbox should visibly enable the feature. The
+            // bind remains available to toggle it afterward.
+            native_thirdperson_active = true;
+            wasPressed = pressed;
+        }
+        else if (pressed && !wasPressed && !MENU::bMainWindowOpened)
             native_thirdperson_active = !native_thirdperson_active;
         wasPressed = pressed;
     }
@@ -350,11 +355,7 @@ void ApplyThirdPerson(C_CSPlayerPawn* localPawn)
 
     const bool enabled = featureEnabled && native_thirdperson_active;
     const float distance = std::clamp(C_GET(float, Vars.flThirdperson), 50.f, 300.f);
-    if (I::Input != nullptr)
-    {
-        auto* input = reinterpret_cast<std::uint8_t*>(I::Input);
-        *reinterpret_cast<bool*>(input + 0x229) = enabled;
-    }
+    SetNativeThirdPersonInput(enabled);
 
     if (CONVAR::cl_thirdperson != nullptr)
         CONVAR::cl_thirdperson->GetValue<bool>() = enabled;
@@ -1259,6 +1260,8 @@ void LinuxNativeEsp::Render()
     int enemy_pawns = 0;
     int projected_pawns = 0;
     int drawn = 0;
+    int armorFlagsDrawn = 0;
+    int kitFlagsDrawn = 0;
     std::array<C_CSPlayerPawn*, 128> chamsTargets{};
     std::size_t chamsTargetCount = 0;
     for (int index = 1; index <= 128; ++index)
@@ -1372,20 +1375,24 @@ void LinuxNativeEsp::Render()
             DrawOutlinedText(draw, ImVec2(max.x + 4.f, min.y + flagOffset), armor,
                              config.colPrimary.GetU32(), config.colOutline.GetU32());
             flagOffset += ImGui::GetTextLineHeight();
+            ++armorFlagsDrawn;
         }
         if ((flags & FLAGS_DEFUSER) != 0 && controller->m_bPawnHasDefuser())
         {
             const auto& config = C_GET(TextOverlayVar_t, Vars.KitFlag);
             DrawOutlinedText(draw, ImVec2(max.x + 4.f, min.y + flagOffset), "KIT",
                              config.colPrimary.GetU32(), config.colOutline.GetU32());
+            ++kitFlagsDrawn;
         }
         ++drawn;
     }
     NativeChams::UpdateTargets(chamsTargets.data(), chamsTargetCount);
 
     if ((++frame_counter % 300) == 0)
-        EspLog("[ESP] local=%p entities=%d pawns=%d alive=%d enemies=%d projected=%d drawn=%d",
-               local_controller, found_entities, found_pawns, alive_pawns, enemy_pawns, projected_pawns, drawn);
+        EspLog("[ESP] local=%p entities=%d pawns=%d alive=%d enemies=%d projected=%d drawn=%d flagmask=0x%x armorflags=%d kitflags=%d",
+               local_controller, found_entities, found_pawns, alive_pawns, enemy_pawns,
+               projected_pawns, drawn, C_GET(unsigned int, Vars.pEspFlags),
+               armorFlagsDrawn, kitFlagsDrawn);
 }
 
 #endif
