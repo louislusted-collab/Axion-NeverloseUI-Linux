@@ -742,7 +742,7 @@ void MENU::RenderMainWindow()
 						ImGui::SliderFloat("Wear", &C_GET(float, Vars.skin_ui_wear), 0.000001f, 1.f, "%.6f", ImGuiSliderFlags_Logarithmic);
 						ImGui::SetNextItemWidth(240.f);
 						ImGui::InputInt("StatTrak (-1 off)", &C_GET(int, Vars.skin_ui_stattrak));
-						ImGui::TextDisabled("Use a paint kit ID supported by the weapon; switching weapons forces another refresh.");
+						ImGui::TextDisabled("Use a paint kit ID supported by the weapon; changes regenerate world and view-model materials.");
 					}
 					edited::EndChild();
 				#else

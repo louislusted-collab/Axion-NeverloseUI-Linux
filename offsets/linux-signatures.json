@@ -2,7 +2,7 @@
   "format": 1,
   "platform": "linux-x86_64-native",
   "channel": "stable",
-  "updated_at": "2026-07-12T19:00:00Z",
+  "updated_at": "2026-07-13T12:00:00Z",
   "source": "Axion native ELF validation; patterns derived from a2x/cs2-dumper linux branch",
   "schema": {
     "mode": "runtime",
@@ -56,6 +56,12 @@
       "pattern": "89 83 ? ? ? ? B8 ? ? ? ? 5B",
       "occurrences": 1,
       "operations": [{ "type": "slice", "start": 2, "end": 4 }]
+    },
+    "fnRegenerateWeaponSkins": {
+      "module": "libclient.so",
+      "pattern": "55 48 89 E5 41 55 44 0F B6 EF 41 54 53 48 83 EC 28 E8 ? ? ? ? 48 85 C0 74 7D",
+      "occurrences": 1,
+      "operations": []
     }
   }
 }

@@ -23,6 +23,7 @@
 #include <cstring>
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cmath>
 #include <cstdio>
 #include <cstdarg>
@@ -41,6 +42,29 @@ QAngle_t* native_view_angles = nullptr;
 bool attempted_matrix_lookup = false;
 std::uint64_t frame_counter = 0;
 bool native_thirdperson_active = false;
+
+struct NativeEconAttribute
+{
+    void* vtable = nullptr;
+    void* owner = nullptr;
+    std::array<std::byte, 0x20> padding{};
+    std::uint16_t definition = 0;
+    std::uint16_t definitionPadding = 0;
+    float value = 0.f;
+    float initialValue = 0.f;
+    std::int32_t refundableCurrency = 0;
+    bool setBonus = false;
+    std::array<std::byte, 7> tailPadding{};
+};
+static_assert(sizeof(NativeEconAttribute) == 0x48);
+
+struct TemporarySkinAttributes
+{
+    C_NetworkUtlVectorBase<NativeEconAttribute>* list = nullptr;
+    std::uint32_t originalSize = 0;
+    NativeEconAttribute* originalElements = nullptr;
+    std::array<NativeEconAttribute, 3> attributes{};
+};
 
 void EspLog(const char* message, ...)
 {
@@ -496,6 +520,8 @@ void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localCont
     static const std::uint32_t attributesInitialized = SCHEMA::GetOffset("C_EconEntity->m_bAttributesInitialized");
     static const std::uint32_t attachmentDirty = SCHEMA::GetOffset("C_EconEntity->m_bAttachmentDirty");
     static const std::uint32_t itemOffset = SCHEMA::GetOffset("C_AttributeContainer->m_Item");
+    static const std::uint32_t attributeList = SCHEMA::GetOffset("C_EconItemView->m_AttributeList");
+    static const std::uint32_t attributes = SCHEMA::GetOffset("CAttributeList->m_Attributes");
     static const std::uint32_t idHigh = SCHEMA::GetOffset("C_EconItemView->m_iItemIDHigh");
     static const std::uint32_t idLow = SCHEMA::GetOffset("C_EconItemView->m_iItemIDLow");
     static const std::uint32_t accountId = SCHEMA::GetOffset("C_EconItemView->m_iAccountID");
@@ -522,14 +548,53 @@ void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localCont
     const int desiredStatTrak = C_GET(int, Vars.skin_ui_stattrak);
     const std::uint32_t ownerAccount = steamId == 0 ? 0U : static_cast<std::uint32_t>(
         *reinterpret_cast<const std::uint64_t*>(reinterpret_cast<std::uint8_t*>(localController) + steamId));
-    static int dirtyId = -1;
     static bool loggedOffsets = false;
     if (!loggedOffsets)
     {
-        EspLog("[skin] offsets weapons=0x%x attr=0x%x item=0x%x paint=0x%x wear=0x%x account=0x%x",
-            myWeapons, attributeManager, itemOffset, paintKit, wear, accountId);
+        EspLog("[skin] offsets weapons=0x%x attr=0x%x item=0x%x list=0x%x/0x%x paint=0x%x wear=0x%x account=0x%x",
+            myWeapons, attributeManager, itemOffset, attributeList, attributes, paintKit, wear, accountId);
         loggedOffsets = true;
     }
+
+    std::array<TemporarySkinAttributes, 64> temporaryAttributes{};
+    std::size_t temporaryAttributeCount = 0;
+    bool shouldRegenerate = false;
+
+    const auto setMeshMask = [&](CGameSceneNode* scene, std::uint64_t mask) {
+        if (scene == nullptr || modelState == 0 || meshGroupMask == 0)
+            return;
+        auto* state = reinterpret_cast<std::uint8_t*>(scene) + modelState;
+        *reinterpret_cast<std::uint64_t*>(state + meshGroupMask) = mask;
+    };
+
+    const auto prepareAttributes = [&](std::uint8_t* item) {
+        if (attributeList == 0 || attributes == 0 || temporaryAttributeCount >= temporaryAttributes.size())
+            return false;
+        auto* list = reinterpret_cast<C_NetworkUtlVectorBase<NativeEconAttribute>*>(
+            item + attributeList + attributes);
+        if (list->nSize != 0 || list->pElements != nullptr)
+            return false;
+
+        TemporarySkinAttributes& temporary = temporaryAttributes[temporaryAttributeCount++];
+        temporary.list = list;
+        temporary.originalSize = list->nSize;
+        temporary.originalElements = list->pElements;
+        const std::array<std::pair<std::uint16_t, float>, 3> values{{
+            {6, static_cast<float>(desiredPaint)},
+            {7, static_cast<float>(desiredSeed)},
+            {8, desiredWear},
+        }};
+        for (std::size_t index = 0; index < temporary.attributes.size(); ++index)
+        {
+            temporary.attributes[index].owner = item;
+            temporary.attributes[index].definition = values[index].first;
+            temporary.attributes[index].value = values[index].second;
+            temporary.attributes[index].initialValue = values[index].second;
+        }
+        list->pElements = temporary.attributes.data();
+        list->nSize = static_cast<std::uint32_t>(temporary.attributes.size());
+        return true;
+    };
 
     const auto applyWeapon = [&](C_CSWeaponBase* weapon) {
         if (weapon == nullptr)
@@ -540,10 +605,7 @@ void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localCont
         const bool changed = previousPaint != desiredPaint ||
             (seed != 0 && *reinterpret_cast<const std::int32_t*>(base + seed) != desiredSeed) ||
             (wear != 0 && std::fabs(*reinterpret_cast<const float*>(base + wear) - desiredWear) > 0.000001f);
-        if (changed)
-            dirtyId = dirtyId == -1 ? -2 : -1;
-
-        *reinterpret_cast<std::int32_t*>(item + idHigh) = dirtyId;
+        *reinterpret_cast<std::int32_t*>(item + idHigh) = -1;
         if (idLow != 0)
             *reinterpret_cast<std::int32_t*>(item + idLow) = -1;
         if (accountId != 0)
@@ -575,12 +637,14 @@ void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localCont
         if (statTrak != 0)
             *reinterpret_cast<std::int32_t*>(base + statTrak) = desiredStatTrak;
 
-        CGameSceneNode* weaponScene = weapon->GetGameSceneNode();
-        if (weaponScene != nullptr && modelState != 0 && meshGroupMask != 0)
-            *reinterpret_cast<std::uint64_t*>(reinterpret_cast<std::uint8_t*>(weaponScene) + modelState + meshGroupMask) = 2;
+        setMeshMask(weapon->GetGameSceneNode(), 2);
         if (changed)
+        {
+            prepareAttributes(item);
+            shouldRegenerate = true;
             EspLog("[skin] applied weapon=%p paint=%d previous=%d seed=%d wear=%.6f account=%u",
                 weapon, desiredPaint, previousPaint, desiredSeed, desiredWear, ownerAccount);
+        }
     };
 
     bool appliedCollection = false;
@@ -598,6 +662,39 @@ void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localCont
     }
     if (!appliedCollection)
         applyWeapon(entities->Get<C_CSWeaponBase>(services->m_hActiveWeapon()));
+
+    CCSPlayer_ViewModelServices* viewModelServices = localPawn->GetViewModelServices();
+    C_CSGOViewModel* viewModel = viewModelServices != nullptr
+        ? entities->Get<C_CSGOViewModel>(viewModelServices->m_hViewModel())
+        : nullptr;
+    if (viewModel != nullptr)
+        setMeshMask(viewModel->GetGameSceneNode(), 2);
+
+    using RegenerateWeaponSkinsFn = void(*)(bool);
+    static RegenerateWeaponSkinsFn regenerateWeaponSkins = nullptr;
+    static bool attemptedRegenerateLookup = false;
+    if (!attemptedRegenerateLookup)
+    {
+        attemptedRegenerateLookup = true;
+        regenerateWeaponSkins = reinterpret_cast<RegenerateWeaponSkinsFn>(MEM::FindPattern(
+            CLIENT_DLL,
+            "55 48 89 E5 41 55 44 0F B6 EF 41 54 53 48 83 EC 28 E8 ? ? ? ? 48 85 C0 74 7D"));
+        EspLog("[skin] native regenerate callback=%p", regenerateWeaponSkins);
+    }
+    if (shouldRegenerate && regenerateWeaponSkins != nullptr)
+    {
+        regenerateWeaponSkins(false);
+        EspLog("[skin] regenerated %zu temporary attribute lists", temporaryAttributeCount);
+    }
+
+    // The engine consumes these lists synchronously. Restore its original
+    // vectors immediately so no entity retains a pointer into our stack.
+    for (std::size_t index = 0; index < temporaryAttributeCount; ++index)
+    {
+        TemporarySkinAttributes& temporary = temporaryAttributes[index];
+        temporary.list->pElements = temporary.originalElements;
+        temporary.list->nSize = temporary.originalSize;
+    }
 }
 }
 
