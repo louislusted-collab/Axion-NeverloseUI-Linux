@@ -423,14 +423,20 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
     static bool previousKey = false;
     static bool toggled = false;
     static bool previousToggleMode = false;
+    static int previousKeyCode = 0;
     const bool toggleMode = C_GET(bool, Vars.legit_ui_toggle);
-    const bool keyDown = IsNativeButtonDown(C_GET(int, Vars.legit_ui_key));
-    if (toggleMode != previousToggleMode)
+    const int keyCode = C_GET(int, Vars.legit_ui_key);
+    const bool keyDown = IsNativeButtonDown(keyCode);
+    if (toggleMode != previousToggleMode || keyCode != previousKeyCode)
+    {
         toggled = false;
+        previousKey = false;
+    }
     if (toggleMode && keyDown && !previousKey)
         toggled = !toggled;
     previousKey = keyDown;
     previousToggleMode = toggleMode;
+    previousKeyCode = keyCode;
     if (!(toggleMode ? toggled : keyDown))
     {
         if (diagnose)
@@ -444,18 +450,84 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
         return;
     const Vector_t localEye = localScene->GetAbsOrigin() + localPawn->m_vecViewOffset();
     static const std::uint32_t pawnViewAngleOffset = SCHEMA::GetOffset("C_BasePlayerPawn->v_angle");
-    if (pawnViewAngleOffset == 0 && native_view_angles == nullptr)
+    static const std::uint32_t pawnEyeAngleOffset = SCHEMA::GetOffset("C_CSPlayerPawn->m_angEyeAngles");
+    if (pawnViewAngleOffset == 0 && pawnEyeAngleOffset == 0 && native_view_angles == nullptr)
         return;
-    QAngle_t current = native_view_angles != nullptr
-        ? *native_view_angles
-        : *reinterpret_cast<QAngle_t*>(reinterpret_cast<std::uint8_t*>(localPawn) + pawnViewAngleOffset);
-    if (!current.IsValid())
+
+    // The current Linux dwViewAngles export resolves to a zero-filled global
+    // in live CS2. The pawn fields are the authoritative angles used by the
+    // old working internal and are schema-resolved every update.
+    QAngle_t current{};
+    const char* angleSource = "none";
+    const auto usableAngle = [](const QAngle_t& angle) {
+        return angle.IsValid() && std::fabs(angle.x) <= 180.f &&
+            std::fabs(angle.y) <= 360.f && std::fabs(angle.z) <= 180.f;
+    };
+    if (pawnViewAngleOffset != 0)
+    {
+        current = *reinterpret_cast<QAngle_t*>(
+            reinterpret_cast<std::uint8_t*>(localPawn) + pawnViewAngleOffset);
+        angleSource = "pawn.v_angle";
+    }
+    if (!usableAngle(current) && pawnEyeAngleOffset != 0)
+    {
+        current = *reinterpret_cast<QAngle_t*>(
+            reinterpret_cast<std::uint8_t*>(localPawn) + pawnEyeAngleOffset);
+        angleSource = "pawn.eye";
+    }
+    if (!usableAngle(current) && native_view_angles != nullptr)
+    {
+        current = *native_view_angles;
+        angleSource = "global";
+    }
+    if (!usableAngle(current))
         return;
 
     float bestFov = std::clamp(C_GET(float, Vars.legit_ui_fov_size), 5.f, 60.f);
     QAngle_t bestDelta{};
     bool found = false;
     constexpr float degrees = 180.f / 3.14159265358979323846f;
+
+    QAngle_t recoilCorrection{};
+    if (C_GET(bool, Vars.legit_ui_recoil))
+    {
+        static const std::uint32_t cameraPunchOffset =
+            SCHEMA::GetOffset("CPlayer_CameraServices->m_vecCsViewPunchAngle");
+        CPlayer_CameraServices* camera = localPawn->GetCameraServices();
+        if (camera != nullptr && cameraPunchOffset != 0)
+        {
+            recoilCorrection = *reinterpret_cast<QAngle_t*>(
+                reinterpret_cast<std::uint8_t*>(camera) + cameraPunchOffset);
+            recoilCorrection.x *= 2.f;
+            recoilCorrection.y *= 2.f;
+        }
+    }
+
+    const auto considerTarget = [&](C_CSPlayerPawn* pawn, Vector_t target) {
+        if (C_GET(bool, Vars.legit_ui_prediction))
+            target += pawn->GetAbsVelocity() *
+                (std::clamp(C_GET(float, Vars.legit_ui_prediction_ms), 0.f, 250.f) / 1000.f);
+
+        const Vector_t difference = target - localEye;
+        const float horizontal = std::hypot(difference.x, difference.y);
+        if (horizontal < 0.001f)
+            return;
+
+        QAngle_t wanted(-std::atan2(difference.z, horizontal) * degrees,
+                         std::atan2(difference.y, difference.x) * degrees, 0.f);
+        wanted.x -= recoilCorrection.x;
+        wanted.y -= recoilCorrection.y;
+        const QAngle_t delta(std::remainder(wanted.x - current.x, 360.f),
+                             std::remainder(wanted.y - current.y, 360.f), 0.f);
+        const float fov = std::hypot(delta.x, delta.y);
+        if (fov < bestFov)
+        {
+            bestFov = fov;
+            bestDelta = delta;
+            found = true;
+        }
+    };
+
     for (int index = 1; index <= 128; ++index)
     {
         CCSPlayerController* controller = entities->Get<CCSPlayerController>(index);
@@ -468,7 +540,6 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
         if (scene == nullptr || scene->IsDormant())
             continue;
 
-        Vector_t target{};
         const int candidates[] = {
             C_GET(bool, Vars.legit_ui_bone_head) ? 5 : -1,
             C_GET(bool, Vars.legit_ui_bone_torso) ? 3 : -1,
@@ -480,53 +551,21 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
         bool foundBone = false;
         for (const int bone : candidates)
         {
+            Vector_t target{};
             if (bone >= 0 && GetLiveBonePosition(scene, bone, target))
             {
                 foundBone = true;
-                break;
+                considerTarget(pawn, target);
             }
         }
         if (!foundBone)
-            target = scene->GetAbsOrigin() + pawn->m_vecViewOffset();
-        if (C_GET(bool, Vars.legit_ui_prediction))
-            target += pawn->GetAbsVelocity() *
-                (std::clamp(C_GET(float, Vars.legit_ui_prediction_ms), 0.f, 250.f) / 1000.f);
-
-        const Vector_t difference = target - localEye;
-        const float horizontal = std::hypot(difference.x, difference.y);
-        if (horizontal < 0.001f)
-            continue;
-
-        QAngle_t wanted(-std::atan2(difference.z, horizontal) * degrees,
-                        std::atan2(difference.y, difference.x) * degrees, 0.f);
-        if (C_GET(bool, Vars.legit_ui_recoil))
-        {
-            static const std::uint32_t cameraPunchOffset =
-                SCHEMA::GetOffset("CPlayer_CameraServices->m_vecCsViewPunchAngle");
-            CPlayer_CameraServices* camera = localPawn->GetCameraServices();
-            if (camera != nullptr && cameraPunchOffset != 0)
-            {
-                const auto punch = *reinterpret_cast<QAngle_t*>(
-                    reinterpret_cast<std::uint8_t*>(camera) + cameraPunchOffset);
-                wanted.x -= punch.x * 2.f;
-                wanted.y -= punch.y * 2.f;
-            }
-        }
-        const QAngle_t delta(std::remainder(wanted.x - current.x, 360.f),
-                             std::remainder(wanted.y - current.y, 360.f), 0.f);
-        const float fov = std::hypot(delta.x, delta.y);
-        if (fov < bestFov)
-        {
-            bestFov = fov;
-            bestDelta = delta;
-            found = true;
-        }
+            considerTarget(pawn, scene->GetAbsOrigin() + pawn->m_vecViewOffset());
     }
     if (!found)
     {
         if (diagnose)
-            EspLog("[legit] key active but no target in %.1f degree fov current=%.1f,%.1f",
-                C_GET(float, Vars.legit_ui_fov_size), current.x, current.y);
+            EspLog("[legit] key active but no target in %.1f degree fov current=%.1f,%.1f source=%s",
+                C_GET(float, Vars.legit_ui_fov_size), current.x, current.y, angleSource);
         return;
     }
 
@@ -553,8 +592,8 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
     const bool inputAccepted = QueueNativeAimDelta(mouseX, mouseY);
 
     if (diagnose)
-        EspLog("[legit] mouse fov=%.2f step=%.3f delta=%.2f,%.2f accepted=%d current=%.1f,%.1f result=%.1f,%.1f",
-            bestFov, step, mouseX, mouseY, inputAccepted, current.x, current.y, result.x, result.y);
+        EspLog("[legit] mouse fov=%.2f step=%.3f delta=%.2f,%.2f accepted=%d current=%.1f,%.1f result=%.1f,%.1f source=%s",
+            bestFov, step, mouseX, mouseY, inputAccepted, current.x, current.y, result.x, result.y, angleSource);
 }
 
 void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localController, C_CSPlayerPawn* localPawn)
