@@ -32,6 +32,11 @@ bool IsNativeInputHookInstalled();
 // current Linux camera update and the game can discard it before use.
 void SetNativeThirdPersonInput(bool enabled);
 
+// Native movement state consumed by CCSGOInput::CreateMove. These use the
+// verified input axes/button block and never create a kernel input device.
+void SetNativeBhopInput(bool enabled, bool spaceHeld, bool onGround);
+void SetNativeStrafeInput(bool enabled, float forward, float left);
+
 // Loads/unloads cs2.png after the ImGui Vulkan backend is ready.
 // AXION_PREVIEW_PNG may be used to override the image path.
 void LoadCheatPreviewTexture();

@@ -154,9 +154,10 @@ bool C::Setup(const wchar_t* wszDefaultFileName)
 	});
 
 	AddUserType(FNV1A::HashConst("BarOverlayVar_t"),
-	{ 
+	{
 		UserDataMember_t{ FNV1A::HashConst("bEnable"), FNV1A::HashConst("bool"), &BarOverlayVar_t::bEnable },
 		UserDataMember_t{ FNV1A::HashConst("bGradient"), FNV1A::HashConst("bool"), &BarOverlayVar_t::bGradient },
+		UserDataMember_t{ FNV1A::HashConst("bShowValue"), FNV1A::HashConst("bool"), &BarOverlayVar_t::bShowValue },
 		UserDataMember_t{ FNV1A::HashConst("bUseFactorColor"), FNV1A::HashConst("bool"), &BarOverlayVar_t::bUseFactorColor },
 		UserDataMember_t{ FNV1A::HashConst("flThickness"), FNV1A::HashConst("float"), &BarOverlayVar_t::flThickness },
 		UserDataMember_t{ FNV1A::HashConst("colPrimary"), FNV1A::HashConst("Color_t"), &BarOverlayVar_t::colPrimary },

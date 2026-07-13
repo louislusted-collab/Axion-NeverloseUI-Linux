@@ -62,7 +62,14 @@ static constexpr const char* arrMenuAddition[] = {
 };
 static constexpr const char* arrEspFlags[] = {
 	"Armor",
-	"KIT"
+	"KIT",
+	"Scoped",
+	"Flashed",
+	"Defusing",
+	"Planting",
+	"Reloading",
+	"Bomb carrier",
+	"Ping"
 };
 static constexpr const char* arrLegitCond[] = {
 	"In air",
@@ -406,6 +413,12 @@ void MENU::RenderMainWindow()
 				{
 					ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "Removals");
 					edited::Checkbox("Remove Smoke", "Uses the safe particle-render path; other particle effects may also be hidden", &C_GET(bool, Vars.bRemoveSmoke));
+					edited::Checkbox("Reduce Flash", "Limits the local flash overlay without touching grenade entities", &C_GET(bool, Vars.bRemoveFlash));
+					if (C_GET(bool, Vars.bRemoveFlash))
+						edited::SliderFloat("Flash opacity", "Maximum flash overlay alpha", &C_GET(float, Vars.flFlashOpacity), 0.f, 255.f, "%.0f / 255");
+					edited::Checkbox("Remove Scope Overlay", "Disables the sniper zoom stencil overlay", &C_GET(bool, Vars.bRemoveScopeOverlay));
+					edited::Checkbox("Remove Aim Punch", "Removes camera-only recoil punch; weapon recoil is unchanged", &C_GET(bool, Vars.bRemoveAimPunch));
+					edited::Checkbox("Remove Camera Blur", "Disables depth-of-field blur controls", &C_GET(bool, Vars.bRemoveMotionBlur));
 				}
 				edited::EndChild();
 			}
@@ -417,8 +430,29 @@ void MENU::RenderMainWindow()
 
 					edited::Checkbox(CS_XOR("Enable"), CS_XOR(""), &C_GET(bool, Vars.bVisualOverlay));
 					edited::Checkbox(CS_XOR("Bounding box"), CS_XOR("Shows player bounding box"), &C_GET(FrameOverlayVar_t, Vars.overlayBox).bEnable);
+					if (C_GET(FrameOverlayVar_t, Vars.overlayBox).bEnable)
+					{
+						const char* boxStyles[2]{ CS_XOR("Full"), CS_XOR("Corner") };
+						edited::Combo(CS_XOR("Box style"), CS_XOR("Full rectangle or corner segments"),
+							&C_GET(int, Vars.esp_box_style), boxStyles, IM_ARRAYSIZE(boxStyles), 2);
+						edited::SliderFloat(CS_XOR("Box thickness"), CS_XOR("Visible line thickness"),
+							&C_GET(FrameOverlayVar_t, Vars.overlayBox).flThickness, 1.f, 5.f, "%.1f px");
+						edited::Color(CS_XOR("##boxprimary"), CS_XOR("Box color"),
+							&C_GET(FrameOverlayVar_t, Vars.overlayBox).colPrimary,
+							ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
+					}
+					edited::Checkbox(CS_XOR("Filled box"), CS_XOR("Draws a translucent background inside the player box"), &C_GET(bool, Vars.esp_box_fill));
+					if (C_GET(bool, Vars.esp_box_fill))
+						edited::Color(CS_XOR("##boxfill"), CS_XOR("Filled box color"), &C_GET(ColorPickerVar_t, Vars.esp_box_fill_color).colValue,
+							ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
 					edited::Checkbox(CS_XOR("Name"), CS_XOR("Shows player name"), &C_GET(TextOverlayVar_t, Vars.overlayName).bEnable);
 					edited::Checkbox(CS_XOR("Health bar"), CS_XOR("Shows player health"), &C_GET(BarOverlayVar_t, Vars.overlayHealthBar).bEnable);
+					if (C_GET(BarOverlayVar_t, Vars.overlayHealthBar).bEnable)
+					{
+						edited::Checkbox(CS_XOR("Health number"), CS_XOR("Shows the exact remaining health"), &C_GET(BarOverlayVar_t, Vars.overlayHealthBar).bShowValue);
+						edited::Checkbox(CS_XOR("Health gradient"), CS_XOR("Green at high health, red at low health"), &C_GET(BarOverlayVar_t, Vars.overlayHealthBar).bUseFactorColor);
+					}
+					edited::Checkbox(CS_XOR("Armor bar"), CS_XOR("Shows current armor below the player"), &C_GET(bool, Vars.esp_armor_bar));
 					edited::Checkbox(CS_XOR("Ammo bar"), CS_XOR("Shows player weapon ammo"), &C_GET(BarOverlayVar_t, Vars.AmmoBar).bEnable);
 					edited::Checkbox(CS_XOR("Weapon"), CS_XOR("Shows the player's equipped weapon"), &C_GET(TextOverlayVar_t, Vars.Weaponesp).bEnable);
 					if (C_GET(TextOverlayVar_t, Vars.Weaponesp).bEnable)
@@ -426,7 +460,15 @@ void MENU::RenderMainWindow()
 					edited::Checkbox(CS_XOR("Skeleton"), CS_XOR("Shows player bones as skeleton"), &C_GET(bool, Vars.bSkeleton));
 
 					if (C_GET(bool, Vars.bSkeleton))
+					{
+						edited::SliderFloat(CS_XOR("Skeleton thickness"), CS_XOR("Thickness of live bone segments"), &C_GET(float, Vars.esp_skeleton_thickness), 1.f, 5.f, "%.1f px");
 						edited::Color(CS_XOR("##skeletoncolor"), CS_XOR("Change menu accent color"), &C_GET(ColorPickerVar_t, Vars.colSkeleton).colValue, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
+					}
+					edited::Checkbox(CS_XOR("Distance"), CS_XOR("Shows distance in metres"), &C_GET(bool, Vars.esp_distance));
+					edited::Checkbox(CS_XOR("Head circle"), CS_XOR("Marks the live head bone"), &C_GET(bool, Vars.esp_head_circle));
+					edited::Checkbox(CS_XOR("View direction"), CS_XOR("Shows where each player is looking"), &C_GET(bool, Vars.esp_view_direction));
+					edited::Checkbox(CS_XOR("Snaplines"), CS_XOR("Connects enemies to the bottom of the screen"), &C_GET(bool, Vars.esp_snaplines));
+					edited::Checkbox(CS_XOR("Offscreen arrows"), CS_XOR("Points toward enemies outside the screen"), &C_GET(bool, Vars.esp_offscreen_arrows));
 
 					edited::MultiCombo(CS_XOR("Flags"), &C_GET(unsigned int, Vars.pEspFlags), arrEspFlags, CS_ARRAYSIZE(arrEspFlags));
 				
@@ -438,14 +480,19 @@ void MENU::RenderMainWindow()
 					edited::Checkbox(CS_XOR("Through walls"), CS_XOR("Draws a second material pass with depth disabled"), &C_GET(bool, Vars.bVisualChamsIgnoreZ));
 					if (C_GET(bool, Vars.bVisualChamsIgnoreZ))
 						edited::Color(CS_XOR("##chamscolorxqz"), CS_XOR("Change xqz chams color"), &C_GET(ColorPickerVar_t, Vars.colVisualChamsIgnoreZ).colValue, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
+					edited::Checkbox(CS_XOR("Arms chams"), CS_XOR("Overrides first-person arm materials"), &C_GET(bool, Vars.chams_arms));
+					edited::Checkbox(CS_XOR("Sleeve chams"), CS_XOR("Overrides first-person sleeve materials"), &C_GET(bool, Vars.chams_sleeves));
+					edited::Checkbox(CS_XOR("Held weapon chams"), CS_XOR("Overrides the local first-person weapon"), &C_GET(bool, Vars.chams_held_weapon));
+					edited::Checkbox(CS_XOR("Grenade chams"), CS_XOR("Overrides locally owned grenade models"), &C_GET(bool, Vars.chams_grenades));
+					edited::Checkbox(CS_XOR("Bomb chams"), CS_XOR("Overrides the locally carried C4 model"), &C_GET(bool, Vars.chams_bomb));
 
 				#ifdef _WIN32
 					const char* chams[3]{ CS_XOR("Flat"), CS_XOR("Default"),CS_XOR("Illumin") };
 					edited::Combo(CS_XOR("Models"), CS_XOR(""), &C_GET(int, Vars.nVisualChamMaterial), chams, IM_ARRAYSIZE(chams), 3);
 				#else
-					const char* chams[2]{ CS_XOR("Flat"), CS_XOR("Metallic") };
-					edited::Combo(CS_XOR("Material"), CS_XOR("Flat is solid color; Metallic reflects map lighting"),
-						&C_GET(int, Vars.nVisualChamMaterial), chams, IM_ARRAYSIZE(chams), 2);
+					const char* chams[5]{ CS_XOR("Flat"), CS_XOR("Metallic"), CS_XOR("Glow"), CS_XOR("Glass"), CS_XOR("Wireframe") };
+					edited::Combo(CS_XOR("Material"), CS_XOR("Select a solid, lit, emissive, translucent, or mesh-line material"),
+						&C_GET(int, Vars.nVisualChamMaterial), chams, IM_ARRAYSIZE(chams), 5);
 				#endif
 
 				}
@@ -569,6 +616,7 @@ void MENU::RenderMainWindow()
 				{
 					edited::Keybind("Thirdperson key", "Press once to toggle the camera", &C_GET(int, Vars.thirdperson_ui_key));
 					edited::SliderFloat(CS_XOR("Thirdperson distance"), CS_XOR("Thirdperson cam distance"), &C_GET(float, Vars.flThirdperson), 50.f, 300.f, "%.0f");
+					edited::Checkbox(CS_XOR("Thirdperson collision"), CS_XOR("Prevents the camera passing through walls"), &C_GET(bool, Vars.thirdperson_collision));
 				}
 
 				edited::Checkbox(CS_XOR("FOV Changer"), CS_XOR("Makes your FOV bigger"), &C_GET(bool, Vars.bFOV));
@@ -583,8 +631,12 @@ void MENU::RenderMainWindow()
 					edited::SliderFloat(CS_XOR("View FOV Amount"), CS_XOR("Amount"), &C_GET(float, Vars.flSetViewModelFOV), 40.f, 150.f);
 				}
 
-				edited::Checkbox(CS_XOR("Bunny hop"), CS_XOR("Automatic jumps for you"), &C_GET(bool, Vars.bAutoBHop));
-				edited::Checkbox(CS_XOR("Auto strafer"), CS_XOR("Make movement easier"), &C_GET(bool, Vars.bAutostrafe));
+				edited::Checkbox(CS_XOR("Bunny hop"), CS_XOR("Releases jump in air and reapplies it on landing while Space is held"), &C_GET(bool, Vars.bAutoBHop));
+				if (C_GET(bool, Vars.bAutoBHop))
+					edited::SliderInt(CS_XOR("Bunny hop chance"), CS_XOR("Chance to jump on each landing"), &C_GET(int, Vars.nAutoBHopChance), 1, 100, "%d%%");
+				edited::Checkbox(CS_XOR("Auto strafer"), CS_XOR("Applies alternating air-strafe input through CreateMove"), &C_GET(bool, Vars.bAutostrafe));
+				if (C_GET(bool, Vars.bAutostrafe))
+					edited::SliderFloat(CS_XOR("Strafe strength"), CS_XOR("Side-movement strength"), &C_GET(float, Vars.autostrafe_smooth), 1.f, 100.f, "%.0f%%");
 				edited::Checkbox(CS_XOR("Edge bug"), CS_XOR("Edge bug"), &C_GET(bool, Vars.edge_bug));
 				edited::MultiCombo(CS_XOR("Strafe modes"), &C_GET(unsigned int, Vars.bAutostrafeMode), arrMovementStrafer, CS_ARRAYSIZE(arrMovementStrafer));
 				edited::Color(CS_XOR("##menuaccent"), CS_XOR("Change menu accent color"), &color, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);

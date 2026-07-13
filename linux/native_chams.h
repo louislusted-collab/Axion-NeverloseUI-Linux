@@ -11,7 +11,7 @@ namespace NativeChams
 {
 bool Install();
 void Destroy();
-void UpdateTargets(C_CSPlayerPawn* const* targets, std::size_t count);
+void UpdateTargets(C_CSPlayerPawn* const* targets, std::size_t count, C_CSPlayerPawn* localTarget = nullptr);
 void UpdateColors(const Color_t& visible, const Color_t& hidden);
 }
 

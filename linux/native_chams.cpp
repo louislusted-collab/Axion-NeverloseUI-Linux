@@ -22,6 +22,7 @@
 #include <cstring>
 #include <dlfcn.h>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace NativeChams
@@ -36,6 +37,7 @@ constexpr std::size_t kMaterialOffset = 0x20;
 constexpr std::size_t kColorOffset = 0x40;
 
 std::array<std::atomic<C_CSPlayerPawn*>, 128> targets{};
+std::atomic<C_CSPlayerPawn*> localTarget{};
 funchook_t* hook = nullptr;
 DrawArrayFn original = nullptr;
 struct MaterialPair
@@ -48,6 +50,9 @@ enum class MaterialStyle : std::size_t
 {
     Flat,
     Metallic,
+    Glow,
+    Glass,
+    Wireframe,
     Count
 };
 
@@ -133,10 +138,98 @@ material2_t* CreateMaterial(const char* name, MaterialStyle style, bool ignoreDe
     g_tNormal = resource:"materials/default/default_normal_tga_b3f4ec4c.vtex"
     g_tAmbientOcclusion = resource:"materials/default/default_mask_tga_fde710a5.vtex"
 })";
+    static constexpr char glowVisibleVmat[] = R"(<!-- kv3 encoding:text:version{e21c7f3c-8a33-41c5-9977-a76d3a32aa0d} format:generic:version{7412167c-06e9-4698-aff2-e63eb59037e7} -->
+{
+    shader = "csgo_complex.vfx"
+    F_SELF_ILLUM = 1
+    F_PAINT_VERTEX_COLORS = 1
+    F_TRANSLUCENT = 1
+    g_vColorTint = [1, 1, 1, 1]
+    g_tColor = resource:"materials/default/default_mask_tga_fde710a5.vtex"
+    g_tNormal = resource:"materials/default/default_normal_tga_b3f4ec4c.vtex"
+    g_tSelfIllumMask = resource:"materials/default/default_mask_tga_fde710a5.vtex"
+    g_tAmbientOcclusion = resource:"materials/default/default_mask_tga_fde710a5.vtex"
+    g_flSelfIllumScale = 4.0
+    g_flSelfIllumBrightness = 3.0
+    g_vSelfIllumTint = [1, 1, 1, 1]
+})";
+    static constexpr char glowHiddenVmat[] = R"(<!-- kv3 encoding:text:version{e21c7f3c-8a33-41c5-9977-a76d3a32aa0d} format:generic:version{7412167c-06e9-4698-aff2-e63eb59037e7} -->
+{
+    shader = "csgo_complex.vfx"
+    F_SELF_ILLUM = 1
+    F_PAINT_VERTEX_COLORS = 1
+    F_TRANSLUCENT = 1
+    F_IGNOREZ = 1
+    F_DISABLE_Z_WRITE = 1
+    F_DISABLE_Z_BUFFERING = 1
+    g_vColorTint = [1, 1, 1, 1]
+    g_tColor = resource:"materials/default/default_mask_tga_fde710a5.vtex"
+    g_tNormal = resource:"materials/default/default_normal_tga_b3f4ec4c.vtex"
+    g_tSelfIllumMask = resource:"materials/default/default_mask_tga_fde710a5.vtex"
+    g_tAmbientOcclusion = resource:"materials/default/default_mask_tga_fde710a5.vtex"
+    g_flSelfIllumScale = 4.0
+    g_flSelfIllumBrightness = 3.0
+    g_vSelfIllumTint = [1, 1, 1, 1]
+})";
+    static constexpr char glassVisibleVmat[] = R"(<!-- kv3 encoding:text:version{e21c7f3c-8a33-41c5-9977-a76d3a32aa0d} format:generic:version{7412167c-06e9-4698-aff2-e63eb59037e7} -->
+{
+    shader = "csgo_unlitgeneric.vfx"
+    F_PAINT_VERTEX_COLORS = 1
+    F_TRANSLUCENT = 1
+    F_BLEND_MODE = 1
+    F_DISABLE_Z_WRITE = 1
+    g_vColorTint = [1, 1, 1, 1]
+    g_flOpacityScale = 0.35
+    g_tColor = resource:"materials/default/default_mask_tga_fde710a5.vtex"
+    g_tNormal = resource:"materials/default/default_normal_tga_b3f4ec4c.vtex"
+})";
+    static constexpr char glassHiddenVmat[] = R"(<!-- kv3 encoding:text:version{e21c7f3c-8a33-41c5-9977-a76d3a32aa0d} format:generic:version{7412167c-06e9-4698-aff2-e63eb59037e7} -->
+{
+    shader = "csgo_unlitgeneric.vfx"
+    F_PAINT_VERTEX_COLORS = 1
+    F_TRANSLUCENT = 1
+    F_BLEND_MODE = 1
+    F_IGNOREZ = 1
+    F_DISABLE_Z_WRITE = 1
+    F_DISABLE_Z_BUFFERING = 1
+    g_vColorTint = [1, 1, 1, 1]
+    g_flOpacityScale = 0.35
+    g_tColor = resource:"materials/default/default_mask_tga_fde710a5.vtex"
+    g_tNormal = resource:"materials/default/default_normal_tga_b3f4ec4c.vtex"
+})";
+    static constexpr char wireframeVisibleVmat[] = R"(<!-- kv3 encoding:text:version{e21c7f3c-8a33-41c5-9977-a76d3a32aa0d} format:generic:version{7412167c-06e9-4698-aff2-e63eb59037e7} -->
+{
+    shader = "tools_wireframe.vfx"
+    F_UNLIT = 1
+    F_WIREFRAME = 1
+    F_PAINT_VERTEX_COLORS = 1
+    g_vColorTint = [1, 1, 1, 1]
+    g_LineThickness = 1.0
+    g_DepthBiasAmount = 0.005
+})";
+    static constexpr char wireframeHiddenVmat[] = R"(<!-- kv3 encoding:text:version{e21c7f3c-8a33-41c5-9977-a76d3a32aa0d} format:generic:version{7412167c-06e9-4698-aff2-e63eb59037e7} -->
+{
+    shader = "tools_wireframe.vfx"
+    F_UNLIT = 1
+    F_WIREFRAME = 1
+    F_PAINT_VERTEX_COLORS = 1
+    F_IGNOREZ = 1
+    F_DISABLE_Z_WRITE = 1
+    F_DISABLE_Z_BUFFERING = 1
+    g_vColorTint = [1, 1, 1, 1]
+    g_LineThickness = 1.0
+    g_DepthBiasAmount = 0.005
+})";
 
     const char* vmatTemplate = nullptr;
     if (style == MaterialStyle::Metallic)
         vmatTemplate = ignoreDepth ? metallicHiddenVmat : metallicVisibleVmat;
+    else if (style == MaterialStyle::Glow)
+        vmatTemplate = ignoreDepth ? glowHiddenVmat : glowVisibleVmat;
+    else if (style == MaterialStyle::Glass)
+        vmatTemplate = ignoreDepth ? glassHiddenVmat : glassVisibleVmat;
+    else if (style == MaterialStyle::Wireframe)
+        vmatTemplate = ignoreDepth ? wireframeHiddenVmat : wireframeVisibleVmat;
     else
         vmatTemplate = ignoreDepth ? flatHiddenVmat : flatVisibleVmat;
 
@@ -169,33 +262,38 @@ bool RebuildMaterials(const Color_t& visibleColor, const Color_t& hiddenColor)
 {
     const unsigned int generation = ++materialGeneration;
     std::array<MaterialPair, static_cast<std::size_t>(MaterialStyle::Count)> replacement{};
-    char flatVisibleName[96], flatHiddenName[96], metallicVisibleName[96], metallicHiddenName[96];
-    std::snprintf(flatVisibleName, sizeof(flatVisibleName),
-        "materials/axion/player_flat_visible_%u.vmat", generation);
-    std::snprintf(flatHiddenName, sizeof(flatHiddenName),
-        "materials/axion/player_flat_hidden_%u.vmat", generation);
-    std::snprintf(metallicVisibleName, sizeof(metallicVisibleName),
-        "materials/axion/player_metallic_visible_%u.vmat", generation);
-    std::snprintf(metallicHiddenName, sizeof(metallicHiddenName),
-        "materials/axion/player_metallic_hidden_%u.vmat", generation);
-
-    replacement[static_cast<std::size_t>(MaterialStyle::Flat)] = {
-        CreateMaterial(flatVisibleName, MaterialStyle::Flat, false, visibleColor),
-        CreateMaterial(flatHiddenName, MaterialStyle::Flat, true, hiddenColor)};
-    replacement[static_cast<std::size_t>(MaterialStyle::Metallic)] = {
-        CreateMaterial(metallicVisibleName, MaterialStyle::Metallic, false, visibleColor),
-        CreateMaterial(metallicHiddenName, MaterialStyle::Metallic, true, hiddenColor)};
-    for (const MaterialPair& pair : replacement)
-        if (pair.visible == nullptr || pair.hidden == nullptr)
+    static constexpr const char* styleNames[]{"flat", "metallic", "glow", "glass", "wireframe"};
+    for (std::size_t index = 0; index < replacement.size(); ++index)
+    {
+        char visibleName[112], hiddenName[112];
+        std::snprintf(visibleName, sizeof(visibleName),
+            "materials/axion/player_%s_visible_%u.vmat", styleNames[index], generation);
+        std::snprintf(hiddenName, sizeof(hiddenName),
+            "materials/axion/player_%s_hidden_%u.vmat", styleNames[index], generation);
+        const MaterialStyle style = static_cast<MaterialStyle>(index);
+        replacement[index] = {
+            CreateMaterial(visibleName, style, false, visibleColor),
+            CreateMaterial(hiddenName, style, true, hiddenColor)};
+        if (index == static_cast<std::size_t>(MaterialStyle::Flat) &&
+            (replacement[index].visible == nullptr || replacement[index].hidden == nullptr))
             return false;
+        if (replacement[index].visible == nullptr || replacement[index].hidden == nullptr)
+        {
+            Log("material style=%s failed; falling back to flat", styleNames[index]);
+            replacement[index] = replacement[static_cast<std::size_t>(MaterialStyle::Flat)];
+        }
+    }
 
     materials = replacement;
     activeVisibleColor = visibleColor;
     activeHiddenColor = hiddenColor;
     colorsInitialized = true;
-    Log("materials generation=%u flat=%p/%p metallic=%p/%p colors=%u,%u,%u/%u,%u,%u",
+    Log("materials generation=%u flat=%p/%p metallic=%p/%p glow=%p/%p glass=%p/%p wire=%p/%p colors=%u,%u,%u/%u,%u,%u",
         generation, materials[0].visible, materials[0].hidden,
         materials[1].visible, materials[1].hidden,
+        materials[2].visible, materials[2].hidden,
+        materials[3].visible, materials[3].hidden,
+        materials[4].visible, materials[4].hidden,
         visibleColor.r, visibleColor.g, visibleColor.b,
         hiddenColor.r, hiddenColor.g, hiddenColor.b);
     return true;
@@ -223,31 +321,69 @@ bool IsTrackedTarget(const C_BaseEntity* entity)
     return false;
 }
 
-bool ResolvesToTarget(C_BaseEntity* entity)
+enum class TargetKind
+{
+    None,
+    Enemy,
+    Local
+};
+
+TargetKind ResolvesToTarget(C_BaseEntity* entity)
 {
     auto* entitySystem = I::GameResourceService->pGameEntitySystem;
-    for (int depth = 0; entity != nullptr && depth < 3; ++depth)
+    for (int depth = 0; entity != nullptr && depth < 4; ++depth)
     {
         if (IsTrackedTarget(entity))
-            return true;
+            return TargetKind::Enemy;
+        if (localTarget.load(std::memory_order_relaxed) == entity)
+            return TargetKind::Local;
         const CBaseHandle ownerHandle = entity->GetOwnerHandle();
         C_BaseEntity* owner = entitySystem->Get<C_BaseEntity>(ownerHandle);
         if (owner == entity)
             break;
         entity = owner;
     }
-    return false;
+    return TargetKind::None;
 }
 
-bool IsTarget(void* mesh)
+bool IsLocalMaterialEnabled(material2_t* material)
+{
+    if (material == nullptr)
+        return false;
+    const char* rawName = material->get_name();
+    if (rawName == nullptr)
+        return false;
+    const std::string_view name(rawName);
+    const auto contains = [&](std::string_view token) { return name.find(token) != std::string_view::npos; };
+
+    const bool sleeve = contains("sleeve");
+    const bool arms = contains("arms") || contains("glove") || contains("hands");
+    const bool bomb = contains("c4") || contains("ied") || contains("bomb");
+    const bool grenade = contains("grenade") || contains("flashbang") || contains("molotov") ||
+        contains("incendiary") || contains("smoke") || contains("decoy") || contains("eq_");
+    const bool viewWeapon = contains("weapons/v_models") || contains("weapons\\v_models") ||
+        contains("v_models/");
+
+    if (sleeve)
+        return C_GET(bool, Vars.chams_sleeves);
+    if (arms)
+        return C_GET(bool, Vars.chams_arms);
+    if (bomb)
+        return C_GET(bool, Vars.chams_bomb);
+    if (grenade)
+        return C_GET(bool, Vars.chams_grenades);
+    return viewWeapon && C_GET(bool, Vars.chams_held_weapon);
+}
+
+TargetKind GetTargetKind(void* mesh)
 {
     if (mesh == nullptr || I::GameResourceService == nullptr ||
         I::GameResourceService->pGameEntitySystem == nullptr)
-        return false;
+        return TargetKind::None;
     auto* sceneAnimatable = *reinterpret_cast<std::uint8_t**>(
         reinterpret_cast<std::uint8_t*>(mesh) + kSceneAnimatableOffset);
     if (sceneAnimatable == nullptr)
-        return false;
+        return TargetKind::None;
     // Player LODs and attachment meshes do not all use the same owner slot.
     // Only accept handles that resolve back to a tracked live enemy, so this
     // broader layout probe cannot turn unrelated world meshes into targets.
@@ -255,10 +391,11 @@ bool IsTarget(void* mesh)
     {
         const auto handle = *reinterpret_cast<const CBaseHandle*>(sceneAnimatable + ownerOffset);
         C_BaseEntity* owner = I::GameResourceService->pGameEntitySystem->Get<C_BaseEntity>(handle);
-        if (ResolvesToTarget(owner))
-            return true;
+        const TargetKind kind = ResolvesToTarget(owner);
+        if (kind != TargetKind::None)
+            return kind;
     }
-    return false;
+    return TargetKind::None;
 }
 
 void SetMeshColor(void* mesh, const Color_t& color)
@@ -269,8 +406,11 @@ void SetMeshColor(void* mesh, const Color_t& color)
 void DrawArray(void* descriptor, void* renderContext, void* meshArray, int count,
                void* sceneView, void* sceneLayer, void* drawContext, void* frameStats)
 {
+    const bool localChams = C_GET(bool, Vars.chams_arms) || C_GET(bool, Vars.chams_sleeves) ||
+        C_GET(bool, Vars.chams_held_weapon) || C_GET(bool, Vars.chams_grenades) ||
+        C_GET(bool, Vars.chams_bomb);
     if (original == nullptr || meshArray == nullptr || count <= 0 ||
-        !C_GET(bool, Vars.bVisualChams))
+        (!C_GET(bool, Vars.bVisualChams) && !localChams))
     {
         if (original != nullptr)
             original(descriptor, renderContext, meshArray, count, sceneView, sceneLayer, drawContext, frameStats);
@@ -291,11 +431,17 @@ void DrawArray(void* descriptor, void* renderContext, void* meshArray, int count
     for (int index = 0; index < safeCount; ++index)
     {
         auto* mesh = reinterpret_cast<std::uint8_t*>(meshArray) + index * kMeshStride;
-        if (!IsTarget(mesh))
+        const TargetKind kind = GetTargetKind(mesh);
+        if (kind == TargetKind::None)
+            continue;
+        material2_t* originalMaterial = *reinterpret_cast<material2_t**>(mesh + kMaterialOffset);
+        if (kind == TargetKind::Enemy && !C_GET(bool, Vars.bVisualChams))
+            continue;
+        if (kind == TargetKind::Local && !IsLocalMaterialEnabled(originalMaterial))
             continue;
         auto& backup = changed.emplace_back();
         backup.mesh = mesh;
-        backup.material = *reinterpret_cast<material2_t**>(mesh + kMaterialOffset);
+        backup.material = originalMaterial;
         std::memcpy(&backup.color, mesh + kColorOffset, sizeof(backup.color));
     }
 
@@ -402,14 +548,15 @@ void Destroy()
     materialLoadAttempted = false;
     colorsInitialized = false;
     materialGeneration = 0;
-    UpdateTargets(nullptr, 0);
+    UpdateTargets(nullptr, 0, nullptr);
 }
 
-void UpdateTargets(C_CSPlayerPawn* const* newTargets, std::size_t count)
+void UpdateTargets(C_CSPlayerPawn* const* newTargets, std::size_t count, C_CSPlayerPawn* newLocalTarget)
 {
     const std::size_t safeCount = std::min(count, targets.size());
     for (std::size_t index = 0; index < targets.size(); ++index)
         targets[index].store(index < safeCount ? newTargets[index] : nullptr, std::memory_order_relaxed);
+    localTarget.store(newLocalTarget, std::memory_order_relaxed);
 }
 
 void UpdateColors(const Color_t& visible, const Color_t& hidden)

@@ -86,6 +86,12 @@ static std::atomic<float> native_aim_mouse_x{0.f};
 static std::atomic<float> native_aim_mouse_y{0.f};
 static std::atomic<std::uint64_t> native_aim_sdl_samples{0};
 static std::atomic<bool> native_thirdperson_input{false};
+static std::atomic<bool> native_bhop_enabled{false};
+static std::atomic<bool> native_bhop_space_held{false};
+static std::atomic<bool> native_bhop_on_ground{false};
+static std::atomic<bool> native_strafe_enabled{false};
+static std::atomic<float> native_strafe_forward{0.f};
+static std::atomic<float> native_strafe_left{0.f};
 using InputCreateMoveFn = bool(*)(void*, int, bool, std::byte);
 static InputCreateMoveFn native_input_create_move_original = nullptr;
 static funchook_t* native_input_hooks = nullptr;
@@ -152,6 +158,26 @@ static bool NativeInputCreateMove(void* input, int slot, bool active, std::byte 
     const bool thirdPerson = native_thirdperson_input.load(std::memory_order_acquire);
     if (input != nullptr)
         *reinterpret_cast<bool*>(reinterpret_cast<std::uint8_t*>(input) + 0x229) = thirdPerson;
+
+    if (input != nullptr && native_bhop_enabled.load(std::memory_order_acquire) &&
+        native_bhop_space_held.load(std::memory_order_relaxed))
+    {
+        auto& buttons = *reinterpret_cast<std::uint64_t*>(
+            reinterpret_cast<std::uint8_t*>(input) + 0x240);
+        constexpr std::uint64_t jump = 1ULL << 2;
+        if (native_bhop_on_ground.load(std::memory_order_relaxed))
+            buttons |= jump;
+        else
+            buttons &= ~jump;
+    }
+
+    if (input != nullptr && native_strafe_enabled.load(std::memory_order_acquire))
+    {
+        *reinterpret_cast<float*>(reinterpret_cast<std::uint8_t*>(input) + 0x260) =
+            std::clamp(native_strafe_forward.load(std::memory_order_relaxed), -1.f, 1.f);
+        *reinterpret_cast<float*>(reinterpret_cast<std::uint8_t*>(input) + 0x264) =
+            std::clamp(native_strafe_left.load(std::memory_order_relaxed), -1.f, 1.f);
+    }
 
     void* destination = native_aim_angle_destination.exchange(nullptr, std::memory_order_acq_rel);
     if (destination != nullptr)
@@ -1409,6 +1435,20 @@ void SetNativeThirdPersonInput(bool enabled)
         auto* input = reinterpret_cast<std::uint8_t*>(I::Input);
         *reinterpret_cast<bool*>(input + 0x229) = enabled;
     }
+}
+
+void SetNativeBhopInput(bool enabled, bool spaceHeld, bool onGround)
+{
+    native_bhop_space_held.store(spaceHeld, std::memory_order_relaxed);
+    native_bhop_on_ground.store(onGround, std::memory_order_relaxed);
+    native_bhop_enabled.store(enabled, std::memory_order_release);
+}
+
+void SetNativeStrafeInput(bool enabled, float forward, float left)
+{
+    native_strafe_forward.store(forward, std::memory_order_relaxed);
+    native_strafe_left.store(left, std::memory_order_relaxed);
+    native_strafe_enabled.store(enabled, std::memory_order_release);
 }
 
 #endif // __linux__

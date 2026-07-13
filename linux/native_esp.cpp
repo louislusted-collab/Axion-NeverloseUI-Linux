@@ -319,6 +319,7 @@ void DrawSkeleton(ImDrawList* draw, CGameSceneNode* scene)
     };
     const ImU32 outline = C_GET(ColorPickerVar_t, Vars.colSkeletonOutline).colValue.GetU32();
     const ImU32 color = C_GET(ColorPickerVar_t, Vars.colSkeleton).colValue.GetU32();
+    const float thickness = std::clamp(C_GET(float, Vars.esp_skeleton_thickness), 1.f, 5.f);
     for (const auto& segment : segments)
     {
         Vector_t start{}, end{};
@@ -327,9 +328,49 @@ void DrawSkeleton(ImDrawList* draw, CGameSceneNode* scene)
             !GetLiveBonePosition(scene, segment[1], end) ||
             !D::WorldToScreen(start, startScreen) || !D::WorldToScreen(end, endScreen))
             continue;
-        draw->AddLine(startScreen, endScreen, outline, 3.f);
-        draw->AddLine(startScreen, endScreen, color, 1.f);
+        draw->AddLine(startScreen, endScreen, outline, thickness + 2.f);
+        draw->AddLine(startScreen, endScreen, color, thickness);
     }
+}
+
+void DrawCornerBox(ImDrawList* draw, const ImVec2& min, const ImVec2& max,
+                   ImU32 color, float thickness)
+{
+    const float segmentX = (max.x - min.x) * 0.28f;
+    const float segmentY = (max.y - min.y) * 0.22f;
+    draw->AddLine(min, ImVec2(min.x + segmentX, min.y), color, thickness);
+    draw->AddLine(min, ImVec2(min.x, min.y + segmentY), color, thickness);
+    draw->AddLine(ImVec2(max.x - segmentX, min.y), ImVec2(max.x, min.y), color, thickness);
+    draw->AddLine(ImVec2(max.x, min.y), ImVec2(max.x, min.y + segmentY), color, thickness);
+    draw->AddLine(ImVec2(min.x, max.y - segmentY), ImVec2(min.x, max.y), color, thickness);
+    draw->AddLine(ImVec2(min.x, max.y), ImVec2(min.x + segmentX, max.y), color, thickness);
+    draw->AddLine(ImVec2(max.x, max.y - segmentY), max, color, thickness);
+    draw->AddLine(ImVec2(max.x - segmentX, max.y), max, color, thickness);
+}
+
+void DrawOffscreenArrow(ImDrawList* draw, const Vector_t& localOrigin,
+                        const Vector_t& targetOrigin, float localYaw, ImU32 color)
+{
+    if (draw == nullptr)
+        return;
+    constexpr float degrees = 180.f / 3.14159265358979323846f;
+    constexpr float radians = 3.14159265358979323846f / 180.f;
+    const Vector_t delta = targetOrigin - localOrigin;
+    if (std::hypot(delta.x, delta.y) < 1.f)
+        return;
+    const float targetYaw = std::atan2(delta.y, delta.x) * degrees;
+    const float relative = std::remainder(targetYaw - localYaw, 360.f) * radians;
+    const ImVec2 direction(std::sin(relative), -std::cos(relative));
+    const ImVec2 tangent(-direction.y, direction.x);
+    const ImVec2 display = ImGui::GetIO().DisplaySize;
+    const ImVec2 center = display * 0.5f;
+    const float radius = std::max(40.f, std::min(display.x, display.y) * 0.42f);
+    const ImVec2 tip = center + direction * radius;
+    const ImVec2 base = center + direction * (radius - 18.f);
+    const ImVec2 left = base + tangent * 8.f;
+    const ImVec2 right = base - tangent * 8.f;
+    draw->AddTriangleFilled(tip, left, right, color);
+    draw->AddTriangle(tip, left, right, IM_COL32(0, 0, 0, 230), 2.f);
 }
 
 bool IsNativeButtonDown(int key)
@@ -348,15 +389,10 @@ bool IsNativeButtonDown(int key)
     }
 }
 
-bool GetWeaponDisplay(CGameEntitySystem* entities, C_CSPlayerPawn* pawn, std::string& name, int& ammo, int& maximumAmmo)
+bool GetWeaponName(C_CSWeaponBase* weapon, std::string& name, int* maximumAmmo = nullptr)
 {
-    CPlayer_WeaponServices* services = pawn != nullptr ? pawn->GetWeaponServices() : nullptr;
-    if (services == nullptr)
-        return false;
-    C_CSWeaponBase* weapon = entities->Get<C_CSWeaponBase>(services->m_hActiveWeapon());
     if (weapon == nullptr)
         return false;
-    ammo = std::max(0, weapon->clip1());
     auto* data = weapon->GetVData();
     if (data == nullptr)
         return false;
@@ -373,8 +409,44 @@ bool GetWeaponDisplay(CGameEntitySystem* entities, C_CSPlayerPawn* pawn, std::st
                 name.erase(0, sizeof(prefix) - 1);
         }
     }
-    maximumAmmo = clipOffset == 0 ? 0 : *reinterpret_cast<const int*>(reinterpret_cast<std::uint8_t*>(data) + clipOffset);
-    return !name.empty() || maximumAmmo > 0;
+    if (maximumAmmo != nullptr)
+        *maximumAmmo = clipOffset == 0 ? 0 :
+            *reinterpret_cast<const int*>(reinterpret_cast<std::uint8_t*>(data) + clipOffset);
+    return !name.empty();
+}
+
+bool GetWeaponDisplay(CGameEntitySystem* entities, C_CSPlayerPawn* pawn, std::string& name,
+                      int& ammo, int& maximumAmmo, C_CSWeaponBase** activeWeapon = nullptr)
+{
+    CPlayer_WeaponServices* services = pawn != nullptr ? pawn->GetWeaponServices() : nullptr;
+    if (services == nullptr)
+        return false;
+    C_CSWeaponBase* weapon = entities->Get<C_CSWeaponBase>(services->m_hActiveWeapon());
+    if (weapon == nullptr)
+        return false;
+    if (activeWeapon != nullptr)
+        *activeWeapon = weapon;
+    ammo = std::max(0, weapon->clip1());
+    return GetWeaponName(weapon, name, &maximumAmmo) || maximumAmmo > 0;
+}
+
+bool PlayerHasC4(CGameEntitySystem* entities, C_CSPlayerPawn* pawn)
+{
+    static const std::uint32_t myWeapons = SCHEMA::GetOffset("CPlayer_WeaponServices->m_hMyWeapons");
+    CPlayer_WeaponServices* services = pawn != nullptr ? pawn->GetWeaponServices() : nullptr;
+    if (entities == nullptr || services == nullptr || myWeapons == 0)
+        return false;
+    auto* collection = reinterpret_cast<C_NetworkUtlVectorBase<CBaseHandle>*>(
+        reinterpret_cast<std::uint8_t*>(services) + myWeapons);
+    if (collection->pElements == nullptr || collection->nSize > 64)
+        return false;
+    for (std::uint32_t index = 0; index < collection->nSize; ++index)
+    {
+        std::string name;
+        if (GetWeaponName(entities->Get<C_CSWeaponBase>(collection->pElements[index]), name) && name == "c4")
+            return true;
+    }
+    return false;
 }
 
 char GetWeaponIcon(std::string_view name)
@@ -431,6 +503,74 @@ void DrawLegitFov()
     constexpr float radians = 3.14159265358979323846f / 180.f;
     const float radius = std::tan(degrees * 0.5f * radians) * (size.x * 0.5f);
     draw->AddCircle(size * 0.5f, radius, IM_COL32(255, 255, 255, 210), 96, 1.f);
+}
+
+void ApplyNativeMovement(C_CSPlayerPawn* localPawn)
+{
+    if (localPawn == nullptr || localPawn->GetHealth() <= 0 || MENU::bMainWindowOpened)
+    {
+        SetNativeBhopInput(false, false, false);
+        SetNativeStrafeInput(false, 0.f, 0.f);
+        return;
+    }
+
+    const bool* keys = SDL_GetKeyboardState(nullptr);
+    const bool spaceHeld = keys != nullptr && keys[SDL_SCANCODE_SPACE];
+    const bool onGround = (localPawn->GetFlags() & FL_ONGROUND) != 0;
+    const bool bhopEnabled = C_GET(bool, Vars.bAutoBHop);
+    static bool previousSpace = false;
+    static bool previousGround = true;
+    static bool allowedForLanding = true;
+    if (bhopEnabled && spaceHeld && (!previousSpace || (onGround && !previousGround)))
+    {
+        const int chance = std::clamp(C_GET(int, Vars.nAutoBHopChance), 1, 100);
+        const std::uint64_t mixed = SDL_GetTicks() * 1103515245ULL + frame_counter * 12345ULL;
+        allowedForLanding = static_cast<int>(mixed % 100ULL) < chance;
+    }
+    if (!spaceHeld)
+        allowedForLanding = true;
+    // Keep the CreateMove handler active even when this landing failed the
+    // configured chance so the physical held-space bit is explicitly cleared.
+    SetNativeBhopInput(bhopEnabled, spaceHeld, onGround && allowedForLanding);
+    previousSpace = spaceHeld;
+    previousGround = onGround;
+
+    if (!C_GET(bool, Vars.bAutostrafe) || onGround)
+    {
+        SetNativeStrafeInput(false, 0.f, 0.f);
+        return;
+    }
+
+    const Vector_t velocity = localPawn->GetAbsVelocity();
+    const float speed = std::hypot(velocity.x, velocity.y);
+    if (!std::isfinite(speed) || speed < 10.f)
+    {
+        SetNativeStrafeInput(false, 0.f, 0.f);
+        return;
+    }
+
+    float viewYaw = native_view_angles != nullptr ? native_view_angles->y : 0.f;
+    static const std::uint32_t viewAngleOffset = SCHEMA::GetOffset("C_BasePlayerPawn->v_angle");
+    if (viewAngleOffset != 0)
+    {
+        const QAngle_t view = *reinterpret_cast<const QAngle_t*>(
+            reinterpret_cast<const std::uint8_t*>(localPawn) + viewAngleOffset);
+        if (view.IsValid())
+            viewYaw = view.y;
+    }
+    constexpr float degrees = 180.f / 3.14159265358979323846f;
+    const float velocityYaw = std::atan2(velocity.y, velocity.x) * degrees;
+    const float delta = std::remainder(viewYaw - velocityYaw, 360.f);
+    const float correction = std::atan2(15.f, speed) * degrees * 1.8f;
+    static bool alternate = false;
+    alternate = !alternate;
+    float direction = alternate ? -1.f : 1.f;
+    if (std::fabs(delta) > 170.f || delta > correction)
+        direction = -1.f;
+    else if (delta < -correction)
+        direction = 1.f;
+    const float strength = std::clamp(C_GET(float, Vars.autostrafe_smooth) / 100.f, 0.01f, 1.f);
+    SetNativeStrafeInput(true, 0.f, direction * strength);
 }
 
 void ApplySmokeRemoval(CGameEntitySystem* entities, C_CSPlayerPawn* localPawn)
@@ -499,6 +639,121 @@ void ApplySmokeRemoval(CGameEntitySystem* entities, C_CSPlayerPawn* localPawn)
     }
 }
 
+void ApplyCameraAndRemovals(C_CSPlayerPawn* localPawn)
+{
+    static CConVar* cameraFov = CONVAR::Find("fov_cs_debug");
+    static CConVar* viewmodelFov = CONVAR::Find("viewmodel_fov");
+    static CConVar* sniperStencil = CONVAR::Find("r_csgo_stencil_sniper_zoom");
+    static CConVar* dofOverride = CONVAR::Find("r_dof_override");
+    static CConVar* dofMaxBlur = CONVAR::Find("r_dof2_maxblursize");
+    static CConVar* dofFarBlur = CONVAR::Find("r_dof_override_far_blurry");
+    static CConVar* dofNearBlur = CONVAR::Find("r_dof_override_near_blurry");
+
+    static bool previousCameraFov = false;
+    static bool previousViewmodelFov = false;
+    static bool previousScope = false;
+    static bool previousBlur = false;
+    static float originalCameraFov = 0.f;
+    static float originalViewmodelFov = 60.f;
+    static bool originalScope = true;
+    static bool originalDofOverride = false;
+    static float originalDofMaxBlur = 0.f;
+    static float originalDofFarBlur = 0.f;
+    static float originalDofNearBlur = 0.f;
+
+    const bool cameraFovEnabled = C_GET(bool, Vars.bFOV);
+    if (cameraFovEnabled && !previousCameraFov && cameraFov != nullptr)
+        originalCameraFov = cameraFov->GetValue<float>();
+    if (!cameraFovEnabled && previousCameraFov && cameraFov != nullptr)
+        cameraFov->GetValue<float>() = originalCameraFov;
+    if (cameraFovEnabled && cameraFov != nullptr)
+        cameraFov->GetValue<float>() = std::clamp(C_GET(float, Vars.fFOVAmount), 30.f, 150.f);
+    previousCameraFov = cameraFovEnabled;
+
+    const bool viewmodelFovEnabled = C_GET(bool, Vars.bSetViewModelFOV);
+    if (viewmodelFovEnabled && !previousViewmodelFov && viewmodelFov != nullptr)
+        originalViewmodelFov = viewmodelFov->GetValue<float>();
+    if (!viewmodelFovEnabled && previousViewmodelFov && viewmodelFov != nullptr)
+        viewmodelFov->GetValue<float>() = originalViewmodelFov;
+    if (viewmodelFovEnabled && viewmodelFov != nullptr)
+        viewmodelFov->GetValue<float>() = std::clamp(C_GET(float, Vars.flSetViewModelFOV), 40.f, 150.f);
+    previousViewmodelFov = viewmodelFovEnabled;
+
+    const bool removeScope = C_GET(bool, Vars.bRemoveScopeOverlay);
+    if (removeScope && !previousScope && sniperStencil != nullptr)
+        originalScope = sniperStencil->GetValue<bool>();
+    if (!removeScope && previousScope && sniperStencil != nullptr)
+        sniperStencil->GetValue<bool>() = originalScope;
+    if (removeScope && sniperStencil != nullptr)
+        sniperStencil->GetValue<bool>() = false;
+    previousScope = removeScope;
+
+    const bool removeBlur = C_GET(bool, Vars.bRemoveMotionBlur);
+    if (removeBlur && !previousBlur)
+    {
+        if (dofOverride != nullptr) originalDofOverride = dofOverride->GetValue<bool>();
+        if (dofMaxBlur != nullptr) originalDofMaxBlur = dofMaxBlur->GetValue<float>();
+        if (dofFarBlur != nullptr) originalDofFarBlur = dofFarBlur->GetValue<float>();
+        if (dofNearBlur != nullptr) originalDofNearBlur = dofNearBlur->GetValue<float>();
+    }
+    if (!removeBlur && previousBlur)
+    {
+        if (dofOverride != nullptr) dofOverride->GetValue<bool>() = originalDofOverride;
+        if (dofMaxBlur != nullptr) dofMaxBlur->GetValue<float>() = originalDofMaxBlur;
+        if (dofFarBlur != nullptr) dofFarBlur->GetValue<float>() = originalDofFarBlur;
+        if (dofNearBlur != nullptr) dofNearBlur->GetValue<float>() = originalDofNearBlur;
+    }
+    if (removeBlur)
+    {
+        if (dofOverride != nullptr) dofOverride->GetValue<bool>() = true;
+        if (dofMaxBlur != nullptr) dofMaxBlur->GetValue<float>() = 0.f;
+        if (dofFarBlur != nullptr) dofFarBlur->GetValue<float>() = 0.f;
+        if (dofNearBlur != nullptr) dofNearBlur->GetValue<float>() = 0.f;
+    }
+    previousBlur = removeBlur;
+
+    static C_CSPlayerPawn* flashPawn = nullptr;
+    static float originalFlashAlpha = 255.f;
+    static bool previousFlash = false;
+    const bool removeFlash = C_GET(bool, Vars.bRemoveFlash);
+    if (localPawn != flashPawn)
+    {
+        flashPawn = localPawn;
+        previousFlash = false;
+    }
+    if (localPawn != nullptr)
+    {
+        if (removeFlash && !previousFlash)
+            originalFlashAlpha = localPawn->GetFlashMaxAlpha();
+        if (!removeFlash && previousFlash)
+            localPawn->GetFlashMaxAlpha() = originalFlashAlpha;
+        if (removeFlash)
+            localPawn->GetFlashMaxAlpha() = std::clamp(C_GET(float, Vars.flFlashOpacity), 0.f, 255.f);
+
+        if (C_GET(bool, Vars.bRemoveAimPunch))
+        {
+            static const std::uint32_t viewPunchOffset =
+                SCHEMA::GetOffset("CPlayer_CameraServices->m_vecCsViewPunchAngle");
+            CPlayer_CameraServices* cameraServices = localPawn->GetCameraServices();
+            if (cameraServices != nullptr && viewPunchOffset != 0)
+                *reinterpret_cast<QAngle_t*>(reinterpret_cast<std::uint8_t*>(cameraServices) + viewPunchOffset) = {};
+        }
+    }
+    previousFlash = removeFlash;
+
+    static std::uint64_t nextLog = 0;
+    if (SDL_GetTicks() >= nextLog &&
+        (cameraFovEnabled || viewmodelFovEnabled || removeScope || removeBlur || removeFlash ||
+         C_GET(bool, Vars.bRemoveAimPunch)))
+    {
+        nextLog = SDL_GetTicks() + 2000;
+        EspLog("[camera/removals] fov=%d/%p viewmodel=%d/%p scope=%d/%p blur=%d flash=%d alpha=%.0f punch=%d",
+            cameraFovEnabled, cameraFov, viewmodelFovEnabled, viewmodelFov,
+            removeScope, sniperStencil, removeBlur, removeFlash,
+            C_GET(float, Vars.flFlashOpacity), C_GET(bool, Vars.bRemoveAimPunch));
+    }
+}
+
 void ApplyThirdPerson(C_CSPlayerPawn* localPawn)
 {
     const bool featureEnabled = C_GET(bool, Vars.bThirdperson);
@@ -534,7 +789,8 @@ void ApplyThirdPerson(C_CSPlayerPawn* localPawn)
     if (CONVAR::cam_idealdist != nullptr)
         CONVAR::cam_idealdist->GetValue<float>() = distance;
     if (CONVAR::cam_collision != nullptr)
-        CONVAR::cam_collision->GetValue<bool>() = true;
+        CONVAR::cam_collision->GetValue<std::int32_t>() =
+            C_GET(bool, Vars.thirdperson_collision) ? 1 : 0;
     if (CONVAR::cam_snapto != nullptr)
         CONVAR::cam_snapto->GetValue<bool>() = true;
     if (CONVAR::c_thirdpersonshoulder != nullptr)
@@ -1735,6 +1991,8 @@ void LinuxNativeEsp::Render()
 
     ApplyThirdPerson(local_pawn);
     ApplySmokeRemoval(entities, local_pawn);
+    ApplyCameraAndRemovals(local_pawn);
+    ApplyNativeMovement(local_pawn);
     DrawLegitFov();
     native_aim_command_queued = false;
     if (C_GET(bool, Vars.rage_enable))
@@ -1750,6 +2008,18 @@ void LinuxNativeEsp::Render()
     ImDrawList* draw = ImGui::GetBackgroundDrawList();
     if (draw == nullptr)
         return;
+
+    CGameSceneNode* localScene = local_pawn->GetGameSceneNode();
+    const Vector_t localOrigin = localScene != nullptr ? localScene->GetAbsOrigin() : Vector_t{};
+    float localYaw = native_view_angles != nullptr ? native_view_angles->y : 0.f;
+    static const std::uint32_t localViewAngleOffset = SCHEMA::GetOffset("C_BasePlayerPawn->v_angle");
+    if (localViewAngleOffset != 0)
+    {
+        const QAngle_t pawnView = *reinterpret_cast<const QAngle_t*>(
+            reinterpret_cast<const std::uint8_t*>(local_pawn) + localViewAngleOffset);
+        if (pawnView.IsValid() && std::fabs(pawnView.y) <= 360.f)
+            localYaw = pawnView.y;
+    }
 
     int found_entities = 0;
     int found_pawns = 0;
@@ -1791,10 +2061,24 @@ void LinuxNativeEsp::Render()
             continue;
 
         const Vector_t feet = scene->GetAbsOrigin();
-        const Vector_t head(feet.x, feet.y, feet.z + 72.f);
+        Vector_t head{};
+        if (!GetLiveBonePosition(scene, 6, head))
+            head = Vector_t(feet.x, feet.y, feet.z + 72.f);
+        else
+            head.z += 8.f;
         ImVec2 feet_screen{}, head_screen{};
-        if (!D::WorldToScreen(feet, feet_screen) || !D::WorldToScreen(head, head_screen))
+        const bool projected = D::WorldToScreen(feet, feet_screen) && D::WorldToScreen(head, head_screen);
+        const ImVec2 display = ImGui::GetIO().DisplaySize;
+        const bool onScreen = projected && feet_screen.x >= 0.f && feet_screen.x <= display.x &&
+            feet_screen.y >= 0.f && feet_screen.y <= display.y && head_screen.x >= 0.f &&
+            head_screen.x <= display.x && head_screen.y >= 0.f && head_screen.y <= display.y;
+        if (!onScreen)
+        {
+            if (enabled && C_GET(bool, Vars.esp_offscreen_arrows))
+                DrawOffscreenArrow(draw, localOrigin, feet, localYaw,
+                    C_GET(ColorPickerVar_t, Vars.esp_detail_color).colValue.GetU32());
             continue;
+        }
         ++projected_pawns;
 
         const float height = feet_screen.y - head_screen.y;
@@ -1807,11 +2091,25 @@ void LinuxNativeEsp::Render()
         if (!enabled)
             continue;
 
+        if (C_GET(bool, Vars.esp_box_fill))
+            draw->AddRectFilled(min, max,
+                C_GET(ColorPickerVar_t, Vars.esp_box_fill_color).colValue.GetU32(),
+                C_GET(FrameOverlayVar_t, Vars.overlayBox).flRounding);
+
         if (const auto& box = C_GET(FrameOverlayVar_t, Vars.overlayBox); box.bEnable)
         {
-            draw->AddRect(min - ImVec2(1.f, 1.f), max + ImVec2(1.f, 1.f), box.colOutline.GetU32(),
-                          box.flRounding, 0, box.flThickness + 2.f);
-            draw->AddRect(min, max, box.colPrimary.GetU32(), box.flRounding, 0, box.flThickness);
+            if (C_GET(int, Vars.esp_box_style) == VISUAL_OVERLAY_BOX_CORNERS)
+            {
+                DrawCornerBox(draw, min - ImVec2(1.f, 1.f), max + ImVec2(1.f, 1.f),
+                    box.colOutline.GetU32(), box.flThickness + 2.f);
+                DrawCornerBox(draw, min, max, box.colPrimary.GetU32(), box.flThickness);
+            }
+            else
+            {
+                draw->AddRect(min - ImVec2(1.f, 1.f), max + ImVec2(1.f, 1.f), box.colOutline.GetU32(),
+                              box.flRounding, 0, box.flThickness + 2.f);
+                draw->AddRect(min, max, box.colPrimary.GetU32(), box.flRounding, 0, box.flThickness);
+            }
         }
 
         if (const auto& healthConfig = C_GET(BarOverlayVar_t, Vars.overlayHealthBar); healthConfig.bEnable)
@@ -1824,6 +2122,15 @@ void LinuxNativeEsp::Render()
             draw->AddRectFilled(ImVec2(min.x - barWidth - 3.f, min.y), ImVec2(min.x - 2.f, max.y), IM_COL32(0, 0, 0, 220));
             draw->AddRectFilled(ImVec2(min.x - barWidth - 2.f, max.y - height * health),
                                 ImVec2(min.x - 3.f, max.y - 1.f), healthColor);
+            if (healthConfig.bShowValue && health_value < 100)
+            {
+                char value[8];
+                std::snprintf(value, sizeof(value), "%d", health_value);
+                const ImVec2 size = ImGui::CalcTextSize(value);
+                DrawOutlinedText(draw,
+                    ImVec2(min.x - barWidth - size.x - 5.f, max.y - height * health - size.y * 0.5f),
+                    value, IM_COL32(255, 255, 255, 255), IM_COL32(0, 0, 0, 230));
+            }
         }
 
         if (const auto& nameConfig = C_GET(TextOverlayVar_t, Vars.overlayName); nameConfig.bEnable)
@@ -1837,12 +2144,29 @@ void LinuxNativeEsp::Render()
             }
         }
 
+        float bottomOffset = 3.f;
+        if (C_GET(bool, Vars.esp_armor_bar) && pawn->GetArmorValue() > 0)
+        {
+            const float factor = std::clamp(static_cast<float>(pawn->GetArmorValue()) / 100.f, 0.f, 1.f);
+            draw->AddRectFilled(ImVec2(min.x, max.y + bottomOffset),
+                ImVec2(max.x, max.y + bottomOffset + 4.f), IM_COL32(0, 0, 0, 220));
+            draw->AddRectFilled(ImVec2(min.x + 1.f, max.y + bottomOffset + 1.f),
+                ImVec2(min.x + 1.f + (width - 2.f) * factor, max.y + bottomOffset + 3.f),
+                C_GET(ColorPickerVar_t, Vars.esp_armor_color).colValue.GetU32());
+            bottomOffset += 6.f;
+        }
+
+        const unsigned int flags = C_GET(unsigned int, Vars.pEspFlags);
         std::string weaponName;
         int ammo = 0, maximumAmmo = 0;
-        const bool needWeapon = C_GET(TextOverlayVar_t, Vars.Weaponesp).bEnable || C_GET(BarOverlayVar_t, Vars.AmmoBar).bEnable;
-        if (needWeapon && GetWeaponDisplay(entities, pawn, weaponName, ammo, maximumAmmo))
+        C_CSWeaponBase* activeWeapon = nullptr;
+        const bool needWeapon = C_GET(TextOverlayVar_t, Vars.Weaponesp).bEnable ||
+            C_GET(BarOverlayVar_t, Vars.AmmoBar).bEnable ||
+            (flags & (FLAGS_PLANTING | FLAGS_RELOADING | FLAGS_BOMB_CARRIER)) != 0;
+        const bool hasWeapon = needWeapon &&
+            GetWeaponDisplay(entities, pawn, weaponName, ammo, maximumAmmo, &activeWeapon);
+        if (hasWeapon)
         {
-            float bottomOffset = 3.f;
             if (const auto& ammoConfig = C_GET(BarOverlayVar_t, Vars.AmmoBar); ammoConfig.bEnable && maximumAmmo > 0)
             {
                 const float factor = std::clamp(static_cast<float>(ammo) / static_cast<float>(maximumAmmo), 0.f, 1.f);
@@ -1871,33 +2195,114 @@ void LinuxNativeEsp::Render()
                         ImVec2((min.x + max.x - textSize.x) * 0.5f, max.y + bottomOffset),
                         weaponName.c_str(), weaponConfig.colPrimary.GetU32(), weaponConfig.colOutline.GetU32());
                 }
+                bottomOffset += ImGui::GetTextLineHeight();
             }
+        }
+
+        if (C_GET(bool, Vars.esp_distance))
+        {
+            char distance[32];
+            std::snprintf(distance, sizeof(distance), "%.0f m", feet.DistTo(localOrigin) / 39.37f);
+            const ImVec2 textSize = ImGui::CalcTextSize(distance);
+            DrawOutlinedText(draw, ImVec2((min.x + max.x - textSize.x) * 0.5f, max.y + bottomOffset),
+                distance, C_GET(ColorPickerVar_t, Vars.esp_detail_color).colValue.GetU32(),
+                IM_COL32(0, 0, 0, 230));
         }
 
         if (C_GET(bool, Vars.bSkeleton))
             DrawSkeleton(draw, scene);
 
+        const ImU32 detailColor = C_GET(ColorPickerVar_t, Vars.esp_detail_color).colValue.GetU32();
+        if (C_GET(bool, Vars.esp_head_circle))
+        {
+            Vector_t liveHead{};
+            ImVec2 liveHeadScreen{};
+            if (GetLiveBonePosition(scene, 5, liveHead) && D::WorldToScreen(liveHead, liveHeadScreen))
+            {
+                const float radius = std::clamp(width * 0.105f, 3.f, 12.f);
+                draw->AddCircle(liveHeadScreen, radius + 1.f, IM_COL32(0, 0, 0, 230), 24, 3.f);
+                draw->AddCircle(liveHeadScreen, radius, detailColor, 24, 1.f);
+            }
+        }
+        if (C_GET(bool, Vars.esp_view_direction))
+        {
+            static const std::uint32_t eyeAnglesOffset = SCHEMA::GetOffset("C_CSPlayerPawn->m_angEyeAngles");
+            Vector_t eye{};
+            if (eyeAnglesOffset != 0 && GetLiveBonePosition(scene, 5, eye))
+            {
+                const QAngle_t angles = *reinterpret_cast<const QAngle_t*>(
+                    reinterpret_cast<const std::uint8_t*>(pawn) + eyeAnglesOffset);
+                constexpr float radians = 3.14159265358979323846f / 180.f;
+                const float pitch = angles.x * radians;
+                const float yaw = angles.y * radians;
+                const float cosinePitch = std::cos(pitch);
+                const Vector_t end = eye + Vector_t(cosinePitch * std::cos(yaw),
+                    cosinePitch * std::sin(yaw), -std::sin(pitch)) * 65.f;
+                ImVec2 eyeScreen{}, endScreen{};
+                if (D::WorldToScreen(eye, eyeScreen) && D::WorldToScreen(end, endScreen))
+                {
+                    draw->AddLine(eyeScreen, endScreen, IM_COL32(0, 0, 0, 230), 3.f);
+                    draw->AddLine(eyeScreen, endScreen, detailColor, 1.f);
+                }
+            }
+        }
+        if (C_GET(bool, Vars.esp_snaplines))
+        {
+            const ImVec2 start(ImGui::GetIO().DisplaySize.x * 0.5f, ImGui::GetIO().DisplaySize.y - 1.f);
+            draw->AddLine(start, feet_screen, IM_COL32(0, 0, 0, 230), 3.f);
+            draw->AddLine(start, feet_screen, detailColor, 1.f);
+        }
+
         float flagOffset = 0.f;
-        const unsigned int flags = C_GET(unsigned int, Vars.pEspFlags);
+        const auto drawFlag = [&](const char* text, ImU32 color) {
+            DrawOutlinedText(draw, ImVec2(max.x + 4.f, min.y + flagOffset), text,
+                color, IM_COL32(0, 0, 0, 230));
+            flagOffset += ImGui::GetTextLineHeight();
+        };
         if ((flags & FLAGS_ARMOR) != 0 && pawn->GetArmorValue() > 0)
         {
             const char* armor = controller->m_bPawnHasHelmet() ? "HK" : "K";
             const auto& config = C_GET(TextOverlayVar_t, Vars.HKFlag);
-            DrawOutlinedText(draw, ImVec2(max.x + 4.f, min.y + flagOffset), armor,
-                             config.colPrimary.GetU32(), config.colOutline.GetU32());
-            flagOffset += ImGui::GetTextLineHeight();
+            drawFlag(armor, config.colPrimary.GetU32());
             ++armorFlagsDrawn;
         }
         if ((flags & FLAGS_DEFUSER) != 0 && controller->m_bPawnHasDefuser())
         {
             const auto& config = C_GET(TextOverlayVar_t, Vars.KitFlag);
-            DrawOutlinedText(draw, ImVec2(max.x + 4.f, min.y + flagOffset), "KIT",
-                             config.colPrimary.GetU32(), config.colOutline.GetU32());
+            drawFlag("KIT", config.colPrimary.GetU32());
             ++kitFlagsDrawn;
+        }
+        if ((flags & FLAGS_SCOPED) != 0 && pawn->IsScoped())
+            drawFlag("SCOPED", IM_COL32(100, 170, 255, 255));
+        if ((flags & FLAGS_FLASHED) != 0 && pawn->GetFlashDuration() > 0.05f)
+            drawFlag("FLASHED", IM_COL32(255, 220, 80, 255));
+        if ((flags & FLAGS_DEFUSING) != 0 && pawn->IsDefusing())
+            drawFlag("DEFUSING", IM_COL32(70, 150, 255, 255));
+
+        static const std::uint32_t reloadingOffset = SCHEMA::GetOffset("C_CSWeaponBase->m_bInReload");
+        static const std::uint32_t startedArmingOffset = SCHEMA::GetOffset("C_C4->m_bStartedArming");
+        static const std::uint32_t plantingViaUseOffset = SCHEMA::GetOffset("C_C4->m_bIsPlantingViaUse");
+        const bool planting = activeWeapon != nullptr && weaponName == "c4" &&
+            ((startedArmingOffset != 0 && *reinterpret_cast<const bool*>(
+                reinterpret_cast<const std::uint8_t*>(activeWeapon) + startedArmingOffset)) ||
+             (plantingViaUseOffset != 0 && *reinterpret_cast<const bool*>(
+                reinterpret_cast<const std::uint8_t*>(activeWeapon) + plantingViaUseOffset)));
+        if ((flags & FLAGS_PLANTING) != 0 && planting)
+            drawFlag("PLANTING", IM_COL32(255, 145, 60, 255));
+        if ((flags & FLAGS_RELOADING) != 0 && activeWeapon != nullptr && reloadingOffset != 0 &&
+            *reinterpret_cast<const bool*>(reinterpret_cast<const std::uint8_t*>(activeWeapon) + reloadingOffset))
+            drawFlag("RELOADING", IM_COL32(235, 235, 235, 255));
+        if ((flags & FLAGS_BOMB_CARRIER) != 0 && PlayerHasC4(entities, pawn))
+            drawFlag("C4", IM_COL32(255, 85, 85, 255));
+        if ((flags & FLAGS_PING) != 0)
+        {
+            char ping[24];
+            std::snprintf(ping, sizeof(ping), "%u ms", controller->GetPing());
+            drawFlag(ping, IM_COL32(190, 190, 190, 255));
         }
         ++drawn;
     }
-    NativeChams::UpdateTargets(chamsTargets.data(), chamsTargetCount);
+    NativeChams::UpdateTargets(chamsTargets.data(), chamsTargetCount, local_pawn);
 
     if ((++frame_counter % 300) == 0)
         EspLog("[ESP] local=%p entities=%d pawns=%d alive=%d enemies=%d projected=%d drawn=%d flagmask=0x%x armorflags=%d kitflags=%d",

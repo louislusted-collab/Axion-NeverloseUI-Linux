@@ -64,7 +64,14 @@ enum EESPFlags : ESPFlags_t
 {
 	FLAGS_NONE = 0U,
 	FLAGS_ARMOR = 1 << 0,
-	FLAGS_DEFUSER = 1 << 1
+	FLAGS_DEFUSER = 1 << 1,
+	FLAGS_SCOPED = 1 << 2,
+	FLAGS_FLASHED = 1 << 3,
+	FLAGS_DEFUSING = 1 << 4,
+	FLAGS_PLANTING = 1 << 5,
+	FLAGS_RELOADING = 1 << 6,
+	FLAGS_BOMB_CARRIER = 1 << 7,
+	FLAGS_PING = 1 << 8
 };
 #pragma endregion
 
@@ -123,15 +130,37 @@ struct Variables_t
 	bool full_update = false;
 	C_ADD_VARIABLE(bool, bVisualChams, false);
 	C_ADD_VARIABLE(bool, bSkeleton, false);
+	C_ADD_VARIABLE(int, esp_box_style, VISUAL_OVERLAY_BOX_FULL);
+	C_ADD_VARIABLE(bool, esp_box_fill, false);
+	C_ADD_VARIABLE(ColorPickerVar_t, esp_box_fill_color, ColorPickerVar_t(0, 0, 0, 70));
+	C_ADD_VARIABLE(bool, esp_armor_bar, false);
+	C_ADD_VARIABLE(ColorPickerVar_t, esp_armor_color, ColorPickerVar_t(80, 145, 255));
+	C_ADD_VARIABLE(bool, esp_distance, false);
+	C_ADD_VARIABLE(bool, esp_head_circle, false);
+	C_ADD_VARIABLE(bool, esp_view_direction, false);
+	C_ADD_VARIABLE(bool, esp_snaplines, false);
+	C_ADD_VARIABLE(bool, esp_offscreen_arrows, false);
+	C_ADD_VARIABLE(float, esp_skeleton_thickness, 1.f);
+	C_ADD_VARIABLE(ColorPickerVar_t, esp_detail_color, ColorPickerVar_t(255, 255, 255));
 
 	C_ADD_VARIABLE(int, nVisualChamMaterial, 0);
 	C_ADD_VARIABLE(bool, bVisualChamsIgnoreZ, false); // invisible chams
+	C_ADD_VARIABLE(bool, chams_arms, false);
+	C_ADD_VARIABLE(bool, chams_sleeves, false);
+	C_ADD_VARIABLE(bool, chams_held_weapon, false);
+	C_ADD_VARIABLE(bool, chams_grenades, false);
+	C_ADD_VARIABLE(bool, chams_bomb, false);
 	C_ADD_VARIABLE(bool, bNoShadow, false);
 
 	C_ADD_VARIABLE(ColorPickerVar_t, colVisualChams, ColorPickerVar_t(0, 255, 0));
 	C_ADD_VARIABLE(ColorPickerVar_t, colVisualChamsIgnoreZ, ColorPickerVar_t(255, 0, 0));
 	C_ADD_VARIABLE(ColorPickerVar_t, colModulate, ColorPickerVar_t(255, 0, 0));
 	C_ADD_VARIABLE(bool, bRemoveSmoke, false);
+	C_ADD_VARIABLE(bool, bRemoveFlash, false);
+	C_ADD_VARIABLE(float, flFlashOpacity, 0.f);
+	C_ADD_VARIABLE(bool, bRemoveScopeOverlay, false);
+	C_ADD_VARIABLE(bool, bRemoveAimPunch, false);
+	C_ADD_VARIABLE(bool, bRemoveMotionBlur, false);
 
 #pragma endregion
 #pragma region legit
@@ -421,8 +450,9 @@ struct Variables_t
 	C_ADD_VARIABLE(bool, bThirdperson, false);
 	C_ADD_VARIABLE(float, flThirdperson, 90.0f);
 	C_ADD_VARIABLE(int, thirdperson_ui_key, VK_XBUTTON2);
+	C_ADD_VARIABLE(bool, thirdperson_collision, true);
 	C_ADD_VARIABLE(float, flSetViewModelFOV, 40.0f);
-	C_ADD_VARIABLE(float, fFOVAmount, 30.0f);
+	C_ADD_VARIABLE(float, fFOVAmount, 90.0f);
 	C_ADD_VARIABLE(bool, bThirdpersonNoInterp, true);
 	C_ADD_VARIABLE(int, nAutoBHopChance, 100);
 	C_ADD_VARIABLE(unsigned int, bAutostrafeMode, 0);
