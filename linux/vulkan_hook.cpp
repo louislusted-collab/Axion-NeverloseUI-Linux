@@ -1211,9 +1211,15 @@ bool QueueNativeAimDelta(float x, float y)
         return false;
     // Stay fully inside CS2's input sample. Unlike uinput this can never move
     // the desktop pointer or leave a virtual mouse behind if the game faults.
-    native_aim_mouse_x.store(std::clamp(x, -250.f, 250.f), std::memory_order_release);
-    native_aim_mouse_y.store(std::clamp(y, -250.f, 250.f), std::memory_order_release);
+    native_aim_mouse_x.store(std::clamp(x, -75.f, 75.f), std::memory_order_release);
+    native_aim_mouse_y.store(std::clamp(y, -75.f, 75.f), std::memory_order_release);
     return true;
+}
+
+void ClearNativeAimDelta()
+{
+    native_aim_mouse_x.store(0.f, std::memory_order_release);
+    native_aim_mouse_y.store(0.f, std::memory_order_release);
 }
 
 #endif // __linux__

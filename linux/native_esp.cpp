@@ -404,29 +404,66 @@ void ApplyThirdPerson(C_CSPlayerPawn* localPawn)
 
 void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localController, C_CSPlayerPawn* localPawn)
 {
+    struct AimCandidate
+    {
+        std::uintptr_t pawn = 0;
+        int bone = -2;
+        QAngle_t delta{};
+        float fov = 9999.f;
+        bool valid = false;
+    };
+
+    static std::uintptr_t lockedPawn = 0;
+    static int lockedBone = -2;
+    static bool previousKey = false;
+    static bool toggled = false;
+    static bool previousToggleMode = false;
+    static int previousKeyCode = 0;
+    const auto stopAim = [&](bool releaseTarget) {
+        ClearNativeAimDelta();
+        if (releaseTarget)
+        {
+            lockedPawn = 0;
+            lockedBone = -2;
+        }
+    };
+
     if (!C_GET(bool, Vars.legit_ui_enable) || !C_GET(bool, Vars.legit_ui_aim))
+    {
+        stopAim(true);
+        toggled = false;
+        previousKey = true;
+        previousToggleMode = C_GET(bool, Vars.legit_ui_toggle);
+        previousKeyCode = C_GET(int, Vars.legit_ui_key);
         return;
+    }
 
     static std::uint64_t nextDiagnostic = 0;
     const std::uint64_t now = SDL_GetTicks();
     const bool diagnose = now >= nextDiagnostic;
     if (diagnose)
         nextDiagnostic = now + 1000;
-    if (MENU::bMainWindowOpened || native_thirdperson_active || localPawn == nullptr)
-    {
-        if (diagnose)
-            EspLog("[legit] blocked menu=%d thirdperson=%d pawn=%p",
-                MENU::bMainWindowOpened, native_thirdperson_active, localPawn);
-        return;
-    }
 
-    static bool previousKey = false;
-    static bool toggled = false;
-    static bool previousToggleMode = false;
-    static int previousKeyCode = 0;
     const bool toggleMode = C_GET(bool, Vars.legit_ui_toggle);
     const int keyCode = C_GET(int, Vars.legit_ui_key);
     const bool keyDown = IsNativeButtonDown(keyCode);
+    if (MENU::bMainWindowOpened || native_thirdperson_active ||
+        localPawn == nullptr || localPawn->GetHealth() <= 0)
+    {
+        stopAim(true);
+        // Never resume a toggled lock merely because the menu closed or the
+        // player respawned. Require a fresh release/press edge.
+        toggled = false;
+        previousKey = true;
+        previousToggleMode = toggleMode;
+        previousKeyCode = keyCode;
+        if (diagnose)
+            EspLog("[legit] blocked menu=%d thirdperson=%d pawn=%p health=%d",
+                MENU::bMainWindowOpened, native_thirdperson_active, localPawn,
+                localPawn != nullptr ? localPawn->GetHealth() : 0);
+        return;
+    }
+
     if (toggleMode != previousToggleMode || keyCode != previousKeyCode)
     {
         toggled = false;
@@ -439,6 +476,7 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
     previousKeyCode = keyCode;
     if (!(toggleMode ? toggled : keyDown))
     {
+        stopAim(true);
         if (diagnose)
             EspLog("[legit] waiting key=%d down=%d toggle=%d active=%d",
                 C_GET(int, Vars.legit_ui_key), keyDown, toggleMode, toggled);
@@ -447,12 +485,18 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
 
     CGameSceneNode* localScene = localPawn != nullptr ? localPawn->GetGameSceneNode() : nullptr;
     if (localScene == nullptr)
+    {
+        stopAim(true);
         return;
+    }
     const Vector_t localEye = localScene->GetAbsOrigin() + localPawn->m_vecViewOffset();
     static const std::uint32_t pawnViewAngleOffset = SCHEMA::GetOffset("C_BasePlayerPawn->v_angle");
     static const std::uint32_t pawnEyeAngleOffset = SCHEMA::GetOffset("C_CSPlayerPawn->m_angEyeAngles");
     if (pawnViewAngleOffset == 0 && pawnEyeAngleOffset == 0 && native_view_angles == nullptr)
+    {
+        stopAim(true);
         return;
+    }
 
     // The current Linux dwViewAngles export resolves to a zero-filled global
     // in live CS2. The pawn fields are the authoritative angles used by the
@@ -481,11 +525,18 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
         angleSource = "global";
     }
     if (!usableAngle(current))
+    {
+        stopAim(true);
         return;
+    }
 
-    float bestFov = std::clamp(C_GET(float, Vars.legit_ui_fov_size), 5.f, 60.f);
-    QAngle_t bestDelta{};
-    bool found = false;
+    const float acquisitionFov = std::clamp(C_GET(float, Vars.legit_ui_fov_size), 5.f, 60.f);
+    // Once acquired, allow a very small margin outside the selection cone.
+    // This prevents two nearby players/bones from alternating every frame,
+    // while still releasing promptly if the user deliberately moves away.
+    const float lockBreakFov = std::min(60.f, acquisitionFov + 1.5f);
+    AimCandidate bestCandidate{};
+    AimCandidate lockedCandidate{};
     constexpr float degrees = 180.f / 3.14159265358979323846f;
 
     QAngle_t recoilCorrection{};
@@ -503,7 +554,7 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
         }
     }
 
-    const auto considerTarget = [&](C_CSPlayerPawn* pawn, Vector_t target) {
+    const auto considerTarget = [&](C_CSPlayerPawn* pawn, int bone, Vector_t target) {
         if (C_GET(bool, Vars.legit_ui_prediction))
             target += pawn->GetAbsVelocity() *
                 (std::clamp(C_GET(float, Vars.legit_ui_prediction_ms), 0.f, 250.f) / 1000.f);
@@ -520,11 +571,17 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
         const QAngle_t delta(std::remainder(wanted.x - current.x, 360.f),
                              std::remainder(wanted.y - current.y, 360.f), 0.f);
         const float fov = std::hypot(delta.x, delta.y);
-        if (fov < bestFov)
+        if (!std::isfinite(fov))
+            return;
+
+        const std::uintptr_t pawnAddress = reinterpret_cast<std::uintptr_t>(pawn);
+        if (pawnAddress == lockedPawn && bone == lockedBone && fov <= lockBreakFov)
         {
-            bestFov = fov;
-            bestDelta = delta;
-            found = true;
+            lockedCandidate = {pawnAddress, bone, delta, fov, true};
+        }
+        if (fov <= acquisitionFov && fov < bestCandidate.fov)
+        {
+            bestCandidate = {pawnAddress, bone, delta, fov, true};
         }
     };
 
@@ -555,45 +612,76 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
             if (bone >= 0 && GetLiveBonePosition(scene, bone, target))
             {
                 foundBone = true;
-                considerTarget(pawn, target);
+                considerTarget(pawn, bone, target);
             }
         }
         if (!foundBone)
-            considerTarget(pawn, scene->GetAbsOrigin() + pawn->m_vecViewOffset());
+            considerTarget(pawn, -1, scene->GetAbsOrigin() + pawn->m_vecViewOffset());
     }
-    if (!found)
+
+    AimCandidate chosen = lockedCandidate.valid ? lockedCandidate : bestCandidate;
+    if (!chosen.valid)
     {
+        stopAim(true);
         if (diagnose)
             EspLog("[legit] key active but no target in %.1f degree fov current=%.1f,%.1f source=%s",
                 C_GET(float, Vars.legit_ui_fov_size), current.x, current.y, angleSource);
         return;
     }
+    lockedPawn = chosen.pawn;
+    lockedBone = chosen.bone;
 
-    if (C_GET(bool, Vars.legit_ui_auto_shoot) && bestFov < 2.f && I::Input != nullptr)
+    if (C_GET(bool, Vars.legit_ui_auto_shoot) && chosen.fov < 2.f && I::Input != nullptr)
         *reinterpret_cast<std::uint64_t*>(reinterpret_cast<std::uint8_t*>(I::Input) + 0x240) |= 1ULL;
 
-    const float smoothnessMs = std::max(1.f, C_GET(float, Vars.legit_ui_smoothness));
-    const float frameMs = std::max(0.1f, ImGui::GetIO().DeltaTime * 1000.f);
-    const float step = std::clamp(frameMs / smoothnessMs, 0.f, 1.f);
-    QAngle_t result(current.x + bestDelta.x * step, current.y + bestDelta.y * step, 0.f);
+    // A sub-count dead zone prevents the bot from constantly correcting bone
+    // animation/noise after it is already centered.
+    constexpr float angularDeadZone = 0.04f;
+    if (chosen.fov <= angularDeadZone)
+    {
+        stopAim(false);
+        return;
+    }
+
+    // Exponential response is stable across frame rates. Clamp hitch time and
+    // per-sample angular motion so a stalled frame can never produce a snap.
+    const float smoothnessSeconds = std::max(0.005f,
+        C_GET(float, Vars.legit_ui_smoothness) / 1000.f);
+    const float frameSeconds = std::clamp(ImGui::GetIO().DeltaTime, 0.001f, 1.f / 30.f);
+    const float response = 1.f - std::exp(-frameSeconds / smoothnessSeconds);
+    constexpr float maxDegreesPerSample = 3.f;
+    const float stepPitch = std::clamp(chosen.delta.x * response,
+        -maxDegreesPerSample, maxDegreesPerSample);
+    const float stepYaw = std::clamp(chosen.delta.y * response,
+        -maxDegreesPerSample, maxDegreesPerSample);
+    QAngle_t result(current.x + stepPitch, current.y + stepYaw, 0.f);
     result.Clamp();
 
     // Convert the desired angular step back into physical relative-mouse units.
     // Feed the adjustment only into CS2's hooked SDL relative-mouse sampler.
     // This stays in-process and cannot take over the desktop pointer.
-    const float sensitivity = CONVAR::sensitivity != nullptr
-        ? std::max(0.01f, CONVAR::sensitivity->GetValue<float>()) : 2.f;
-    const float yawScale = CONVAR::m_yaw != nullptr
-        ? std::max(0.0001f, std::fabs(CONVAR::m_yaw->GetValue<float>())) : 0.022f;
-    const float pitchScale = CONVAR::m_pitch != nullptr
-        ? std::max(0.0001f, std::fabs(CONVAR::m_pitch->GetValue<float>())) : 0.022f;
-    const float mouseX = -(bestDelta.y * step) / (sensitivity * yawScale);
-    const float mouseY = (bestDelta.x * step) / (sensitivity * pitchScale);
+    float sensitivity = CONVAR::sensitivity != nullptr
+        ? CONVAR::sensitivity->GetValue<float>() : 2.f;
+    float yawScale = CONVAR::m_yaw != nullptr
+        ? std::fabs(CONVAR::m_yaw->GetValue<float>()) : 0.022f;
+    float pitchScale = CONVAR::m_pitch != nullptr
+        ? std::fabs(CONVAR::m_pitch->GetValue<float>()) : 0.022f;
+    if (!std::isfinite(sensitivity) || sensitivity < 0.05f || sensitivity > 20.f)
+        sensitivity = 2.f;
+    if (!std::isfinite(yawScale) || yawScale < 0.001f || yawScale > 0.1f)
+        yawScale = 0.022f;
+    if (!std::isfinite(pitchScale) || pitchScale < 0.001f || pitchScale > 0.1f)
+        pitchScale = 0.022f;
+    const float mouseX = std::clamp(-stepYaw / (sensitivity * yawScale), -75.f, 75.f);
+    const float mouseY = std::clamp(stepPitch / (sensitivity * pitchScale), -75.f, 75.f);
     const bool inputAccepted = QueueNativeAimDelta(mouseX, mouseY);
 
     if (diagnose)
-        EspLog("[legit] mouse fov=%.2f step=%.3f delta=%.2f,%.2f accepted=%d current=%.1f,%.1f result=%.1f,%.1f source=%s",
-            bestFov, step, mouseX, mouseY, inputAccepted, current.x, current.y, result.x, result.y, angleSource);
+        EspLog("[legit] mouse fov=%.2f response=%.3f delta=%.2f,%.2f accepted=%d target=%p bone=%d current=%.1f,%.1f result=%.1f,%.1f scale=%.3f/%.4f/%.4f source=%s",
+            chosen.fov, response, mouseX, mouseY, inputAccepted,
+            reinterpret_cast<void*>(chosen.pawn), chosen.bone,
+            current.x, current.y, result.x, result.y,
+            sensitivity, yawScale, pitchScale, angleSource);
 }
 
 void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localController, C_CSPlayerPawn* localPawn)
