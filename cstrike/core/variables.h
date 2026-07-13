@@ -158,6 +158,12 @@ struct Variables_t
 	C_ADD_VARIABLE(int, skin_ui_seed, 1);
 	C_ADD_VARIABLE(float, skin_ui_wear, 0.01f);
 	C_ADD_VARIABLE(int, skin_ui_stattrak, -1);
+	C_ADD_VARIABLE_ARRAY(bool, 1024, skin_weapon_enable, false);
+	C_ADD_VARIABLE_ARRAY(int, 1024, skin_weapon_paint_kit, 0);
+	C_ADD_VARIABLE_ARRAY(int, 1024, skin_weapon_seed, 1);
+	C_ADD_VARIABLE_ARRAY(float, 1024, skin_weapon_wear, 0.01f);
+	C_ADD_VARIABLE_ARRAY(int, 1024, skin_weapon_stattrak, -1);
+	C_ADD_VARIABLE_ARRAY(bool, 1024, skin_weapon_legacy_mesh, false);
 
 	C_ADD_VARIABLE(bool, legit_enable, false);
 	C_ADD_VARIABLE(int, legit_weapon_selection, 0);

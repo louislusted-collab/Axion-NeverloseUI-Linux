@@ -31,6 +31,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <vector>
 
 #include <SDL3/SDL.h>
 
@@ -42,6 +43,23 @@ QAngle_t* native_view_angles = nullptr;
 bool attempted_matrix_lookup = false;
 std::uint64_t frame_counter = 0;
 bool native_thirdperson_active = false;
+std::uint16_t active_skin_weapon_definition = 0;
+bool native_skin_regenerator_ready = false;
+bool native_skin_refresh_requested = false;
+
+enum class NativeSkinRuntimeStatus
+{
+    WaitingForPlayer,
+    MissingSchema,
+    WaitingForWeapon,
+    Disabled,
+    ProfileDisabled,
+    PaintKitRequired,
+    MissingRegenerator,
+    Ready,
+    Refreshed,
+};
+NativeSkinRuntimeStatus native_skin_runtime_status = NativeSkinRuntimeStatus::WaitingForPlayer;
 
 struct NativeEconAttribute
 {
@@ -63,7 +81,46 @@ struct TemporarySkinAttributes
     C_NetworkUtlVectorBase<NativeEconAttribute>* list = nullptr;
     std::uint32_t originalSize = 0;
     NativeEconAttribute* originalElements = nullptr;
-    std::array<NativeEconAttribute, 3> attributes{};
+    std::vector<NativeEconAttribute> attributes{};
+};
+
+struct NativeSkinSettings
+{
+    std::int32_t paint = 0;
+    std::int32_t seed = 1;
+    float wear = 0.01f;
+    std::int32_t statTrak = -1;
+    bool legacyMesh = false;
+
+    bool operator==(const NativeSkinSettings&) const = default;
+};
+
+struct OriginalWeaponSkin
+{
+    std::int32_t idHigh = 0;
+    std::int32_t idLow = 0;
+    std::uint32_t account = 0;
+    std::uint32_t quality = 0;
+    bool initialized = false;
+    bool disallowSoc = false;
+    bool storeItem = false;
+    bool restoreMaterial = false;
+    bool attributesInitialized = false;
+    bool attachmentDirty = false;
+    std::int32_t paint = 0;
+    std::int32_t seed = 0;
+    float wear = 0.f;
+    std::int32_t statTrak = -1;
+    std::uint64_t meshMask = 1;
+};
+
+struct AppliedWeaponSkin
+{
+    C_CSWeaponBase* weapon = nullptr;
+    std::uint16_t definition = 0;
+    NativeSkinSettings settings{};
+    OriginalWeaponSkin original{};
+    bool applied = false;
 };
 
 void EspLog(const char* message, ...)
@@ -508,13 +565,6 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
 
 void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localController, C_CSPlayerPawn* localPawn)
 {
-    if (!C_GET(bool, Vars.skin_ui_enable) || entities == nullptr ||
-        localController == nullptr || localPawn == nullptr)
-        return;
-    CPlayer_WeaponServices* services = localPawn->GetWeaponServices();
-    if (services == nullptr)
-        return;
-
     static const std::uint32_t myWeapons = SCHEMA::GetOffset("CPlayer_WeaponServices->m_hMyWeapons");
     static const std::uint32_t attributeManager = SCHEMA::GetOffset("C_EconEntity->m_AttributeManager");
     static const std::uint32_t attributesInitialized = SCHEMA::GetOffset("C_EconEntity->m_bAttributesInitialized");
@@ -537,15 +587,53 @@ void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localCont
     static const std::uint32_t wear = SCHEMA::GetOffset("C_EconEntity->m_flFallbackWear");
     static const std::uint32_t statTrak = SCHEMA::GetOffset("C_EconEntity->m_nFallbackStatTrak");
     static const std::uint32_t steamId = SCHEMA::GetOffset("CBasePlayerController->m_steamID");
-    if (attributeManager == 0 || itemOffset == 0 || idHigh == 0 || paintKit == 0)
-        return;
-
     static const std::uint32_t modelState = SCHEMA::GetOffset("CSkeletonInstance->m_modelState");
     static const std::uint32_t meshGroupMask = SCHEMA::GetOffset("CModelState->m_MeshGroupMask");
-    const int desiredPaint = std::max(0, C_GET(int, Vars.skin_ui_paint_kit));
-    const int desiredSeed = std::clamp(C_GET(int, Vars.skin_ui_seed), 0, 1000);
-    const float desiredWear = std::clamp(C_GET(float, Vars.skin_ui_wear), 0.000001f, 1.f);
-    const int desiredStatTrak = C_GET(int, Vars.skin_ui_stattrak);
+    if (entities == nullptr || localController == nullptr || localPawn == nullptr ||
+        attributeManager == 0 || itemOffset == 0 || idHigh == 0 || paintKit == 0 || definitionIndex == 0)
+    {
+        active_skin_weapon_definition = 0;
+        native_skin_runtime_status = entities == nullptr || localController == nullptr || localPawn == nullptr
+            ? NativeSkinRuntimeStatus::WaitingForPlayer
+            : NativeSkinRuntimeStatus::MissingSchema;
+        return;
+    }
+
+    CPlayer_WeaponServices* services = localPawn->GetWeaponServices();
+    if (services == nullptr)
+    {
+        active_skin_weapon_definition = 0;
+        native_skin_runtime_status = NativeSkinRuntimeStatus::WaitingForPlayer;
+        return;
+    }
+
+    C_CSWeaponBase* activeWeapon = entities->Get<C_CSWeaponBase>(services->m_hActiveWeapon());
+    const auto getItem = [&](C_CSWeaponBase* weapon) -> std::uint8_t* {
+        return weapon == nullptr ? nullptr : reinterpret_cast<std::uint8_t*>(weapon) + attributeManager + itemOffset;
+    };
+    const auto getDefinition = [&](C_CSWeaponBase* weapon) -> std::uint16_t {
+        std::uint8_t* item = getItem(weapon);
+        return item == nullptr ? 0 : *reinterpret_cast<const std::uint16_t*>(item + definitionIndex);
+    };
+    active_skin_weapon_definition = getDefinition(activeWeapon);
+    if (active_skin_weapon_definition == 0)
+        native_skin_runtime_status = NativeSkinRuntimeStatus::WaitingForWeapon;
+
+    static bool legacyMigrated = false;
+    if (!legacyMigrated && active_skin_weapon_definition != 0 &&
+        active_skin_weapon_definition < LinuxNativeEsp::SkinWeaponDefinitionCount &&
+        C_GET(int, Vars.skin_ui_paint_kit) > 0)
+    {
+        const std::size_t definition = active_skin_weapon_definition;
+        C_GET_ARRAY(bool, 1024, Vars.skin_weapon_enable, definition) = true;
+        C_GET_ARRAY(int, 1024, Vars.skin_weapon_paint_kit, definition) = C_GET(int, Vars.skin_ui_paint_kit);
+        C_GET_ARRAY(int, 1024, Vars.skin_weapon_seed, definition) = C_GET(int, Vars.skin_ui_seed);
+        C_GET_ARRAY(float, 1024, Vars.skin_weapon_wear, definition) = C_GET(float, Vars.skin_ui_wear);
+        C_GET_ARRAY(int, 1024, Vars.skin_weapon_stattrak, definition) = C_GET(int, Vars.skin_ui_stattrak);
+        legacyMigrated = true;
+        EspLog("[skin] migrated legacy profile to definition=%u", active_skin_weapon_definition);
+    }
+
     const std::uint32_t ownerAccount = steamId == 0 ? 0U : static_cast<std::uint32_t>(
         *reinterpret_cast<const std::uint64_t*>(reinterpret_cast<std::uint8_t*>(localController) + steamId));
     static bool loggedOffsets = false;
@@ -556,10 +644,74 @@ void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localCont
         loggedOffsets = true;
     }
 
-    std::array<TemporarySkinAttributes, 64> temporaryAttributes{};
-    std::size_t temporaryAttributeCount = 0;
+    using RegenerateWeaponSkinsFn = void(*)(bool);
+    static RegenerateWeaponSkinsFn regenerateWeaponSkins = nullptr;
+    static bool attemptedRegenerateLookup = false;
+    if (!attemptedRegenerateLookup)
+    {
+        attemptedRegenerateLookup = true;
+        regenerateWeaponSkins = reinterpret_cast<RegenerateWeaponSkinsFn>(MEM::FindPattern(
+            CLIENT_DLL,
+            "55 48 89 E5 41 55 44 0F B6 EF 41 54 53 48 83 EC 28 E8 ? ? ? ? 48 85 C0 74 7D"));
+        native_skin_regenerator_ready = regenerateWeaponSkins != nullptr;
+        EspLog("[skin] native regenerate callback=%p", regenerateWeaponSkins);
+    }
+
+    static std::array<AppliedWeaponSkin, 64> appliedStates{};
+
+    std::array<C_CSWeaponBase*, 64> ownedWeapons{};
+    std::size_t ownedWeaponCount = 0;
+    if (myWeapons != 0)
+    {
+        auto* collection = reinterpret_cast<C_NetworkUtlVectorBase<CBaseHandle>*>(
+            reinterpret_cast<std::uint8_t*>(services) + myWeapons);
+        if (collection->pElements != nullptr)
+        {
+            const std::uint32_t count = std::min(collection->nSize, 64U);
+            for (std::uint32_t index = 0; index < count; ++index)
+            {
+                C_CSWeaponBase* weapon = entities->Get<C_CSWeaponBase>(collection->pElements[index]);
+                if (weapon != nullptr &&
+                    std::find(ownedWeapons.begin(), ownedWeapons.begin() + ownedWeaponCount, weapon) ==
+                        ownedWeapons.begin() + ownedWeaponCount)
+                    ownedWeapons[ownedWeaponCount++] = weapon;
+            }
+        }
+    }
+    if (ownedWeaponCount == 0 && activeWeapon != nullptr)
+        ownedWeapons[ownedWeaponCount++] = activeWeapon;
+
+    static C_CSWeaponBase* previousActiveWeapon = nullptr;
+    const bool activeWeaponChanged = activeWeapon != previousActiveWeapon;
+    previousActiveWeapon = activeWeapon;
+
+    // Release state from dropped/destroyed weapons before allocating state for
+    // replacements. This avoids a one-frame failure when a full inventory is
+    // recreated during a team switch or respawn.
+    for (AppliedWeaponSkin& state : appliedStates)
+    {
+        if (state.weapon == nullptr)
+            continue;
+        const bool stillOwned = std::any_of(ownedWeapons.begin(), ownedWeapons.begin() + ownedWeaponCount,
+            [&](C_CSWeaponBase* weapon) {
+                return weapon == state.weapon && getDefinition(weapon) == state.definition;
+            });
+        if (!stillOwned)
+            state = {};
+    }
+
+    std::vector<TemporarySkinAttributes> temporaryAttributes;
+    temporaryAttributes.reserve(ownedWeaponCount);
+    std::vector<AppliedWeaponSkin*> appliedThisPass;
+    std::vector<AppliedWeaponSkin*> restoredThisPass;
     bool shouldRegenerate = false;
 
+    const auto getMeshMask = [&](CGameSceneNode* scene) -> std::uint64_t {
+        if (scene == nullptr || modelState == 0 || meshGroupMask == 0)
+            return 1;
+        return *reinterpret_cast<const std::uint64_t*>(
+            reinterpret_cast<const std::uint8_t*>(scene) + modelState + meshGroupMask);
+    };
     const auto setMeshMask = [&](CGameSceneNode* scene, std::uint64_t mask) {
         if (scene == nullptr || modelState == 0 || meshGroupMask == 0)
             return;
@@ -567,44 +719,151 @@ void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localCont
         *reinterpret_cast<std::uint64_t*>(state + meshGroupMask) = mask;
     };
 
-    const auto prepareAttributes = [&](std::uint8_t* item) {
-        if (attributeList == 0 || attributes == 0 || temporaryAttributeCount >= temporaryAttributes.size())
+    const auto prepareAttributes = [&](std::uint8_t* item, const NativeSkinSettings& settings) {
+        if (attributeList == 0 || attributes == 0)
             return false;
         auto* list = reinterpret_cast<C_NetworkUtlVectorBase<NativeEconAttribute>*>(
             item + attributeList + attributes);
-        if (list->nSize != 0 || list->pElements != nullptr)
+        if (list->nSize > 64 || (list->nSize != 0 && list->pElements == nullptr))
+        {
+            EspLog("[skin] rejected invalid attribute list item=%p count=%u elements=%p",
+                item, list->nSize, list->pElements);
             return false;
+        }
 
-        TemporarySkinAttributes& temporary = temporaryAttributes[temporaryAttributeCount++];
+        temporaryAttributes.emplace_back();
+        TemporarySkinAttributes& temporary = temporaryAttributes.back();
         temporary.list = list;
         temporary.originalSize = list->nSize;
         temporary.originalElements = list->pElements;
+        temporary.attributes.reserve(static_cast<std::size_t>(list->nSize) + 3);
+        if (list->nSize != 0)
+            temporary.attributes.assign(list->pElements, list->pElements + list->nSize);
+
         const std::array<std::pair<std::uint16_t, float>, 3> values{{
-            {6, static_cast<float>(desiredPaint)},
-            {7, static_cast<float>(desiredSeed)},
-            {8, desiredWear},
+            {6, static_cast<float>(settings.paint)},
+            {7, static_cast<float>(settings.seed)},
+            {8, settings.wear},
         }};
-        for (std::size_t index = 0; index < temporary.attributes.size(); ++index)
+        for (const auto& [definition, value] : values)
         {
-            temporary.attributes[index].owner = item;
-            temporary.attributes[index].definition = values[index].first;
-            temporary.attributes[index].value = values[index].second;
-            temporary.attributes[index].initialValue = values[index].second;
+            auto iterator = std::find_if(temporary.attributes.begin(), temporary.attributes.end(),
+                [definition](const NativeEconAttribute& attribute) { return attribute.definition == definition; });
+            if (iterator == temporary.attributes.end())
+            {
+                temporary.attributes.emplace_back();
+                iterator = std::prev(temporary.attributes.end());
+                iterator->owner = item;
+                iterator->definition = definition;
+            }
+            iterator->value = value;
+            iterator->initialValue = value;
         }
         list->pElements = temporary.attributes.data();
         list->nSize = static_cast<std::uint32_t>(temporary.attributes.size());
         return true;
     };
 
-    const auto applyWeapon = [&](C_CSWeaponBase* weapon) {
-        if (weapon == nullptr)
-            return;
+    const auto findState = [&](C_CSWeaponBase* weapon, std::uint16_t definition) -> AppliedWeaponSkin* {
+        for (AppliedWeaponSkin& state : appliedStates)
+            if (state.weapon == weapon && state.definition == definition)
+                return &state;
+        return nullptr;
+    };
+    const auto allocateState = [&]() -> AppliedWeaponSkin* {
+        for (AppliedWeaponSkin& state : appliedStates)
+            if (state.weapon == nullptr)
+                return &state;
+        return nullptr;
+    };
+    const auto restoreState = [&](AppliedWeaponSkin& state, std::uint8_t* base, std::uint8_t* item) {
+        *reinterpret_cast<std::int32_t*>(item + idHigh) = state.original.idHigh;
+        if (idLow != 0) *reinterpret_cast<std::int32_t*>(item + idLow) = state.original.idLow;
+        if (accountId != 0) *reinterpret_cast<std::uint32_t*>(item + accountId) = state.original.account;
+        if (entityQuality != 0) *reinterpret_cast<std::uint32_t*>(item + entityQuality) = state.original.quality;
+        if (initialized != 0) *reinterpret_cast<bool*>(item + initialized) = state.original.initialized;
+        if (disallowSoc != 0) *reinterpret_cast<bool*>(item + disallowSoc) = state.original.disallowSoc;
+        if (storeItem != 0) *reinterpret_cast<bool*>(item + storeItem) = state.original.storeItem;
+        if (restoreMaterial != 0) *reinterpret_cast<bool*>(item + restoreMaterial) = state.original.restoreMaterial;
+        if (attributesInitialized != 0) *reinterpret_cast<bool*>(base + attributesInitialized) = state.original.attributesInitialized;
+        if (attachmentDirty != 0) *reinterpret_cast<bool*>(base + attachmentDirty) = true;
+        *reinterpret_cast<std::int32_t*>(base + paintKit) = state.original.paint;
+        if (seed != 0) *reinterpret_cast<std::int32_t*>(base + seed) = state.original.seed;
+        if (wear != 0) *reinterpret_cast<float*>(base + wear) = state.original.wear;
+        if (statTrak != 0) *reinterpret_cast<std::int32_t*>(base + statTrak) = state.original.statTrak;
+        setMeshMask(state.weapon->GetGameSceneNode(), state.original.meshMask);
+    };
+
+    for (std::size_t weaponIndex = 0; weaponIndex < ownedWeaponCount; ++weaponIndex)
+    {
+        C_CSWeaponBase* weapon = ownedWeapons[weaponIndex];
         auto* base = reinterpret_cast<std::uint8_t*>(weapon);
-        auto* item = base + attributeManager + itemOffset;
-        const int previousPaint = *reinterpret_cast<const std::int32_t*>(base + paintKit);
-        const bool changed = previousPaint != desiredPaint ||
-            (seed != 0 && *reinterpret_cast<const std::int32_t*>(base + seed) != desiredSeed) ||
-            (wear != 0 && std::fabs(*reinterpret_cast<const float*>(base + wear) - desiredWear) > 0.000001f);
+        std::uint8_t* item = getItem(weapon);
+        const std::uint16_t definition = getDefinition(weapon);
+        if (item == nullptr || definition == 0 || definition >= LinuxNativeEsp::SkinWeaponDefinitionCount)
+            continue;
+
+        AppliedWeaponSkin* state = findState(weapon, definition);
+        const bool profileSelected = C_GET_ARRAY(bool, 1024, Vars.skin_weapon_enable, definition);
+        const int configuredPaint = C_GET_ARRAY(int, 1024, Vars.skin_weapon_paint_kit, definition);
+        const bool profileEnabled = C_GET(bool, Vars.skin_ui_enable) && profileSelected && configuredPaint > 0;
+        if (!profileEnabled)
+        {
+            if (state != nullptr && state->applied)
+            {
+                restoreState(*state, base, item);
+                restoredThisPass.push_back(state);
+                shouldRegenerate = true;
+                EspLog("[skin] restoring weapon=%p definition=%u", weapon, definition);
+            }
+            continue;
+        }
+
+        NativeSkinSettings settings{
+            configuredPaint,
+            std::clamp(C_GET_ARRAY(int, 1024, Vars.skin_weapon_seed, definition), 0, 1000),
+            std::clamp(C_GET_ARRAY(float, 1024, Vars.skin_weapon_wear, definition), 0.000001f, 1.f),
+            C_GET_ARRAY(int, 1024, Vars.skin_weapon_stattrak, definition),
+            C_GET_ARRAY(bool, 1024, Vars.skin_weapon_legacy_mesh, definition),
+        };
+        if (state == nullptr)
+        {
+            state = allocateState();
+            if (state == nullptr)
+            {
+                EspLog("[skin] no free state slot for weapon=%p definition=%u", weapon, definition);
+                continue;
+            }
+            *state = {};
+            state->weapon = weapon;
+            state->definition = definition;
+            state->original.idHigh = *reinterpret_cast<const std::int32_t*>(item + idHigh);
+            if (idLow != 0) state->original.idLow = *reinterpret_cast<const std::int32_t*>(item + idLow);
+            if (accountId != 0) state->original.account = *reinterpret_cast<const std::uint32_t*>(item + accountId);
+            if (entityQuality != 0) state->original.quality = *reinterpret_cast<const std::uint32_t*>(item + entityQuality);
+            if (initialized != 0) state->original.initialized = *reinterpret_cast<const bool*>(item + initialized);
+            if (disallowSoc != 0) state->original.disallowSoc = *reinterpret_cast<const bool*>(item + disallowSoc);
+            if (storeItem != 0) state->original.storeItem = *reinterpret_cast<const bool*>(item + storeItem);
+            if (restoreMaterial != 0) state->original.restoreMaterial = *reinterpret_cast<const bool*>(item + restoreMaterial);
+            if (attributesInitialized != 0) state->original.attributesInitialized = *reinterpret_cast<const bool*>(base + attributesInitialized);
+            if (attachmentDirty != 0) state->original.attachmentDirty = *reinterpret_cast<const bool*>(base + attachmentDirty);
+            state->original.paint = *reinterpret_cast<const std::int32_t*>(base + paintKit);
+            if (seed != 0) state->original.seed = *reinterpret_cast<const std::int32_t*>(base + seed);
+            if (wear != 0) state->original.wear = *reinterpret_cast<const float*>(base + wear);
+            if (statTrak != 0) state->original.statTrak = *reinterpret_cast<const std::int32_t*>(base + statTrak);
+            state->original.meshMask = getMeshMask(weapon->GetGameSceneNode());
+        }
+
+        const std::uint64_t desiredMeshMask = settings.legacyMesh ? 2U : 1U;
+        const bool identityDrifted = *reinterpret_cast<const std::int32_t*>(item + idHigh) != -1 ||
+            (idLow != 0 && *reinterpret_cast<const std::int32_t*>(item + idLow) != -1);
+        const bool meshDrifted = getMeshMask(weapon->GetGameSceneNode()) != desiredMeshMask;
+        const bool changed = !state->applied || !(state->settings == settings) || identityDrifted ||
+            meshDrifted || native_skin_refresh_requested || (activeWeaponChanged && weapon == activeWeapon);
+        setMeshMask(weapon->GetGameSceneNode(), desiredMeshMask);
+        if (!changed)
+            continue;
+
         *reinterpret_cast<std::int32_t*>(item + idHigh) = -1;
         if (idLow != 0)
             *reinterpret_cast<std::int32_t*>(item + idLow) = -1;
@@ -624,78 +883,201 @@ void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localCont
             *reinterpret_cast<bool*>(base + attachmentDirty) = true;
         if (entityQuality != 0 && definitionIndex != 0)
         {
-            const std::uint16_t definition = *reinterpret_cast<const std::uint16_t*>(item + definitionIndex);
             if (definition >= 500 || definition == 42 || definition == 59)
                 *reinterpret_cast<std::uint32_t*>(item + entityQuality) = 4;
         }
 
-        *reinterpret_cast<std::int32_t*>(base + paintKit) = desiredPaint;
+        *reinterpret_cast<std::int32_t*>(base + paintKit) = settings.paint;
         if (seed != 0)
-            *reinterpret_cast<std::int32_t*>(base + seed) = desiredSeed;
+            *reinterpret_cast<std::int32_t*>(base + seed) = settings.seed;
         if (wear != 0)
-            *reinterpret_cast<float*>(base + wear) = desiredWear;
+            *reinterpret_cast<float*>(base + wear) = settings.wear;
         if (statTrak != 0)
-            *reinterpret_cast<std::int32_t*>(base + statTrak) = desiredStatTrak;
-
-        setMeshMask(weapon->GetGameSceneNode(), 2);
-        if (changed)
-        {
-            prepareAttributes(item);
-            shouldRegenerate = true;
-            EspLog("[skin] applied weapon=%p paint=%d previous=%d seed=%d wear=%.6f account=%u",
-                weapon, desiredPaint, previousPaint, desiredSeed, desiredWear, ownerAccount);
-        }
-    };
-
-    bool appliedCollection = false;
-    if (myWeapons != 0)
-    {
-        auto* collection = reinterpret_cast<C_NetworkUtlVectorBase<CBaseHandle>*>(
-            reinterpret_cast<std::uint8_t*>(services) + myWeapons);
-        const std::uint32_t count = std::min(collection->nSize, 64U);
-        if (collection->pElements != nullptr && count > 0)
-        {
-            for (std::uint32_t index = 0; index < count; ++index)
-                applyWeapon(entities->Get<C_CSWeaponBase>(collection->pElements[index]));
-            appliedCollection = true;
-        }
+            *reinterpret_cast<std::int32_t*>(base + statTrak) = settings.statTrak;
+        prepareAttributes(item, settings);
+        state->settings = settings;
+        appliedThisPass.push_back(state);
+        shouldRegenerate = true;
+        EspLog("[skin] queued weapon=%p definition=%u paint=%d seed=%d wear=%.6f stattrak=%d mesh=%u attrs=%zu",
+            weapon, definition, settings.paint, settings.seed, settings.wear, settings.statTrak,
+            settings.legacyMesh ? 2U : 1U, temporaryAttributes.size());
     }
-    if (!appliedCollection)
-        applyWeapon(entities->Get<C_CSWeaponBase>(services->m_hActiveWeapon()));
 
     CCSPlayer_ViewModelServices* viewModelServices = localPawn->GetViewModelServices();
     C_CSGOViewModel* viewModel = viewModelServices != nullptr
         ? entities->Get<C_CSGOViewModel>(viewModelServices->m_hViewModel())
         : nullptr;
-    if (viewModel != nullptr)
-        setMeshMask(viewModel->GetGameSceneNode(), 2);
-
-    using RegenerateWeaponSkinsFn = void(*)(bool);
-    static RegenerateWeaponSkinsFn regenerateWeaponSkins = nullptr;
-    static bool attemptedRegenerateLookup = false;
-    if (!attemptedRegenerateLookup)
+    static C_CSGOViewModel* trackedViewModel = nullptr;
+    static std::uint64_t originalViewModelMask = 1;
+    static bool viewModelOverridden = false;
+    if (viewModel != trackedViewModel)
     {
-        attemptedRegenerateLookup = true;
-        regenerateWeaponSkins = reinterpret_cast<RegenerateWeaponSkinsFn>(MEM::FindPattern(
-            CLIENT_DLL,
-            "55 48 89 E5 41 55 44 0F B6 EF 41 54 53 48 83 EC 28 E8 ? ? ? ? 48 85 C0 74 7D"));
-        EspLog("[skin] native regenerate callback=%p", regenerateWeaponSkins);
+        trackedViewModel = viewModel;
+        viewModelOverridden = false;
     }
-    if (shouldRegenerate && regenerateWeaponSkins != nullptr)
+    if (activeWeaponChanged && viewModel != nullptr && viewModelOverridden)
+    {
+        setMeshMask(viewModel->GetGameSceneNode(), originalViewModelMask);
+        viewModelOverridden = false;
+    }
+    const std::uint16_t activeDefinition = getDefinition(activeWeapon);
+    const bool activeProfileSelected = activeDefinition != 0 &&
+        activeDefinition < LinuxNativeEsp::SkinWeaponDefinitionCount &&
+        C_GET_ARRAY(bool, 1024, Vars.skin_weapon_enable, activeDefinition);
+    const bool activeProfileEnabled = activeProfileSelected &&
+        C_GET(bool, Vars.skin_ui_enable) &&
+        C_GET_ARRAY(int, 1024, Vars.skin_weapon_paint_kit, activeDefinition) > 0;
+    if (viewModel != nullptr && activeProfileEnabled)
+    {
+        if (!viewModelOverridden)
+        {
+            originalViewModelMask = getMeshMask(viewModel->GetGameSceneNode());
+            viewModelOverridden = true;
+        }
+        setMeshMask(viewModel->GetGameSceneNode(),
+            C_GET_ARRAY(bool, 1024, Vars.skin_weapon_legacy_mesh, activeDefinition) ? 2U : 1U);
+    }
+    else if (viewModel != nullptr && viewModelOverridden)
+    {
+        setMeshMask(viewModel->GetGameSceneNode(), originalViewModelMask);
+        viewModelOverridden = false;
+    }
+
+    const bool regenerated = shouldRegenerate && regenerateWeaponSkins != nullptr;
+    if (regenerated)
     {
         regenerateWeaponSkins(false);
-        EspLog("[skin] regenerated %zu temporary attribute lists", temporaryAttributeCount);
+        EspLog("[skin] regenerated applied=%zu restored=%zu temporary_lists=%zu",
+            appliedThisPass.size(), restoredThisPass.size(), temporaryAttributes.size());
     }
 
     // The engine consumes these lists synchronously. Restore its original
     // vectors immediately so no entity retains a pointer into our stack.
-    for (std::size_t index = 0; index < temporaryAttributeCount; ++index)
+    for (TemporarySkinAttributes& temporary : temporaryAttributes)
     {
-        TemporarySkinAttributes& temporary = temporaryAttributes[index];
         temporary.list->pElements = temporary.originalElements;
         temporary.list->nSize = temporary.originalSize;
     }
+
+    if (regenerated)
+    {
+        for (AppliedWeaponSkin* state : appliedThisPass)
+        {
+            auto* base = reinterpret_cast<std::uint8_t*>(state->weapon);
+            *reinterpret_cast<std::int32_t*>(base + paintKit) = -1;
+            state->applied = true;
+        }
+        for (AppliedWeaponSkin* state : restoredThisPass)
+        {
+            if (attachmentDirty != 0)
+            {
+                auto* base = reinterpret_cast<std::uint8_t*>(state->weapon);
+                *reinterpret_cast<bool*>(base + attachmentDirty) = state->original.attachmentDirty;
+            }
+            *state = {};
+        }
+        native_skin_refresh_requested = false;
+    }
+
+    if (activeDefinition == 0)
+        native_skin_runtime_status = NativeSkinRuntimeStatus::WaitingForWeapon;
+    else if (!C_GET(bool, Vars.skin_ui_enable))
+        native_skin_runtime_status = NativeSkinRuntimeStatus::Disabled;
+    else if (!activeProfileSelected)
+        native_skin_runtime_status = NativeSkinRuntimeStatus::ProfileDisabled;
+    else if (C_GET_ARRAY(int, 1024, Vars.skin_weapon_paint_kit, activeDefinition) <= 0)
+        native_skin_runtime_status = NativeSkinRuntimeStatus::PaintKitRequired;
+    else if (!native_skin_regenerator_ready)
+        native_skin_runtime_status = NativeSkinRuntimeStatus::MissingRegenerator;
+    else if (regenerated)
+        native_skin_runtime_status = NativeSkinRuntimeStatus::Refreshed;
+    else
+        native_skin_runtime_status = NativeSkinRuntimeStatus::Ready;
 }
+}
+
+std::uint16_t LinuxNativeEsp::GetActiveSkinWeaponDefinition()
+{
+    return active_skin_weapon_definition;
+}
+
+const char* LinuxNativeEsp::GetActiveSkinWeaponName()
+{
+    switch (active_skin_weapon_definition)
+    {
+    case 1: return "Desert Eagle";
+    case 2: return "Dual Berettas";
+    case 3: return "Five-SeveN";
+    case 4: return "Glock-18";
+    case 7: return "AK-47";
+    case 8: return "AUG";
+    case 9: return "AWP";
+    case 10: return "FAMAS";
+    case 11: return "G3SG1";
+    case 13: return "Galil AR";
+    case 14: return "M249";
+    case 16: return "M4A4";
+    case 17: return "MAC-10";
+    case 19: return "P90";
+    case 23: return "MP5-SD";
+    case 24: return "UMP-45";
+    case 25: return "XM1014";
+    case 26: return "PP-Bizon";
+    case 27: return "MAG-7";
+    case 28: return "Negev";
+    case 29: return "Sawed-Off";
+    case 30: return "Tec-9";
+    case 31: return "Zeus x27";
+    case 32: return "P2000";
+    case 33: return "MP7";
+    case 34: return "MP9";
+    case 35: return "Nova";
+    case 36: return "P250";
+    case 38: return "SCAR-20";
+    case 39: return "SG 553";
+    case 40: return "SSG 08";
+    case 42: return "CT knife";
+    case 43: return "Flashbang";
+    case 44: return "HE grenade";
+    case 45: return "Smoke grenade";
+    case 46: return "Molotov";
+    case 47: return "Decoy grenade";
+    case 48: return "Incendiary grenade";
+    case 49: return "C4";
+    case 59: return "T knife";
+    case 60: return "M4A1-S";
+    case 61: return "USP-S";
+    case 63: return "CZ75-Auto";
+    case 64: return "R8 Revolver";
+    default: return "Weapon";
+    }
+}
+
+const char* LinuxNativeEsp::GetSkinRuntimeStatus()
+{
+    switch (native_skin_runtime_status)
+    {
+    case NativeSkinRuntimeStatus::WaitingForPlayer: return "Waiting for a live player pawn.";
+    case NativeSkinRuntimeStatus::MissingSchema: return "Blocked: required live schema fields are missing.";
+    case NativeSkinRuntimeStatus::WaitingForWeapon: return "Waiting for an active weapon.";
+    case NativeSkinRuntimeStatus::Disabled: return "Skin changer is disabled.";
+    case NativeSkinRuntimeStatus::ProfileDisabled: return "Ready; this weapon has no enabled override.";
+    case NativeSkinRuntimeStatus::PaintKitRequired: return "Set a paint kit ID greater than zero.";
+    case NativeSkinRuntimeStatus::MissingRegenerator: return "Blocked: this CS2 build's native refresh callback was not found.";
+    case NativeSkinRuntimeStatus::Ready: return "Ready; override is active and monitored for resets.";
+    case NativeSkinRuntimeStatus::Refreshed: return "Native weapon materials refreshed.";
+    }
+    return "Unknown skin changer state.";
+}
+
+bool LinuxNativeEsp::IsSkinRegeneratorReady()
+{
+    return native_skin_regenerator_ready;
+}
+
+void LinuxNativeEsp::RequestSkinRefresh()
+{
+    native_skin_refresh_requested = true;
 }
 
 void LinuxNativeEsp::Render()

@@ -28,6 +28,7 @@
 #include <cstring>
 #ifdef __linux__
 #include "../../linux/vulkan_hook.h"
+#include "../../linux/native_esp.h"
 #endif
 #pragma region menu_array_entries
 static void RenderInventoryWindow();
@@ -732,17 +733,41 @@ void MENU::RenderMainWindow()
 					edited::BeginChild("##NativeSkinChanger", ImVec2(600, c::background::size.y), 0);
 					{
 						ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "Native skin changer");
-						ImGui::TextWrapped("Applies a paint kit to the weapon currently in your hands. The old Add all items page was a fake-inventory changer and depended on Windows-only hooks, so it is disabled on native Linux instead of pretending to work.");
-						edited::Checkbox("Apply fallback skin", "Applies the paint kit to owned weapons and refreshes them after switching", &C_GET(bool, Vars.skin_ui_enable));
-						ImGui::SetNextItemWidth(240.f);
-						ImGui::InputInt("Paint kit ID", &C_GET(int, Vars.skin_ui_paint_kit));
-						ImGui::SetNextItemWidth(240.f);
-						ImGui::SliderInt("Pattern seed", &C_GET(int, Vars.skin_ui_seed), 0, 1000);
-						ImGui::SetNextItemWidth(240.f);
-						ImGui::SliderFloat("Wear", &C_GET(float, Vars.skin_ui_wear), 0.000001f, 1.f, "%.6f", ImGuiSliderFlags_Logarithmic);
-						ImGui::SetNextItemWidth(240.f);
-						ImGui::InputInt("StatTrak (-1 off)", &C_GET(int, Vars.skin_ui_stattrak));
-						ImGui::TextDisabled("Use a paint kit ID supported by the weapon; changes regenerate world and view-model materials.");
+						ImGui::TextWrapped("Each weapon keeps its own saved fallback-skin profile. Inventory injection remains disabled until normal weapon overrides are stable.");
+						edited::Checkbox("Enable native skin changer", "Applies only profiles enabled for their matching weapon definition", &C_GET(bool, Vars.skin_ui_enable));
+						ImGui::TextDisabled("Status: %s", LinuxNativeEsp::GetSkinRuntimeStatus());
+
+						const std::uint16_t definition = LinuxNativeEsp::GetActiveSkinWeaponDefinition();
+						if (definition == 0 || definition >= LinuxNativeEsp::SkinWeaponDefinitionCount)
+						{
+							ImGui::TextDisabled("Hold a weapon in a live match to edit its profile.");
+						}
+						else
+						{
+							ImGui::Separator();
+							ImGui::Text("Active: %s (definition %u)", LinuxNativeEsp::GetActiveSkinWeaponName(), definition);
+							bool& enabled = C_GET_ARRAY(bool, 1024, Vars.skin_weapon_enable, definition);
+							edited::Checkbox("Override this weapon", "The profile follows this weapon definition across switches and respawns", &enabled);
+							if (enabled)
+							{
+								ImGui::SetNextItemWidth(240.f);
+								ImGui::InputInt("Paint kit ID", &C_GET_ARRAY(int, 1024, Vars.skin_weapon_paint_kit, definition));
+								ImGui::SetNextItemWidth(240.f);
+								ImGui::SliderInt("Pattern seed", &C_GET_ARRAY(int, 1024, Vars.skin_weapon_seed, definition), 0, 1000);
+								ImGui::SetNextItemWidth(240.f);
+								ImGui::SliderFloat("Wear", &C_GET_ARRAY(float, 1024, Vars.skin_weapon_wear, definition), 0.000001f, 1.f, "%.6f", ImGuiSliderFlags_Logarithmic);
+								ImGui::SetNextItemWidth(240.f);
+								ImGui::InputInt("StatTrak (-1 off)", &C_GET_ARRAY(int, 1024, Vars.skin_weapon_stattrak, definition));
+								edited::Checkbox("Legacy model mesh", "Enable for finishes that require the older weapon mesh group", &C_GET_ARRAY(bool, 1024, Vars.skin_weapon_legacy_mesh, definition));
+								if (C_GET(bool, Vars.skin_ui_enable) &&
+									C_GET_ARRAY(int, 1024, Vars.skin_weapon_paint_kit, definition) > 0 &&
+									ImGui::Button("Apply / refresh now"))
+								{
+									LinuxNativeEsp::RequestSkinRefresh();
+								}
+								ImGui::TextDisabled("Use a paint kit supported by this exact weapon; knives do not change model and gloves are not included yet.");
+							}
+						}
 					}
 					edited::EndChild();
 				#else
