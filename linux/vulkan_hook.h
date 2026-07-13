@@ -12,8 +12,9 @@ void EnableVulkanMenu();
 // Queues a relative mouse delta for CS2's next SDL input sample. The native
 // legitbot uses the same input path as physical mouse movement so CreateMove
 // sees the adjustment when it builds the user command.
-// Returns true when the delta was accepted by either the kernel uinput device
-// or the hooked SDL relative-mouse path.
+// Returns true when the delta was accepted by the in-process SDL relative-
+// mouse hook. This never creates a kernel input device or moves the desktop
+// pointer.
 bool QueueNativeAimDelta(float x, float y);
 
 // Loads/unloads cs2.png after the ImGui Vulkan backend is ready.

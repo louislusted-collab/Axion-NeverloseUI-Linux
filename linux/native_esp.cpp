@@ -579,8 +579,8 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
     result.Clamp();
 
     // Convert the desired angular step back into physical relative-mouse units.
-    // Linux uses the old internal's proven uinput path first and the hooked SDL
-    // relative-mouse sampler as its fallback.
+    // Feed the adjustment only into CS2's hooked SDL relative-mouse sampler.
+    // This stays in-process and cannot take over the desktop pointer.
     const float sensitivity = CONVAR::sensitivity != nullptr
         ? std::max(0.01f, CONVAR::sensitivity->GetValue<float>()) : 2.f;
     const float yawScale = CONVAR::m_yaw != nullptr

@@ -6,14 +6,10 @@
 #include <SDL3/SDL.h>
 #include <dlfcn.h>
 #include <sys/mman.h>
-#include <sys/ioctl.h>
-#include <linux/input.h>
-#include <linux/uinput.h>
-#include <fcntl.h>
-#include <cerrno>
 #include <cstring>
 #include <cstdio>
 #include <cstdarg>
+#include <algorithm>
 #include <vector>
 #include <mutex>
 #include <atomic>
@@ -85,10 +81,6 @@ static SDL_MouseButtonFlags (*orig_SDL_GetRelativeMouseState)(float*, float*) = 
 static std::atomic<float> native_aim_mouse_x{0.f};
 static std::atomic<float> native_aim_mouse_y{0.f};
 static std::atomic<std::uint64_t> native_aim_sdl_samples{0};
-static int native_aim_uinput_fd = -1;
-static bool native_aim_uinput_attempted = false;
-static float native_aim_uinput_remainder_x = 0.f;
-static float native_aim_uinput_remainder_y = 0.f;
 static funchook_t* late_hooks = nullptr;
 static VkInstance late_probe_instance = VK_NULL_HANDLE;
 static VkDevice late_probe_device = VK_NULL_HANDLE;
@@ -100,86 +92,6 @@ static void VulkanDebug(const char* msg)
 {
     FILE* f = fopen("/tmp/cs2_vulkan_debug.log", "a");
     if (f) { fprintf(f, "%s\n", msg); fclose(f); }
-}
-
-static bool PrepareNativeAimUinput()
-{
-    if (native_aim_uinput_fd >= 0)
-        return true;
-    if (native_aim_uinput_attempted)
-        return false;
-    native_aim_uinput_attempted = true;
-
-    const int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK | O_CLOEXEC);
-    if (fd < 0)
-    {
-        char message[256]{};
-        std::snprintf(message, sizeof(message),
-                      "[AIM INPUT] /dev/uinput unavailable (%s); using SDL relative mouse",
-                      std::strerror(errno));
-        VulkanDebug(message);
-        return false;
-    }
-
-    uinput_setup setup{};
-    setup.id.bustype = BUS_USB;
-    setup.id.vendor = 0x045e;
-    setup.id.product = 0x0040;
-    setup.id.version = 1;
-    std::snprintf(setup.name, sizeof(setup.name), "Axion relative aim input");
-
-    if (ioctl(fd, UI_SET_EVBIT, EV_REL) < 0 ||
-        ioctl(fd, UI_SET_RELBIT, REL_X) < 0 ||
-        ioctl(fd, UI_SET_RELBIT, REL_Y) < 0 ||
-        ioctl(fd, UI_SET_EVBIT, EV_KEY) < 0 ||
-        ioctl(fd, UI_SET_KEYBIT, BTN_LEFT) < 0 ||
-        ioctl(fd, UI_DEV_SETUP, &setup) < 0 ||
-        ioctl(fd, UI_DEV_CREATE) < 0)
-    {
-        const int error = errno;
-        close(fd);
-        char message[256]{};
-        std::snprintf(message, sizeof(message),
-                      "[AIM INPUT] uinput setup failed (%s); using SDL relative mouse",
-                      std::strerror(error));
-        VulkanDebug(message);
-        return false;
-    }
-
-    native_aim_uinput_fd = fd;
-    VulkanDebug("[AIM INPUT] kernel uinput mouse ready");
-    return true;
-}
-
-static bool EmitNativeAimUinput(float x, float y)
-{
-    if (!PrepareNativeAimUinput())
-        return false;
-
-    native_aim_uinput_remainder_x += x;
-    native_aim_uinput_remainder_y += y;
-    const int delta_x = static_cast<int>(native_aim_uinput_remainder_x);
-    const int delta_y = static_cast<int>(native_aim_uinput_remainder_y);
-    if (delta_x == 0 && delta_y == 0)
-        return true;
-
-    native_aim_uinput_remainder_x -= static_cast<float>(delta_x);
-    native_aim_uinput_remainder_y -= static_cast<float>(delta_y);
-
-    const auto emit = [&](std::uint16_t type, std::uint16_t code, std::int32_t value) {
-        input_event event{};
-        event.type = type;
-        event.code = code;
-        event.value = value;
-        return write(native_aim_uinput_fd, &event, sizeof(event)) == sizeof(event);
-    };
-    bool success = true;
-    if (delta_x != 0)
-        success = emit(EV_REL, REL_X, delta_x) && success;
-    if (delta_y != 0)
-        success = emit(EV_REL, REL_Y, delta_y) && success;
-    success = emit(EV_SYN, SYN_REPORT, 0) && success;
-    return success;
 }
 
 static SDL_Window* FindCS2Window()
@@ -1042,10 +954,16 @@ static SDL_MouseButtonFlags Late_SDL_GetRelativeMouseState(float* x, float* y)
     const float aimY = native_aim_mouse_y.exchange(0.f, std::memory_order_acq_rel);
     if (!g_MenuOpen)
     {
+        static bool loggedAimInput = false;
         if (x != nullptr)
             *x += aimX;
         if (y != nullptr)
             *y += aimY;
+        if (!loggedAimInput && (aimX != 0.f || aimY != 0.f))
+        {
+            loggedAimInput = true;
+            VulkanDebug("[AIM INPUT] SDL relative mouse delta consumed");
+        }
     }
     return buttons;
 }
@@ -1289,16 +1207,12 @@ void EnableVulkanMenu()
 
 bool QueueNativeAimDelta(float x, float y)
 {
-    // The old internal's most reliable Linux path was a real evdev relative
-    // mouse. Prefer that when /dev/uinput is available; SDL remains a complete
-    // no-privilege fallback for systems where it is not.
-    if (EmitNativeAimUinput(x, y))
-        return true;
-
     if (late_hooks == nullptr || orig_SDL_GetRelativeMouseState == nullptr)
         return false;
-    native_aim_mouse_x.store(x, std::memory_order_release);
-    native_aim_mouse_y.store(y, std::memory_order_release);
+    // Stay fully inside CS2's input sample. Unlike uinput this can never move
+    // the desktop pointer or leave a virtual mouse behind if the game faults.
+    native_aim_mouse_x.store(std::clamp(x, -250.f, 250.f), std::memory_order_release);
+    native_aim_mouse_y.store(std::clamp(y, -250.f, 250.f), std::memory_order_release);
     return true;
 }
 
