@@ -12,6 +12,7 @@ struct LoaderState
     GtkWidget* status = nullptr;
     GtkWidget* inject_button = nullptr;
     GtkWidget* update_button = nullptr;
+    GtkWidget* rebuild_button = nullptr;
     std::filesystem::path root;
 };
 
@@ -39,6 +40,7 @@ void SetButtonsSensitive(LoaderState* state, bool sensitive)
 {
     gtk_widget_set_sensitive(state->inject_button, sensitive);
     gtk_widget_set_sensitive(state->update_button, sensitive);
+    gtk_widget_set_sensitive(state->rebuild_button, sensitive);
 }
 
 std::string LastStatusLine(const char* output)
@@ -166,6 +168,62 @@ void UpdateClicked(GtkButton*, gpointer user_data)
     g_subprocess_communicate_utf8_async(process, nullptr, nullptr, UpdateFinished, state);
 }
 
+void RebuildFinished(GObject* source, GAsyncResult* result, gpointer user_data)
+{
+    auto* state = static_cast<LoaderState*>(user_data);
+    gchar* output = nullptr;
+    gchar* error_output = nullptr;
+    GError* error = nullptr;
+
+    const gboolean communicated = g_subprocess_communicate_utf8_finish(
+        G_SUBPROCESS(source), result, &output, &error_output, &error);
+    const gboolean succeeded = communicated && g_subprocess_get_successful(G_SUBPROCESS(source));
+
+    if (succeeded) {
+        SetStatus(state, "Rebuild complete — ready to inject", "status-ready");
+    } else {
+        const std::string message = LastStatusLine(error ? error->message : error_output);
+        SetStatus(state, message.empty() ? "Rebuild failed — run make in a terminal for details" : message.c_str(),
+            "status-error");
+    }
+
+    SetButtonsSensitive(state, true);
+    gtk_button_set_label(GTK_BUTTON(state->rebuild_button), "Rebuild");
+    g_clear_error(&error);
+    g_free(output);
+    g_free(error_output);
+    g_object_unref(source);
+}
+
+void RebuildClicked(GtkButton*, gpointer user_data)
+{
+    auto* state = static_cast<LoaderState*>(user_data);
+    const auto rebuild = state->root / "tools" / "rebuild.sh";
+
+    if (!std::filesystem::exists(rebuild)) {
+        SetStatus(state, "Rebuild script is missing", "status-error");
+        return;
+    }
+
+    GError* error = nullptr;
+    GSubprocess* process = g_subprocess_new(
+        static_cast<GSubprocessFlags>(G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_PIPE),
+        &error,
+        rebuild.c_str(),
+        nullptr);
+
+    if (!process) {
+        SetStatus(state, error ? error->message : "Could not start rebuild", "status-error");
+        g_clear_error(&error);
+        return;
+    }
+
+    SetButtonsSensitive(state, false);
+    gtk_button_set_label(GTK_BUTTON(state->rebuild_button), "Rebuilding…");
+    SetStatus(state, "Running make clean, then make…", "status-working");
+    g_subprocess_communicate_utf8_async(process, nullptr, nullptr, RebuildFinished, state);
+}
+
 void Activate(GtkApplication* application, gpointer user_data)
 {
     auto* state = static_cast<LoaderState*>(user_data);
@@ -191,7 +249,7 @@ void Activate(GtkApplication* application, gpointer user_data)
 
     GtkWidget* window = gtk_application_window_new(application);
     gtk_window_set_title(GTK_WINDOW(window), "Axion Loader");
-    gtk_window_set_default_size(GTK_WINDOW(window), 420, 300);
+    gtk_window_set_default_size(GTK_WINDOW(window), 420, 350);
     gtk_window_set_resizable(GTK_WINDOW(window), false);
 
     GtkWidget* outer = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
@@ -229,6 +287,12 @@ void Activate(GtkApplication* application, gpointer user_data)
     gtk_widget_set_halign(state->update_button, GTK_ALIGN_FILL);
     g_signal_connect(state->update_button, "clicked", G_CALLBACK(UpdateClicked), state);
     gtk_box_append(GTK_BOX(card), state->update_button);
+
+    state->rebuild_button = gtk_button_new_with_label("Rebuild");
+    gtk_widget_add_css_class(state->rebuild_button, "update");
+    gtk_widget_set_halign(state->rebuild_button, GTK_ALIGN_FILL);
+    g_signal_connect(state->rebuild_button, "clicked", G_CALLBACK(RebuildClicked), state);
+    gtk_box_append(GTK_BOX(card), state->rebuild_button);
 
     state->inject_button = gtk_button_new_with_label("Inject");
     gtk_widget_add_css_class(state->inject_button, "inject");
