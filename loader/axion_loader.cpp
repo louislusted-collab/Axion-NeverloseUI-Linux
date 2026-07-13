@@ -108,7 +108,7 @@ void InjectClicked(GtkButton*, gpointer user_data)
 
     SetButtonsSensitive(state, false);
     gtk_button_set_label(GTK_BUTTON(state->inject_button), "Injecting…");
-    SetStatus(state, "Waiting for authorization…", "status-working");
+    SetStatus(state, "Opening administrator password prompt…", "status-working");
     g_subprocess_communicate_utf8_async(process, nullptr, nullptr, InjectionFinished, state);
 }
 
