@@ -1,0 +1,375 @@
+AXION NATIVE-LINUX CS2 HANDOFF — 2026-07-14
+============================================
+
+2026-07-14 STABILITY ADDENDUM
+-----------------------------
+CS2 is now closed. The current worktree adds synchronized Vulkan swapchain
+recreation for post-injection resize, actual present-queue family tracking,
+planted-C4 chams independent of the planter, and independent knife chams. It
+also hardens config object copy/move ownership, skin refresh behavior and menu
+index bounds. Clean debug and optimized release builds now pass without project
+warnings; the release library also passes `ldd -r`. Build-mode-specific object
+trees prevent stale debug/analyzer objects from masquerading as release output.
+Live next-launch verification remains required. The checklist has 14 mandatory unnumbered
+items (U12 resize, U13 bomb lifetime, U14 knife chams). Do not repeat the stale
+claim below that a running process maps the deleted library.
+
+2026-07-13 IMPLEMENTATION ADDENDUM
+----------------------------------
+The "unbuilt partial work" description below is historical. The current tree
+has since been completed through a clean build. It now contains crash-hardened
+weapon/ammo ESP, the corrected native CreateMove ABI, typed/restoring CVar
+writes, a current-build-gated native trace/self-test, visibility consumers,
+trigger/recoil, expanded Rage/Anti-Aim, repaired ESP/chams/config, world and sky
+modulation, dropped weapons/timers, and swept-hull grenade prediction.
+
+CS2 is closed. A fresh launch/injection is required before any runtime claim can
+be updated. See
+SELECTED_FEATURES.md and AXION_IMPLEMENTATION_GUIDE.md for the authoritative
+status. Real native ballistics (damage, spread/hitchance and penetration) and a
+full line smoke-density test remain explicit blockers; they are not faked.
+
+USER / ENVIRONMENT
+------------------
+User: louis
+OS/game: Native Linux CS2 (NOT Proton)
+Project: /home/louis/cheat/Axion-NeverloseUI
+Old project: /home/louis/cheat/CounterStrike2-Linux-InternalOLD
+Public remote: https://github.com/louislusted-collab/Axion-NeverloseUI-Linux
+Local branch: repair
+Publish target: publish/main
+Last pushed commit: aaa3823 Expand native ESP chams and camera controls
+
+Read first:
+  /home/louis/cheat/Axion-NeverloseUI/SELECTED_FEATURES.md
+  /home/louis/cheat/Axion-NeverloseUI/AXION_IMPLEMENTATION_GUIDE.md
+  /home/louis/cheat/Axion-NeverloseUI/AXION_NEXT_CHAT_HANDOFF.txt
+
+IMPORTANT: Be honest about runtime status. A menu toggle or clean build is not
+proof that a feature works in CS2. Nearly every gameplay feature is currently
+reported broken. ESP is the only area that mostly works.
+
+LATEST USER REPORT / REQUEST
+----------------------------
+The user reports:
+
+1. Ammo bar CRASHES CS2.
+2. Enabling weapon ESP now also CRASHES CS2.
+3. Removals: only flash reduction works.
+4. Glow chams is far too bright/strong.
+5. Third person does not work.
+6. Camera FOV changer does not work.
+7. Viewmodel FOV changer does not work.
+8. Bunny hop does not work.
+9. Auto-strafe does not work.
+10. Config name text does not visibly appear while typing, so creating/naming
+    configs appears broken.
+11. Anti-aim does not work at all.
+12. Legitbot does not work at all.
+13. Ragebot does not work at all.
+14. Native skin changer does not work at all.
+15. ESP mostly works, but corner-box mode always renders a full box.
+16. User wants Filled Box to support a gradient fill.
+17. User wants separate color pickers for arms chams and sleeve chams.
+18. The user wants every selected checklist feature eventually implemented,
+    but requested low token usage and this compact handoff first.
+19. ESP flags incorrectly show SCOPED and DEFUSING on every enemy at all times.
+20. Player offscreen arrows are partially broken/inaccurate.
+21. World modulation and sky modulation are broken.
+22. Dropped-weapon ESP is broken.
+23. Grenade trajectory, bounce markers and landing marker are broken.
+24. Smoke-duration and Molotov-expiration timers are broken.
+25. Planted-bomb timer is broken.
+
+The master checklist now records 123 numbered selections plus 14 mandatory
+unnumbered repairs/extensions. The implementation guide maps every feature
+group to concrete acceptance rules and GitHub references with activity on or
+after 2024-07-13. Windows external repositories are design references only;
+never copy their input/process-memory paths into this native Linux internal.
+
+Explicit exclusions remain:
+  #128 Anti-backstab — DO NOT ADD.
+  #278 Hands removal — DO NOT ADD.
+
+Feature #34 artificial overshoot was deferred until basic aim works reliably.
+
+CURRENT WORKTREE — PRESERVE IT
+------------------------------
+At handoff time, the tree has UNCOMMITTED, UNBUILT partial work from the latest
+implementation pass:
+
+  M Makefile
+  M SELECTED_FEATURES.md
+  M cstrike/core/menu.cpp
+  M cstrike/core/variables.h
+  M linux/native_chams.cpp
+  M linux/native_esp.cpp
+  M linux/vulkan_hook.cpp
+  M linux/vulkan_hook.h
+  ?? AXION_IMPLEMENTATION_GUIDE.md
+  ?? AXION_NEXT_CHAT_HANDOFF.txt
+
+This file list is historical and no longer exhaustive. The runtime diff and
+documentation are mixed in the working tree; inspect the
+current `git diff --stat` rather than relying on an older insertion count.
+`git diff --check` passes as of 2026-07-13.
+
+These partial changes add:
+
+- Configuration variables and menu controls for remaining legit targeting,
+  per-weapon profiles, triggerbot, recoil, rage preferences, anti-aim profiles,
+  world/grenade/bomb visuals.
+- Native CreateMove combat request plumbing for attack, crouch, scope and stop.
+- A correction to the native bunny-hop jump bit (old code used 1<<2, but
+  IN_JUMP is 1<<1; 1<<2 is duck).
+- Initial world/sky scene-material tint handling in native_chams.cpp.
+
+CRITICAL: This partial work has NOT been clean-built, injected, live-tested,
+committed, or pushed. Runtime implementations for most newly added controls are
+still missing. Do not mark checklist items complete because the controls exist.
+Inspect the diff before continuing:
+
+  cd /home/louis/cheat/Axion-NeverloseUI
+  git diff -- cstrike/core/menu.cpp cstrike/core/variables.h
+  git diff -- linux/native_chams.cpp linux/vulkan_hook.cpp linux/vulkan_hook.h
+
+Do not reset or discard these changes. Complete or carefully repair them.
+
+PRIORITY REPAIR ORDER
+---------------------
+
+PASS 1 — STOP THE CRASHES
+
+A. Ammo bar and weapon ESP share GetWeaponDisplay/GetWeaponName in:
+   /home/louis/cheat/Axion-NeverloseUI/linux/native_esp.cpp
+
+Likely crash points:
+
+- pawn->GetWeaponServices()
+- entity-system lookup of m_hActiveWeapon
+- weapon->GetVData()
+- reading CCSWeaponBaseVData->m_szName
+- reading CBasePlayerWeaponVData->m_iMaxClip1
+- reading weapon->clip1()
+
+All offsets must be schema-resolved and validated. Do not call a Windows vtable
+index on native Linux. Add pointer/range checks and diagnostics. Weapon name and
+ammo should fail closed for one entity instead of crashing the whole frame.
+After fixing, independently test: weapon text only, icon only, ammo only, then
+all three together.
+
+B. Read fresh logs after every crash; compare timestamps:
+
+  /tmp/cs2_init_debug.log
+  /tmp/cs2_vulkan_debug.log
+  /tmp/cs2_hook_debug.log
+  /tmp/cs2_inject_debug.log
+  /tmp/cs2_esp_debug.log
+  /tmp/cs2_chams_debug.log
+  /tmp/cs2_legit_debug.log
+  /home/louis/.cs2/cs2.log
+
+PASS 2 — VERIFY THE SHARED NATIVE FOUNDATIONS
+
+A. Native input/CreateMove:
+
+  /home/louis/cheat/Axion-NeverloseUI/linux/vulkan_hook.cpp
+  /home/louis/cheat/Axion-NeverloseUI/linux/native_esp.cpp
+
+Confirm InstallNativeInputHook actually installs against the current native
+CCSGOInput vtable. Log target address, vtable index, CreateMove call count,
+queued commands and applied command count. Do not use uinput/kernel mouse input;
+that previously trapped the desktop cursor. Aim/movement must remain in-process.
+
+Hard-coded CCSGOInput offsets currently include 0x229, 0x240, 0x260, 0x264 and
+0x2D8. They must be validated against the current native build. A clean compile
+does not validate these offsets.
+
+B. Native CVars:
+
+  /home/louis/cheat/Axion-NeverloseUI/cstrike/core/convars.cpp
+  /home/louis/cheat/Axion-NeverloseUI/linux/native_esp.cpp
+
+Third person, camera FOV, viewmodel FOV, scope removal, smoke removal and blur
+removal currently depend heavily on CVar writes. Verify CONVAR::Find, each CVar
+pointer and the stored value type. Log before/write/readback values. Restore the
+original value when a feature is disabled. Never write through a null or stale
+CVar pointer.
+
+C. Trace/visibility:
+
+Native visibility, smoke checks, triggerbot and rage/autowall need a verified
+Linux trace path. Existing itrace helpers contain Windows-oriented signatures
+and assertions. Do not call them until all required signatures are found.
+Missing trace support must fail safely and be logged, never crash.
+
+PASS 3 — FIX CURRENT USER-VISIBLE ESP/CHAMS ISSUES
+
+A. Corner box:
+
+Menu writes Vars.esp_box_style; native renderer reads it in native_esp.cpp.
+Confirm the saved value changes to VISUAL_OVERLAY_BOX_CORNERS and is not reset
+by config/default loading. Log the live style. Verify DrawCornerBox is reached.
+
+B. Gradient filled box:
+
+Replace/extend the single AddRectFilled path with AddRectFilledMultiColor.
+Add top/bottom (or four-corner) color configuration without breaking the normal
+single-color mode. Keep the fill controlled by its own toggle.
+
+C. Chams:
+
+- Reduce glow material self-illumination substantially. Current values in
+  native_chams.cpp use g_flSelfIllumScale=4 and brightness=3, which explains the
+  extreme brightness. Start near 1.0/1.0 and live-tune.
+- Add independent Vars/UI colors for arms and sleeves.
+- NativeChams::DrawArray must select the arms/sleeves color based on original
+  material classification, without changing enemy visible/through-wall colors.
+- Preserve Flat, Metallic, Glow, Glass and Wireframe modes.
+- Through-wall chams must cover every live enemy and distant LOD, including
+  smoke-obscured enemies, without replaying malformed partial mesh batches.
+
+D. ESP flags:
+
+SCOPED and DEFUSING currently appear on every enemy. Validate the native schema
+offsets for C_CSPlayerPawnBase->m_bIsScoped and ->m_bIsDefusing before reading.
+Never use an offset of zero (which reads unrelated object bytes). Cache an
+explicit “offset resolved” state, suppress the flag when unresolved, and log
+the offset plus raw value for a few enemies. Check the other planting,
+reloading, flashed and bomb-carrier flag offsets for the same failure mode.
+
+E. Offscreen arrows:
+
+The arrows are partially broken. Validate target world positions, local yaw,
+angle normalization, display bounds and screen-edge clamping. Only draw an
+arrow when the enemy is genuinely outside the visible viewport; keep its
+direction stable near the screen boundary and across ±180-degree yaw changes.
+
+PASS 4 — FIX CONFIG TEXT INPUT
+
+Relevant files:
+
+  /home/louis/cheat/Axion-NeverloseUI/cstrike/core/menu.cpp
+  /home/louis/cheat/Axion-NeverloseUI/cstrike/core/gui.cpp
+  /home/louis/cheat/Axion-NeverloseUI/cstrike/core/config.cpp
+  /home/louis/cheat/Axion-NeverloseUI/linux/vulkan_hook.cpp
+
+The InputText field exists, but typed characters are not visible. Check:
+
+- SDL text-input events reach ImGui_ImplSDL3_ProcessEvent.
+- keyboard capture is not swallowed before ImGui sees it.
+- InputText text color is not transparent/same as background.
+- clipping/size does not hide the text.
+- focus works immediately without resizing the CS2 window.
+
+Keep the existing Neverlose-style menu. Do not replace it with a fallback UI.
+Keep using the supplied cs2.png/cs2.webp character preview.
+
+PASS 5 — REPAIR FEATURES ONE GROUP AT A TIME
+
+1. Removals: smoke, scope overlay, aim punch, motion blur. Only flash is
+   currently confirmed working. Smoke removal previously caused severe lag and
+   a crash when smoke bloomed; do not iterate/mutate disappearing projectile
+   internals on the particle thread.
+
+2. Camera/movement: third person, distance/collision, camera FOV, viewmodel FOV,
+   bunny hop, auto-strafe. Verify CreateMove counters and CVar readback.
+
+3. Legitbot: current user says zero movement. First make one simple head target
+   work through verified CreateMove, then add target selection, hitboxes,
+   visibility/smoke/flash checks, reaction delay, per-weapon profiles,
+   smoothing/acceleration/deceleration/recovery and standalone recoil. Keep very
+   detailed /tmp/cs2_legit_debug.log diagnostics. No kernel mouse device.
+
+4. Triggerbot: master, delay, hitbox mask, visibility, smoke, scoped-only and
+   diagnostics. Fire by a verified CreateMove button request, not a Present-time
+   raw write.
+
+5. Ragebot: first verify aiming and firing. Then hitscan, priority groups,
+   multipoint, min damage, hitchance, real trace/penetration, damage preview,
+   auto-stop/crouch/scope, force-body/head binds, preferences, shot delays,
+   per-weapon profiles, decision overlay and shot-reason logs. Do not label a
+   distance heuristic as real autowall.
+
+6. Anti-aim: verify command-angle application first. Then custom pitch/yaw,
+   sideways, jitter, spin, movement-state profiles, manual back/forward and
+   disable-while-use. Respect anti-untrusted pitch/yaw clamps.
+
+7. Skin changer: current native fallback-skin implementation in
+   native_esp.cpp is reported fully non-working. Validate active weapon handles,
+   every schema offset, attribute-list layout, regenerate callback and material
+   refresh. Restore originals safely. First get one ordinary gun paint kit
+   working across switch/respawn. Knives/gloves/inventory changer are a later
+   phase; do not claim them working.
+
+8. World/grenade/bomb visuals: finish runtime paths for world/sky tint, dropped
+   weapon ESP, held-grenade trajectory, bounce/landing markers, smoke/molotov
+   timers and planted-bomb timer. Entity scanning must validate designer names,
+   scene nodes and offsets and must not dereference stale projectile pointers.
+   The user has now tested and reported ALL of these features broken, including
+   both modulation controls and every trajectory/timer control. Treat them as
+   unimplemented repairs, not live-verification successes.
+
+SELECTED CHECKLIST STATUS BEFORE THIS PARTIAL PASS
+--------------------------------------------------
+Tracked: 123 features.
+Previously recorded:
+  33 done (static)
+  22 live verification
+  1 repair/live verification
+  14 repair
+  50 new
+  1 deferred
+  2 excluded
+
+Given the latest user report, downgrade any affected “done/live verification”
+item to repair until it passes an actual native CS2 test. Update
+SELECTED_FEATURES.md truthfully after each verified group, not all at once.
+
+OFFSETS / DUMPER
+----------------
+Integrated dumper submodule:
+  /home/louis/cheat/Axion-NeverloseUI/tools/cs2-dumper
+Pinned revision: 3ba415055cdc2be2e27f83cead98f78ec573c9c7
+
+Updater scripts:
+  tools/run_full_linux_dumper.sh
+  tools/import_full_dump.py
+  tools/prepare_full_dumper_config.py
+  tools/update_offsets.sh
+
+It dumps offsets/signatures/interfaces/buttons/schema fields. It does NOT dump
+every CVar. CVars require runtime interface enumeration/lookup. Updated offsets
+alone do not fix Linux vtable indexes, calling conventions, hook targets or
+struct layouts.
+
+BUILD / VALIDATION / GIT
+------------------------
+After each coherent repair group:
+
+  cd /home/louis/cheat/Axion-NeverloseUI
+  make clean && make -j2
+  ldd -r cs2_axion.so
+  git diff --check
+  bash -n inject.sh
+  bash -n tools/run_full_linux_dumper.sh
+  bash -n tools/update_offsets.sh
+
+Rebuild loader too. The loader already has Inject, updater and Rebuild actions.
+CS2 must be restarted to load a rebuilt .so.
+
+The .gitignore has a broad “core” pattern, so modified cstrike/core files may
+need git add -f. Never stage unrelated user files. Do not use reset --hard or
+checkout to discard work. Commit and push only after the coherent batch builds;
+push repair HEAD to publish/main/main as previously used.
+
+USER STYLE / EXPECTATIONS
+-------------------------
+- Direct action, low token usage, short progress updates.
+- Take time and read fresh logs instead of guessing.
+- Preserve the current menu design and supplied character image.
+- Do clean builds after meaningful edits.
+- Do not say “everything works” without live evidence.
+- Fix crashes and shared foundations before adding more surface controls.
+
+END HANDOFF

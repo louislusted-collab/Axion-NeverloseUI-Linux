@@ -10,7 +10,7 @@
  * - used for automatic adaptation mechanism of configuration files from previous versions
  */
 
-#define CS_VERSION 2000
+#define CS_VERSION 2001
 
 #ifdef _WIN32
 #pragma section(".text")

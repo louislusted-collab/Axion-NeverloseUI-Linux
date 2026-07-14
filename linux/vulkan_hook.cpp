@@ -68,6 +68,12 @@ static VkFormat          vk_format          = VK_FORMAT_B8G8R8A8_UNORM;
 static uint32_t          vk_min_image_count = 2;
 static bool              vk_imgui_inited    = false;
 static bool              vk_sdl_inited      = false;
+static VkSwapchainKHR    vk_bound_swapchain = VK_NULL_HANDLE;
+static uint32_t          vk_frame_count     = 0;
+// Queue-present and swapchain creation are allowed to run on different game
+// threads. Keep our renderer resources alive until the present call that uses
+// them has returned, and serialize replacement of the swapchain-dependent set.
+static std::mutex        vk_resource_mutex;
 
 static ImGui_ImplVulkanH_Frame          frames[8]          = {};
 static ImGui_ImplVulkanH_FrameSemaphores frame_sems[8]     = {};
@@ -92,9 +98,16 @@ static std::atomic<bool> native_bhop_on_ground{false};
 static std::atomic<bool> native_strafe_enabled{false};
 static std::atomic<float> native_strafe_forward{0.f};
 static std::atomic<float> native_strafe_left{0.f};
-using InputCreateMoveFn = bool(*)(void*, int, bool, std::byte);
+static std::atomic<bool> native_combat_attack{false};
+static std::atomic<bool> native_combat_duck{false};
+static std::atomic<bool> native_combat_scope{false};
+static std::atomic<bool> native_combat_stop{false};
+// Current native CCSGOInput owns the full command builder. The Linux ABI for
+// its virtual CreateMove entry is (this, split-screen slot, CUserCmd*).
+using InputCreateMoveFn = void(*)(void*, int, void*);
 static InputCreateMoveFn native_input_create_move_original = nullptr;
 static funchook_t* native_input_hooks = nullptr;
+static void* native_command_input = nullptr;
 static std::atomic<void*> native_aim_angle_destination{nullptr};
 static std::atomic<float> native_aim_angle_pitch{0.f};
 static std::atomic<float> native_aim_angle_yaw{0.f};
@@ -105,8 +118,43 @@ static funchook_t* late_hooks = nullptr;
 static VkInstance late_probe_instance = VK_NULL_HANDLE;
 static VkDevice late_probe_device = VK_NULL_HANDLE;
 
-struct QueueRecord { VkQueue queue = VK_NULL_HANDLE; uint32_t family = UINT32_MAX; };
+struct QueueRecord {
+    VkDevice device = VK_NULL_HANDLE;
+    VkQueue queue = VK_NULL_HANDLE;
+    uint32_t family = UINT32_MAX;
+};
 static QueueRecord queue_records[32] = {};
+static std::mutex queue_records_mutex;
+
+static void RecordQueue(VkDevice device, VkQueue queue, uint32_t family)
+{
+    if (device == VK_NULL_HANDLE || queue == VK_NULL_HANDLE || family == UINT32_MAX)
+        return;
+    std::lock_guard<std::mutex> lock(queue_records_mutex);
+    QueueRecord* empty = nullptr;
+    for (auto& record : queue_records) {
+        if (record.device == device && record.queue == queue) {
+            record.family = family;
+            return;
+        }
+        if (empty == nullptr && record.queue == VK_NULL_HANDLE)
+            empty = &record;
+    }
+    if (empty != nullptr)
+        *empty = {device, queue, family};
+}
+
+static bool FindQueueFamily(VkDevice device, VkQueue queue, uint32_t& family)
+{
+    std::lock_guard<std::mutex> lock(queue_records_mutex);
+    for (const auto& record : queue_records) {
+        if (record.device == device && record.queue == queue) {
+            family = record.family;
+            return family != UINT32_MAX;
+        }
+    }
+    return false;
+}
 
 static void VulkanDebug(const char* msg)
 {
@@ -152,66 +200,190 @@ static void PreviewDebug(const char* format, ...)
     VulkanDebug(buffer);
 }
 
-static bool NativeInputCreateMove(void* input, int slot, bool active, std::byte unknown)
+static bool IsPlausibleNativePointer(const void* pointer)
 {
-    native_create_move_calls.fetch_add(1, std::memory_order_relaxed);
-    const bool thirdPerson = native_thirdperson_input.load(std::memory_order_acquire);
-    if (input != nullptr)
-        *reinterpret_cast<bool*>(reinterpret_cast<std::uint8_t*>(input) + 0x229) = thirdPerson;
+    const std::uintptr_t address = reinterpret_cast<std::uintptr_t>(pointer);
+    return address >= 0x10000ULL && address < 0x0000800000000000ULL;
+}
 
-    if (input != nullptr && native_bhop_enabled.load(std::memory_order_acquire) &&
-        native_bhop_space_held.load(std::memory_order_relaxed))
-    {
-        auto& buttons = *reinterpret_cast<std::uint64_t*>(
-            reinterpret_cast<std::uint8_t*>(input) + 0x240);
-        constexpr std::uint64_t jump = 1ULL << 2;
-        if (native_bhop_on_ground.load(std::memory_order_relaxed))
-            buttons |= jump;
-        else
-            buttons &= ~jump;
-    }
+template <typename T>
+static T ReadNativeCommandField(const void* object, std::size_t offset)
+{
+    T value{};
+    std::memcpy(&value, static_cast<const std::uint8_t*>(object) + offset, sizeof(value));
+    return value;
+}
 
-    if (input != nullptr && native_strafe_enabled.load(std::memory_order_acquire))
-    {
-        *reinterpret_cast<float*>(reinterpret_cast<std::uint8_t*>(input) + 0x260) =
-            std::clamp(native_strafe_forward.load(std::memory_order_relaxed), -1.f, 1.f);
-        *reinterpret_cast<float*>(reinterpret_cast<std::uint8_t*>(input) + 0x264) =
-            std::clamp(native_strafe_left.load(std::memory_order_relaxed), -1.f, 1.f);
-    }
+template <typename T>
+static void WriteNativeCommandField(void* object, std::size_t offset, const T& value)
+{
+    std::memcpy(static_cast<std::uint8_t*>(object) + offset, &value, sizeof(value));
+}
 
-    void* destination = native_aim_angle_destination.exchange(nullptr, std::memory_order_acq_rel);
-    if (destination != nullptr)
+struct NativeCommandResult
+{
+    bool valid = false;
+    std::int64_t sequence = 0;
+    int legacySequence = 0;
+    std::uint64_t buttonsBefore = 0;
+    std::uint64_t buttonsAfter = 0;
+    float forward = 0.f;
+    float left = 0.f;
+    bool angleApplied = false;
+};
+
+static NativeCommandResult ApplyNativeCommandRequests(void* command, bool aimRequested,
+    float pitch, float yaw, float roll)
+{
+    NativeCommandResult result{};
+    if (!IsPlausibleNativePointer(command))
+        return result;
+
+    // Current CUserCmd layout, verified against the native CreateMove body:
+    // command number +0x08, CSGOUserCmdPB::base +0x40, and the direct button
+    // state values at +0x60/+0x68/+0x70.
+    void* base = ReadNativeCommandField<void*>(command, 0x40);
+    if (!IsPlausibleNativePointer(base))
+        return result;
+
+    result.valid = true;
+    result.sequence = ReadNativeCommandField<std::int64_t>(command, 0x08);
+    result.legacySequence = ReadNativeCommandField<int>(base, 0x50);
+
+    if (aimRequested && std::isfinite(pitch) && std::isfinite(yaw) && std::isfinite(roll))
     {
-        const float pitch = native_aim_angle_pitch.load(std::memory_order_relaxed);
-        const float yaw = native_aim_angle_yaw.load(std::memory_order_relaxed);
-        const float roll = native_aim_angle_roll.load(std::memory_order_relaxed);
-        if (std::isfinite(pitch) && std::isfinite(yaw) && std::isfinite(roll))
+        // CBaseUserCmdPB::viewangles is +0x40. Presence bits live at +0x10;
+        // CMsgQAngle stores x/y/z at +0x18/+0x1c/+0x20.
+        void* viewAngles = ReadNativeCommandField<void*>(base, 0x40);
+        if (IsPlausibleNativePointer(viewAngles))
         {
-            auto* angles = static_cast<float*>(destination);
-            angles[0] = std::clamp(pitch, -89.f, 89.f);
-            angles[1] = std::remainder(yaw, 360.f);
-            angles[2] = 0.f;
-            // Current native CCSGOInput mirrors command angles here. Writing
-            // both this command source and the pawn field before the original
-            // CreateMove prevents the engine from replacing our pawn-only
-            // write with its stale input angle on the same tick.
-            if (input != nullptr)
-            {
-                auto* inputAngles = reinterpret_cast<float*>(
-                    reinterpret_cast<std::uint8_t*>(input) + 0x2D8);
-                inputAngles[0] = angles[0];
-                inputAngles[1] = angles[1];
-                inputAngles[2] = 0.f;
-            }
+            std::uint32_t baseHasBits = ReadNativeCommandField<std::uint32_t>(base, 0x10);
+            baseHasBits |= 0x00000004U;
+            WriteNativeCommandField(base, 0x10, baseHasBits);
+
+            std::uint32_t angleHasBits = ReadNativeCommandField<std::uint32_t>(viewAngles, 0x10);
+            angleHasBits |= 0x00000007U;
+            WriteNativeCommandField(viewAngles, 0x10, angleHasBits);
+            const float safePitch = std::clamp(pitch, -89.f, 89.f);
+            const float safeYaw = std::remainder(yaw, 360.f);
+            const float safeRoll = 0.f;
+            WriteNativeCommandField(viewAngles, 0x18, safePitch);
+            WriteNativeCommandField(viewAngles, 0x1C, safeYaw);
+            WriteNativeCommandField(viewAngles, 0x20, safeRoll);
+            result.angleApplied = true;
             native_aim_angle_applications.fetch_add(1, std::memory_order_relaxed);
         }
     }
 
-    const bool result = native_input_create_move_original != nullptr
-        ? native_input_create_move_original(input, slot, active, unknown) : false;
-    if (input != nullptr)
-        *reinterpret_cast<bool*>(reinterpret_cast<std::uint8_t*>(input) + 0x229) = thirdPerson;
+    constexpr std::uint64_t inAttack = 1ULL << 0;
+    constexpr std::uint64_t inJump = 1ULL << 1;
+    constexpr std::uint64_t inDuck = 1ULL << 2;
+    constexpr std::uint64_t inSecondAttack = 1ULL << 11;
+
+    std::uint64_t buttons = ReadNativeCommandField<std::uint64_t>(command, 0x60);
+    result.buttonsBefore = buttons;
+    if (native_bhop_enabled.load(std::memory_order_acquire) &&
+        native_bhop_space_held.load(std::memory_order_relaxed))
+    {
+        if (native_bhop_on_ground.load(std::memory_order_relaxed))
+            buttons |= inJump;
+        else
+            buttons &= ~inJump;
+    }
+    if (native_combat_attack.load(std::memory_order_acquire))
+        buttons |= inAttack;
+    if (native_combat_duck.load(std::memory_order_acquire))
+        buttons |= inDuck;
+    if (native_combat_scope.load(std::memory_order_acquire))
+        buttons |= inSecondAttack;
+
+    const std::uint64_t changedButtons = result.buttonsBefore ^ buttons;
+    WriteNativeCommandField(command, 0x60, buttons);
+    if (changedButtons != 0)
+    {
+        std::uint64_t changed = ReadNativeCommandField<std::uint64_t>(command, 0x68);
+        changed |= changedButtons;
+        WriteNativeCommandField(command, 0x68, changed);
+    }
+
+    // Mirror the direct state into CBaseUserCmdPB::buttons_pb when it exists so
+    // protobuf serialization observes the same command. We never allocate a
+    // missing message from the hook.
+    void* buttonsPb = ReadNativeCommandField<void*>(base, 0x38);
+    if (IsPlausibleNativePointer(buttonsPb))
+    {
+        std::uint32_t baseHasBits = ReadNativeCommandField<std::uint32_t>(base, 0x10);
+        baseHasBits |= 0x00000002U;
+        WriteNativeCommandField(base, 0x10, baseHasBits);
+        std::uint32_t buttonHasBits = ReadNativeCommandField<std::uint32_t>(buttonsPb, 0x10);
+        buttonHasBits |= changedButtons != 0 ? 0x00000003U : 0x00000001U;
+        WriteNativeCommandField(buttonsPb, 0x10, buttonHasBits);
+        WriteNativeCommandField(buttonsPb, 0x18, buttons);
+        if (changedButtons != 0)
+        {
+            std::uint64_t changed = ReadNativeCommandField<std::uint64_t>(buttonsPb, 0x20);
+            changed |= changedButtons;
+            WriteNativeCommandField(buttonsPb, 0x20, changed);
+        }
+    }
+    result.buttonsAfter = buttons;
+
+    float forward = ReadNativeCommandField<float>(base, 0x58);
+    float left = ReadNativeCommandField<float>(base, 0x5C);
+    if (native_combat_stop.load(std::memory_order_acquire))
+    {
+        forward = 0.f;
+        left = 0.f;
+    }
+    else if (native_strafe_enabled.load(std::memory_order_acquire))
+    {
+        forward = std::clamp(native_strafe_forward.load(std::memory_order_relaxed), -1.f, 1.f);
+        left = std::clamp(native_strafe_left.load(std::memory_order_relaxed), -1.f, 1.f);
+    }
+    if (native_combat_stop.load(std::memory_order_relaxed) ||
+        native_strafe_enabled.load(std::memory_order_relaxed))
+    {
+        std::uint32_t baseHasBits = ReadNativeCommandField<std::uint32_t>(base, 0x10);
+        baseHasBits |= 0x000000C0U;
+        WriteNativeCommandField(base, 0x10, baseHasBits);
+        WriteNativeCommandField(base, 0x58, forward);
+        WriteNativeCommandField(base, 0x5C, left);
+    }
+    result.forward = forward;
+    result.left = left;
     return result;
+}
+
+static void NativeInputCreateMove(void* input, int slot, void* command)
+{
+    const std::uint64_t call = native_create_move_calls.fetch_add(1, std::memory_order_relaxed) + 1;
+
+    void* destination = native_aim_angle_destination.exchange(nullptr, std::memory_order_acq_rel);
+    const bool aimRequested = destination != nullptr;
+    const float pitch = native_aim_angle_pitch.load(std::memory_order_relaxed);
+    const float yaw = native_aim_angle_yaw.load(std::memory_order_relaxed);
+    const float roll = native_aim_angle_roll.load(std::memory_order_relaxed);
+
+    if (native_input_create_move_original != nullptr)
+        native_input_create_move_original(input, slot, command);
+
+    const NativeCommandResult applied = ApplyNativeCommandRequests(
+        command, aimRequested, pitch, yaw, roll);
+
+    if (call <= 8 || call % 1200 == 0)
+        PreviewDebug("[INPUT] CreateMove call=%llu object=%p slot=%d command=%p valid=%d sequence=%lld legacy=%d buttons=%llx->%llx move=%.3f/%.3f angle=%d total_angles=%llu requests=bhop:%d strafe:%d attack:%d duck:%d scope:%d stop:%d",
+            static_cast<unsigned long long>(call), input, slot, command, applied.valid ? 1 : 0,
+            static_cast<long long>(applied.sequence), applied.legacySequence,
+            static_cast<unsigned long long>(applied.buttonsBefore),
+            static_cast<unsigned long long>(applied.buttonsAfter),
+            applied.forward, applied.left, applied.angleApplied ? 1 : 0,
+            static_cast<unsigned long long>(native_aim_angle_applications.load(std::memory_order_relaxed)),
+            native_bhop_enabled.load(std::memory_order_relaxed) ? 1 : 0,
+            native_strafe_enabled.load(std::memory_order_relaxed) ? 1 : 0,
+            native_combat_attack.load(std::memory_order_relaxed) ? 1 : 0,
+            native_combat_duck.load(std::memory_order_relaxed) ? 1 : 0,
+            native_combat_scope.load(std::memory_order_relaxed) ? 1 : 0,
+            native_combat_stop.load(std::memory_order_relaxed) ? 1 : 0);
 }
 
 static std::string ResolvePreviewPngPath()
@@ -593,7 +765,15 @@ static void ProcessSDLEvent(SDL_Event* event)
     if (!event) return;
     FindCS2Window();
 
-    switch (event->type) {
+    // ImGui must see keyboard/text events before Axion updates hotkeys. This
+    // prevents a focused config-name field from also activating a bind.
+    if (ImGui::GetCurrentContext() && g_SDLWindow)
+        ImGui_ImplSDL3_ProcessEvent(event);
+    const bool textInputActive = ImGui::GetCurrentContext() && g_MenuOpen &&
+        (ImGui::GetIO().WantTextInput || event->type == SDL_EVENT_TEXT_INPUT ||
+         event->type == SDL_EVENT_TEXT_EDITING);
+
+    if (!textInputActive) switch (event->type) {
     case SDL_EVENT_KEY_DOWN:
     case SDL_EVENT_KEY_UP: {
         unsigned int vk = SDLKeycodeToVK(event->key.key);
@@ -611,14 +791,12 @@ static void ProcessSDLEvent(SDL_Event* event)
     default: break;
     }
 
-    if (ImGui::GetCurrentContext() && g_SDLWindow)
-        ImGui_ImplSDL3_ProcessEvent(event);
-
     if (g_MenuOpen) {
         switch (event->type) {
         case SDL_EVENT_MOUSE_BUTTON_DOWN: case SDL_EVENT_MOUSE_BUTTON_UP:
         case SDL_EVENT_MOUSE_MOTION:      case SDL_EVENT_MOUSE_WHEEL:
         case SDL_EVENT_KEY_DOWN:          case SDL_EVENT_KEY_UP:
+        case SDL_EVENT_TEXT_INPUT:        case SDL_EVENT_TEXT_EDITING:
             event->type = (SDL_EventType)0;
         default: break;
         }
@@ -627,7 +805,15 @@ static void ProcessSDLEvent(SDL_Event* event)
 
 static void DestroyFrameResources()
 {
-    if (vk_device == VK_NULL_HANDLE) return;
+    if (vk_device == VK_NULL_HANDLE) {
+        std::memset(frames, 0, sizeof(frames));
+        std::memset(frame_sems, 0, sizeof(frame_sems));
+        vk_render_pass = VK_NULL_HANDLE;
+        vk_descriptor_pool = VK_NULL_HANDLE;
+        vk_bound_swapchain = VK_NULL_HANDLE;
+        vk_frame_count = 0;
+        return;
+    }
     for (int i = 0; i < 8; ++i) {
         auto& f = frames[i];
         if (f.Framebuffer)        { vkDestroyFramebuffer(vk_device, f.Framebuffer, nullptr); f.Framebuffer = VK_NULL_HANDLE; }
@@ -644,26 +830,56 @@ static void DestroyFrameResources()
     }
     if (vk_descriptor_pool) { vkDestroyDescriptorPool(vk_device, vk_descriptor_pool, nullptr); vk_descriptor_pool = VK_NULL_HANDLE; }
     if (vk_render_pass)     { vkDestroyRenderPass(vk_device, vk_render_pass, nullptr); vk_render_pass = VK_NULL_HANDLE; }
+    vk_bound_swapchain = VK_NULL_HANDLE;
+    vk_frame_count = 0;
+}
+
+static void InvalidateVulkanRenderer(bool wait_for_device)
+{
+    if (wait_for_device && vk_device != VK_NULL_HANDLE)
+        vkDeviceWaitIdle(vk_device);
+
+    // Descriptor sets must be released while the ImGui renderer and its pool
+    // are both still valid. The SDL backend and ImGui context are deliberately
+    // retained across resizes so input/font/menu state survives the swapchain.
+    // The caller has already synchronized the device when needed; avoid the
+    // second vkDeviceWaitIdle performed by the public unload helper.
+    DestroyPreviewTextureResources(true);
+    if (vk_imgui_inited && ImGui::GetCurrentContext() != nullptr)
+        ImGui_ImplVulkan_Shutdown();
     vk_imgui_inited = false;
+    DestroyFrameResources();
 }
 
 static bool EnsureFrameResources(VkSwapchainKHR swapchain)
 {
-    if (frames[0].Framebuffer != VK_NULL_HANDLE) return vk_imgui_inited;
-    DestroyFrameResources();
+    if (swapchain == vk_bound_swapchain && vk_frame_count > 0 &&
+        frames[0].Framebuffer != VK_NULL_HANDLE)
+        return vk_imgui_inited;
+
+    if (vk_bound_swapchain != VK_NULL_HANDLE || vk_frame_count != 0 ||
+        vk_render_pass != VK_NULL_HANDLE || vk_descriptor_pool != VK_NULL_HANDLE)
+        InvalidateVulkanRenderer(true);
 
     if (vk_device == VK_NULL_HANDLE || vk_queue == VK_NULL_HANDLE ||
         vk_queue_family == UINT32_MAX || vk_extent.width == 0 || vk_extent.height == 0)
         return false;
 
+    auto fail = [](const char* operation) {
+        PreviewDebug("[VULKAN] swapchain renderer rebuild failed at %s", operation);
+        InvalidateVulkanRenderer(true);
+        return false;
+    };
+
     uint32_t img_count = 0;
     if (vkGetSwapchainImagesKHR(vk_device, swapchain, &img_count, nullptr) != VK_SUCCESS || img_count == 0)
         return false;
-    if (img_count > 8) img_count = 8;
+    if (img_count > 8)
+        return fail("unsupported image count");
 
     VkImage backbuffers[8] = {};
     if (vkGetSwapchainImagesKHR(vk_device, swapchain, &img_count, backbuffers) != VK_SUCCESS)
-        return false;
+        return fail("vkGetSwapchainImagesKHR");
 
     for (uint32_t i = 0; i < img_count; ++i) {
         auto* f  = &frames[i];
@@ -673,21 +889,21 @@ static bool EnsureFrameResources(VkSwapchainKHR swapchain)
         VkCommandPoolCreateInfo pool_ci = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
         pool_ci.queueFamilyIndex = vk_queue_family;
         pool_ci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-        if (vkCreateCommandPool(vk_device, &pool_ci, nullptr, &f->CommandPool) != VK_SUCCESS) return false;
+        if (vkCreateCommandPool(vk_device, &pool_ci, nullptr, &f->CommandPool) != VK_SUCCESS) return fail("vkCreateCommandPool");
 
         VkCommandBufferAllocateInfo alloc_ci = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
         alloc_ci.commandPool = f->CommandPool;
         alloc_ci.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         alloc_ci.commandBufferCount = 1;
-        if (vkAllocateCommandBuffers(vk_device, &alloc_ci, &f->CommandBuffer) != VK_SUCCESS) return false;
+        if (vkAllocateCommandBuffers(vk_device, &alloc_ci, &f->CommandBuffer) != VK_SUCCESS) return fail("vkAllocateCommandBuffers");
 
         VkFenceCreateInfo fence_ci = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
         fence_ci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-        if (vkCreateFence(vk_device, &fence_ci, nullptr, &f->Fence) != VK_SUCCESS) return false;
+        if (vkCreateFence(vk_device, &fence_ci, nullptr, &f->Fence) != VK_SUCCESS) return fail("vkCreateFence");
 
         VkSemaphoreCreateInfo sem_ci = { VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
         if (vkCreateSemaphore(vk_device, &sem_ci, nullptr, &fs->ImageAcquiredSemaphore) != VK_SUCCESS ||
-            vkCreateSemaphore(vk_device, &sem_ci, nullptr, &fs->RenderCompleteSemaphore) != VK_SUCCESS) return false;
+            vkCreateSemaphore(vk_device, &sem_ci, nullptr, &fs->RenderCompleteSemaphore) != VK_SUCCESS) return fail("vkCreateSemaphore");
     }
 
     VkAttachmentDescription attachment = {};
@@ -713,7 +929,7 @@ static bool EnsureFrameResources(VkSwapchainKHR swapchain)
     rp_ci.attachmentCount = 1; rp_ci.pAttachments = &attachment;
     rp_ci.subpassCount = 1; rp_ci.pSubpasses = &subpass;
 
-    if (vkCreateRenderPass(vk_device, &rp_ci, nullptr, &vk_render_pass) != VK_SUCCESS) return false;
+    if (vkCreateRenderPass(vk_device, &rp_ci, nullptr, &vk_render_pass) != VK_SUCCESS) return fail("vkCreateRenderPass");
 
     VkImageViewCreateInfo view_ci = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
     view_ci.viewType = VK_IMAGE_VIEW_TYPE_2D;
@@ -722,7 +938,7 @@ static bool EnsureFrameResources(VkSwapchainKHR swapchain)
 
     for (uint32_t i = 0; i < img_count; ++i) {
         view_ci.image = frames[i].Backbuffer;
-        if (vkCreateImageView(vk_device, &view_ci, nullptr, &frames[i].BackbufferView) != VK_SUCCESS) return false;
+        if (vkCreateImageView(vk_device, &view_ci, nullptr, &frames[i].BackbufferView) != VK_SUCCESS) return fail("vkCreateImageView");
     }
 
     VkFramebufferCreateInfo fb_ci = { VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
@@ -732,7 +948,7 @@ static bool EnsureFrameResources(VkSwapchainKHR swapchain)
     for (uint32_t i = 0; i < img_count; ++i) {
         VkImageView att = frames[i].BackbufferView;
         fb_ci.pAttachments = &att;
-        if (vkCreateFramebuffer(vk_device, &fb_ci, nullptr, &frames[i].Framebuffer) != VK_SUCCESS) return false;
+        if (vkCreateFramebuffer(vk_device, &fb_ci, nullptr, &frames[i].Framebuffer) != VK_SUCCESS) return fail("vkCreateFramebuffer");
     }
 
     VkDescriptorPoolSize pool_sizes[] = { { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1000 } };
@@ -741,7 +957,7 @@ static bool EnsureFrameResources(VkSwapchainKHR swapchain)
     pool_info.maxSets = 1000;
     pool_info.poolSizeCount = 1;
     pool_info.pPoolSizes = pool_sizes;
-    if (vkCreateDescriptorPool(vk_device, &pool_info, nullptr, &vk_descriptor_pool) != VK_SUCCESS) return false;
+    if (vkCreateDescriptorPool(vk_device, &pool_info, nullptr, &vk_descriptor_pool) != VK_SUCCESS) return fail("vkCreateDescriptorPool");
 
     if (ImGui::GetCurrentContext()) {
         ImGui_ImplVulkan_InitInfo init_info = {};
@@ -760,38 +976,55 @@ static bool EnsureFrameResources(VkSwapchainKHR swapchain)
             ImGui::GetIO().DisplaySize.y = (float)vk_extent.height;
         }
 
-        if (!ImGui_ImplVulkan_Init(&init_info, vk_render_pass)) return false;
+        if (!ImGui_ImplVulkan_Init(&init_info, vk_render_pass)) return fail("ImGui_ImplVulkan_Init");
+        vk_imgui_inited = true;
 
-        VkCommandPool font_pool;
+        VkCommandPool font_pool = VK_NULL_HANDLE;
         VkCommandPoolCreateInfo fp_ci = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
         fp_ci.queueFamilyIndex = vk_queue_family;
-        vkCreateCommandPool(vk_device, &fp_ci, nullptr, &font_pool);
+        if (vkCreateCommandPool(vk_device, &fp_ci, nullptr, &font_pool) != VK_SUCCESS)
+            return fail("font vkCreateCommandPool");
 
-        VkCommandBuffer font_cmd;
+        VkCommandBuffer font_cmd = VK_NULL_HANDLE;
         VkCommandBufferAllocateInfo fa_ci = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
         fa_ci.commandPool = font_pool;
         fa_ci.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
         fa_ci.commandBufferCount = 1;
-        vkAllocateCommandBuffers(vk_device, &fa_ci, &font_cmd);
+        if (vkAllocateCommandBuffers(vk_device, &fa_ci, &font_cmd) != VK_SUCCESS) {
+            vkDestroyCommandPool(vk_device, font_pool, nullptr);
+            return fail("font vkAllocateCommandBuffers");
+        }
 
         VkCommandBufferBeginInfo begin_ci = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
         begin_ci.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        vkBeginCommandBuffer(font_cmd, &begin_ci);
+        if (vkBeginCommandBuffer(font_cmd, &begin_ci) != VK_SUCCESS) {
+            vkDestroyCommandPool(vk_device, font_pool, nullptr);
+            return fail("font vkBeginCommandBuffer");
+        }
         ImGui_ImplVulkan_CreateFontsTexture(font_cmd);
-        vkEndCommandBuffer(font_cmd);
+        if (vkEndCommandBuffer(font_cmd) != VK_SUCCESS) {
+            vkDestroyCommandPool(vk_device, font_pool, nullptr);
+            return fail("font vkEndCommandBuffer");
+        }
 
         VkSubmitInfo submit = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
         submit.commandBufferCount = 1;
         submit.pCommandBuffers = &font_cmd;
-        vkQueueSubmit(vk_queue, 1, &submit, VK_NULL_HANDLE);
-        vkQueueWaitIdle(vk_queue);
+        if (vkQueueSubmit(vk_queue, 1, &submit, VK_NULL_HANDLE) != VK_SUCCESS ||
+            vkQueueWaitIdle(vk_queue) != VK_SUCCESS) {
+            vkDestroyCommandPool(vk_device, font_pool, nullptr);
+            return fail("font upload");
+        }
 
         vkFreeCommandBuffers(vk_device, font_pool, 1, &font_cmd);
         vkDestroyCommandPool(vk_device, font_pool, nullptr);
 
-        vk_imgui_inited = true;
         LoadCheatPreviewTexture();
     }
+    vk_bound_swapchain = swapchain;
+    vk_frame_count = img_count;
+    PreviewDebug("[VULKAN] renderer bound to swapchain=%p images=%u extent=%ux%u",
+                 reinterpret_cast<void*>(swapchain), img_count, vk_extent.width, vk_extent.height);
     return vk_imgui_inited;
 }
 
@@ -800,17 +1033,62 @@ static VkResult Hooked_QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pI
     static bool first = false;
     if (!first) { first = true; VulkanDebug("[VULKAN] vkQueuePresentKHR intercepted"); }
 
-    if (!g_MenuReady.load() || !vk_device || !pInfo || pInfo->swapchainCount == 0)
+    // The overlay submission rewrites the wait list for one swapchain. Preserve
+    // uncommon multi-swapchain presents unchanged rather than dropping the
+    // synchronization required by their other swapchains.
+    if (!g_MenuReady.load() || !vk_device || !pInfo || pInfo->swapchainCount != 1 ||
+        pInfo->pSwapchains == nullptr || pInfo->pImageIndices == nullptr)
         return orig_vkQueuePresentKHR(queue, pInfo);
 
-    if (vk_queue == VK_NULL_HANDLE) vk_queue = queue;
+    uint32_t present_queue_family = UINT32_MAX;
+    if (!FindQueueFamily(vk_device, queue, present_queue_family)) {
+        // Late injection can miss the queue getter. A handle already captured
+        // from the selected graphics family is still usable; an unrelated,
+        // unknown handle is not safe for command-buffer submission.
+        if (vk_queue != VK_NULL_HANDLE && vk_queue != queue) {
+            static std::atomic<bool> logged_unknown_present_queue{false};
+            if (!logged_unknown_present_queue.exchange(true))
+                VulkanDebug("[VULKAN] unknown present queue family; overlay remains fail-closed");
+            return orig_vkQueuePresentKHR(queue, pInfo);
+        }
+        present_queue_family = vk_queue_family;
+    }
 
     VkSwapchainKHR swapchain = pInfo->pSwapchains[0];
-    uint32_t image_index = pInfo->pImageIndices ? pInfo->pImageIndices[0] : 0;
+    uint32_t image_index = pInfo->pImageIndices[0];
     if (image_index >= 8) return orig_vkQueuePresentKHR(queue, pInfo);
 
     SDL_Window* window = FindCS2Window();
     if (!window) return orig_vkQueuePresentKHR(queue, pInfo);
+
+    // Keep resources and the semaphore inserted into hooked_present alive
+    // through the real present call. Swapchain creation takes the same lock
+    // only after Vulkan has successfully created the replacement.
+    std::unique_lock<std::mutex> resource_lock(vk_resource_mutex);
+
+    if (present_queue_family == UINT32_MAX)
+        return orig_vkQueuePresentKHR(queue, pInfo);
+    if (vk_queue_family != present_queue_family && vk_bound_swapchain != VK_NULL_HANDLE)
+        InvalidateVulkanRenderer(true);
+    vk_queue = queue;
+    vk_queue_family = present_queue_family;
+
+    if (vk_bound_swapchain != VK_NULL_HANDLE && vk_bound_swapchain != swapchain) {
+        PreviewDebug("[VULKAN] present observed a replacement swapchain %p -> %p",
+                     reinterpret_cast<void*>(vk_bound_swapchain),
+                     reinterpret_cast<void*>(swapchain));
+        InvalidateVulkanRenderer(true);
+        // A late-installed hook may have missed vkCreateSwapchainKHR. In that
+        // case SDL's drawable size is the safest available extent for the new
+        // framebuffer set; the format normally remains unchanged.
+        int replacement_width = 0;
+        int replacement_height = 0;
+        if (SDL_GetWindowSizeInPixels(window, &replacement_width, &replacement_height) &&
+            replacement_width > 0 && replacement_height > 0) {
+            vk_extent.width = static_cast<uint32_t>(replacement_width);
+            vk_extent.height = static_cast<uint32_t>(replacement_height);
+        }
+    }
 
     if (vk_extent.width == 0 || vk_extent.height == 0) {
         int width = 0, height = 0;
@@ -886,19 +1164,29 @@ static VkResult Hooked_QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pI
         VulkanDebug("[VULKAN] ImGui context initialized; menu opened");
     }
 
-    if (!EnsureFrameResources(swapchain) || frames[image_index].Framebuffer == VK_NULL_HANDLE)
+    if (!EnsureFrameResources(swapchain) || image_index >= vk_frame_count ||
+        frames[image_index].Framebuffer == VK_NULL_HANDLE)
         return orig_vkQueuePresentKHR(queue, pInfo);
 
     auto* fd  = &frames[image_index];
     auto* fsd = &frame_sems[image_index];
 
-    vkWaitForFences(vk_device, 1, &fd->Fence, VK_TRUE, ~0ull);
-    vkResetFences(vk_device, 1, &fd->Fence);
+    if (vkWaitForFences(vk_device, 1, &fd->Fence, VK_TRUE, ~0ull) != VK_SUCCESS ||
+        vkResetFences(vk_device, 1, &fd->Fence) != VK_SUCCESS) {
+        InvalidateVulkanRenderer(true);
+        return orig_vkQueuePresentKHR(queue, pInfo);
+    }
 
-    vkResetCommandBuffer(fd->CommandBuffer, 0);
+    if (vkResetCommandBuffer(fd->CommandBuffer, 0) != VK_SUCCESS) {
+        InvalidateVulkanRenderer(true);
+        return orig_vkQueuePresentKHR(queue, pInfo);
+    }
     VkCommandBufferBeginInfo begin_ci = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     begin_ci.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(fd->CommandBuffer, &begin_ci);
+    if (vkBeginCommandBuffer(fd->CommandBuffer, &begin_ci) != VK_SUCCESS) {
+        InvalidateVulkanRenderer(true);
+        return orig_vkQueuePresentKHR(queue, pInfo);
+    }
 
     VkRenderPassBeginInfo rp_begin = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
     rp_begin.renderPass = vk_render_pass;
@@ -924,9 +1212,13 @@ static VkResult Hooked_QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pI
     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), fd->CommandBuffer);
 
     vkCmdEndRenderPass(fd->CommandBuffer);
-    vkEndCommandBuffer(fd->CommandBuffer);
+    if (vkEndCommandBuffer(fd->CommandBuffer) != VK_SUCCESS) {
+        InvalidateVulkanRenderer(true);
+        return orig_vkQueuePresentKHR(queue, pInfo);
+    }
 
-    std::vector<VkPipelineStageFlags> wait_stages(pInfo->waitSemaphoreCount, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+    static thread_local std::vector<VkPipelineStageFlags> wait_stages;
+    wait_stages.assign(pInfo->waitSemaphoreCount, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
     VkSubmitInfo submit = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
     submit.waitSemaphoreCount = pInfo->waitSemaphoreCount;
     submit.pWaitSemaphores = pInfo->pWaitSemaphores;
@@ -936,20 +1228,22 @@ static VkResult Hooked_QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pI
     submit.signalSemaphoreCount = 1;
     submit.pSignalSemaphores = &fsd->RenderCompleteSemaphore;
     if (vkQueueSubmit(vk_queue, 1, &submit, fd->Fence) != VK_SUCCESS) {
-        vkDeviceWaitIdle(vk_device);
-        UnloadCheatPreviewTexture();
-        if (vk_imgui_inited) {
-            ImGui_ImplVulkan_Shutdown();
-            vk_imgui_inited = false;
-        }
-        DestroyFrameResources();
+        InvalidateVulkanRenderer(true);
         return orig_vkQueuePresentKHR(queue, pInfo);
     }
 
     VkPresentInfoKHR hooked_present = *pInfo;
     hooked_present.waitSemaphoreCount = 1;
     hooked_present.pWaitSemaphores = &fsd->RenderCompleteSemaphore;
-    return orig_vkQueuePresentKHR(queue, &hooked_present);
+    const VkResult result = orig_vkQueuePresentKHR(queue, &hooked_present);
+    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_ERROR_SURFACE_LOST_KHR ||
+        result == VK_ERROR_DEVICE_LOST) {
+        VulkanDebug("[VULKAN] present reported unusable swapchain/device; retiring overlay resources");
+        InvalidateVulkanRenderer(true);
+    } else if (result == VK_SUBOPTIMAL_KHR) {
+        VulkanDebug("[VULKAN] present reported SUBOPTIMAL; awaiting game swapchain replacement");
+    }
+    return result;
 }
 
 static VkResult Hooked_CreateSwapchainKHR(VkDevice device,
@@ -958,25 +1252,27 @@ static VkResult Hooked_CreateSwapchainKHR(VkDevice device,
                                            VkSwapchainKHR* pSwapchain)
 {
     VulkanDebug("[VULKAN] vkCreateSwapchainKHR intercepted");
-    vk_device = device;
-    if (device != VK_NULL_HANDLE) vkDeviceWaitIdle(device);
+    // Do not tear down the working renderer unless Vulkan has actually made a
+    // replacement. This also keeps the old swapchain usable when creation
+    // fails (for example during a transient zero-sized/minimized window).
+    const VkResult result = orig_vkCreateSwapchainKHR(
+        device, pCreateInfo, pAllocator, pSwapchain);
+    if (result != VK_SUCCESS)
+        return result;
 
-    if (ImGui::GetCurrentContext()) {
-        UnloadCheatPreviewTexture();
-        if (vk_imgui_inited)  ImGui_ImplVulkan_Shutdown();
-        if (vk_sdl_inited)    ImGui_ImplSDL3_Shutdown();
-        ImGui::DestroyContext();
-        vk_imgui_inited = false;
-        vk_sdl_inited = false;
-    }
-    DestroyFrameResources();
+    std::lock_guard<std::mutex> resource_lock(vk_resource_mutex);
+    InvalidateVulkanRenderer(true);
+    vk_device = device;
 
     if (pCreateInfo) {
         vk_extent = pCreateInfo->imageExtent;
         vk_format = pCreateInfo->imageFormat;
-        vk_min_image_count = pCreateInfo->minImageCount;
+        vk_min_image_count = std::max(2u, pCreateInfo->minImageCount);
+        PreviewDebug("[VULKAN] accepted replacement extent=%ux%u format=%d min-images=%u",
+                     vk_extent.width, vk_extent.height, static_cast<int>(vk_format),
+                     vk_min_image_count);
     }
-    return orig_vkCreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
+    return result;
 }
 
 static void CaptureLateDevice(VkDevice device)
@@ -992,8 +1288,10 @@ static void CaptureLateDevice(VkDevice device)
     if (get_device_queue && vk_queue_family != UINT32_MAX) {
         VkQueue graphics_queue = VK_NULL_HANDLE;
         get_device_queue(device, vk_queue_family, 0, &graphics_queue);
-        if (graphics_queue != VK_NULL_HANDLE)
+        if (graphics_queue != VK_NULL_HANDLE) {
             vk_queue = graphics_queue;
+            RecordQueue(device, graphics_queue, vk_queue_family);
+        }
     }
     if (vulkan)
         dlclose(vulkan);
@@ -1036,20 +1334,7 @@ static int Late_SDL_PeepEvents(SDL_Event* events, int numevents,
 
 static SDL_MouseButtonFlags Late_SDL_GetRelativeMouseState(float* x, float* y)
 {
-    const auto syncThirdPerson = [] {
-        if (I::Input != nullptr)
-        {
-            auto* input = reinterpret_cast<std::uint8_t*>(I::Input);
-            *reinterpret_cast<bool*>(input + 0x229) =
-                native_thirdperson_input.load(std::memory_order_acquire);
-        }
-    };
-
-    // CS2 may refresh the input object inside the original sampler. Apply on
-    // both sides so the camera update that follows always observes our state.
-    syncThirdPerson();
     const SDL_MouseButtonFlags buttons = orig_SDL_GetRelativeMouseState(x, y);
-    syncThirdPerson();
     native_aim_sdl_samples.fetch_add(1, std::memory_order_relaxed);
     const float aimX = native_aim_mouse_x.exchange(0.f, std::memory_order_acq_rel);
     const float aimY = native_aim_mouse_y.exchange(0.f, std::memory_order_acq_rel);
@@ -1097,7 +1382,11 @@ extern "C" void vkGetDeviceQueue(VkDevice dev, uint32_t family, uint32_t idx, Vk
     static auto real = reinterpret_cast<PFN_vkGetDeviceQueue>(dlsym(RTLD_NEXT, "vkGetDeviceQueue"));
     if (!real) return;
     real(dev, family, idx, q);
-    if (q && *q) { vk_device = dev; vk_queue_family = family; vk_queue = *q; }
+    if (q && *q) {
+        vk_device = dev;
+        RecordQueue(dev, *q, family);
+        if (vk_queue == VK_NULL_HANDLE) { vk_queue_family = family; vk_queue = *q; }
+    }
 }
 
 extern "C" void vkGetDeviceQueue2(VkDevice dev, const VkDeviceQueueInfo2* info, VkQueue* q)
@@ -1105,7 +1394,11 @@ extern "C" void vkGetDeviceQueue2(VkDevice dev, const VkDeviceQueueInfo2* info, 
     static auto real = reinterpret_cast<PFN_vkGetDeviceQueue2>(dlsym(RTLD_NEXT, "vkGetDeviceQueue2"));
     if (!real) return;
     real(dev, info, q);
-    if (info && q && *q) { vk_device = dev; vk_queue_family = info->queueFamilyIndex; vk_queue = *q; }
+    if (info && q && *q) {
+        vk_device = dev;
+        RecordQueue(dev, *q, info->queueFamilyIndex);
+        if (vk_queue == VK_NULL_HANDLE) { vk_queue_family = info->queueFamilyIndex; vk_queue = *q; }
+    }
 }
 
 extern "C" VkResult vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* info)
@@ -1267,6 +1560,8 @@ void InstallVulkanHook()
     late_hooks = funchook_create();
     int result = late_hooks ? 0 : -1;
     if (result == 0) result = funchook_prepare(late_hooks, reinterpret_cast<void**>(&orig_vkQueuePresentKHR), reinterpret_cast<void*>(Hooked_QueuePresentKHR));
+    if (result == 0 && orig_vkCreateSwapchainKHR)
+        result = funchook_prepare(late_hooks, reinterpret_cast<void**>(&orig_vkCreateSwapchainKHR), reinterpret_cast<void*>(Hooked_CreateSwapchainKHR));
     if (result == 0) result = funchook_prepare(late_hooks, reinterpret_cast<void**>(&orig_vkAcquireNextImageKHR), reinterpret_cast<void*>(Late_AcquireNextImageKHR));
     if (result == 0 && orig_vkAcquireNextImage2KHR)
         result = funchook_prepare(late_hooks, reinterpret_cast<void**>(&orig_vkAcquireNextImage2KHR), reinterpret_cast<void*>(Late_AcquireNextImage2KHR));
@@ -1310,26 +1605,64 @@ bool InstallNativeInputHook()
 {
     if (native_input_hooks != nullptr)
         return true;
-    if (I::Input == nullptr)
+
+    // Resolve the actual CCSGOInput singleton from its current native static
+    // constructor. I::Input intentionally remains the smaller SDL/input-state
+    // object used by the legacy camera and mouse mirror paths.
+    std::uint8_t* constructorReference = MEM::FindPattern(CLIENT_DLL,
+        "4C 8D 3D ? ? ? ? 4C 89 FF E8 ? ? ? ? 4C 89 FE");
+    if (constructorReference != nullptr)
+        native_command_input = MEM::ResolveRelativeAddress(constructorReference, 3, 7);
+    if (native_command_input == nullptr)
     {
-        VulkanDebug("[INPUT] CreateMove hook unavailable: CCSGOInput is null");
+        VulkanDebug("[INPUT] CreateMove hook unavailable: CCSGOInput singleton signature missing");
         return false;
     }
 
-    auto** vtable = *reinterpret_cast<void***>(I::Input);
+    auto** vtable = *reinterpret_cast<void***>(native_command_input);
     Dl_info vtableInfo{};
     if (vtable == nullptr || dladdr(vtable, &vtableInfo) == 0)
     {
-        PreviewDebug("[INPUT] CreateMove hook unavailable: invalid vtable=%p input=%p", vtable, I::Input);
+        PreviewDebug("[INPUT] CreateMove hook unavailable: invalid vtable=%p command_input=%p",
+            vtable, native_command_input);
         return false;
     }
-    void* target = vtable[6];
+
+    const void* typeInfo = vtable[-1];
+    const char* typeName = typeInfo != nullptr
+        ? *reinterpret_cast<const char* const*>(reinterpret_cast<const std::uint8_t*>(typeInfo) + sizeof(void*))
+        : nullptr;
+    if (typeName == nullptr || std::strcmp(typeName, "10CCSGOInput") != 0)
+    {
+        PreviewDebug("[INPUT] CreateMove hook unavailable: RTTI mismatch type=%s object=%p vtable=%p",
+            typeName != nullptr ? typeName : "(null)", native_command_input, vtable);
+        native_command_input = nullptr;
+        return false;
+    }
+
+    constexpr std::size_t createMoveIndex = 26;
+    void* target = vtable[createMoveIndex];
     Dl_info targetInfo{};
     if (target != nullptr && dladdr(target, &targetInfo) == 0)
         target = nullptr;
     if (target == nullptr)
     {
-        VulkanDebug("[INPUT] CreateMove hook unavailable: vtable[6] is null");
+        VulkanDebug("[INPUT] CreateMove hook unavailable: CCSGOInput vtable[26] is null");
+        return false;
+    }
+    const auto* entry = reinterpret_cast<const std::uint8_t*>(target);
+    // Validate the current System V prologue, including preservation of rdx as
+    // the command pointer and rdi as this. This fails closed if Valve changes
+    // the index or ABI in a later client build.
+    constexpr std::uint8_t expectedPrologue[] = {
+        0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x49, 0x89, 0xD7,
+        0x41, 0x56, 0x49, 0x89, 0xFE, 0x41, 0x55, 0x41, 0x54,
+        0x53, 0x89, 0xF3
+    };
+    if (std::memcmp(entry, expectedPrologue, sizeof(expectedPrologue)) != 0)
+    {
+        PreviewDebug("[INPUT] CreateMove hook unavailable: vtable[26] ABI prologue mismatch target=%p bytes=%02x %02x %02x %02x",
+            target, entry[0], entry[1], entry[2], entry[3]);
         return false;
     }
 
@@ -1344,14 +1677,19 @@ bool InstallNativeInputHook()
         result = funchook_install(native_input_hooks, 0);
     if (result != 0)
     {
+        const char* error = native_input_hooks != nullptr
+            ? funchook_error_message(native_input_hooks) : "funchook_create failed";
+        PreviewDebug("[INPUT] CreateMove hook install failed result=%d error=%s index=%zu target=%p object=%p",
+            result, error != nullptr ? error : "(none)", createMoveIndex, target, native_command_input);
         if (native_input_hooks != nullptr)
             funchook_destroy(native_input_hooks);
         native_input_hooks = nullptr;
         native_input_create_move_original = nullptr;
-        PreviewDebug("[INPUT] CreateMove hook install failed result=%d target=%p", result, target);
         return false;
     }
-    PreviewDebug("[INPUT] CreateMove hook installed target=%p input=%p", target, I::Input);
+    PreviewDebug("[INPUT] CreateMove hook installed object=%p vtable=%p index=%zu target=%p module=%s type=%s legacy_input=%p",
+        native_command_input, vtable, createMoveIndex, target,
+        targetInfo.dli_fname != nullptr ? targetInfo.dli_fname : "(unknown)", typeName, I::Input);
     return true;
 }
 
@@ -1364,6 +1702,7 @@ void DestroyNativeInputHook()
     funchook_destroy(native_input_hooks);
     native_input_hooks = nullptr;
     native_input_create_move_original = nullptr;
+    native_command_input = nullptr;
 }
 
 bool QueueNativeAimDelta(float x, float y)
@@ -1384,29 +1723,17 @@ void ClearNativeAimDelta()
     native_aim_angle_destination.store(nullptr, std::memory_order_release);
 }
 
-bool QueueNativeAimAngles(void* destination, float pitch, float yaw, float roll)
+bool QueueNativeAimAngles(void* requestToken, float pitch, float yaw, float roll)
 {
-    if (destination == nullptr ||
+    if (requestToken == nullptr ||
         !std::isfinite(pitch) || !std::isfinite(yaw) || !std::isfinite(roll))
         return false;
     native_aim_angle_pitch.store(pitch, std::memory_order_relaxed);
     native_aim_angle_yaw.store(yaw, std::memory_order_relaxed);
     native_aim_angle_roll.store(roll, std::memory_order_relaxed);
-    if (native_input_hooks != nullptr)
-        native_aim_angle_destination.store(destination, std::memory_order_release);
-    else if (I::Input != nullptr)
-    {
-        // Timing fallback for builds where the vtable index has moved. The
-        // resolved input object is still the command source, so keep its angle
-        // mirror current until a verified CreateMove target is available.
-        auto* inputAngles = reinterpret_cast<float*>(
-            reinterpret_cast<std::uint8_t*>(I::Input) + 0x2D8);
-        inputAngles[0] = std::clamp(pitch, -89.f, 89.f);
-        inputAngles[1] = std::remainder(yaw, 360.f);
-        inputAngles[2] = 0.f;
-    }
-    else
+    if (native_input_hooks == nullptr)
         return false;
+    native_aim_angle_destination.store(requestToken, std::memory_order_release);
     return true;
 }
 
@@ -1428,13 +1755,6 @@ bool IsNativeInputHookInstalled()
 void SetNativeThirdPersonInput(bool enabled)
 {
     native_thirdperson_input.store(enabled, std::memory_order_release);
-    // Also update immediately. The SDL hook repeats this at the correct camera
-    // input timing and is the authoritative path.
-    if (I::Input != nullptr)
-    {
-        auto* input = reinterpret_cast<std::uint8_t*>(I::Input);
-        *reinterpret_cast<bool*>(input + 0x229) = enabled;
-    }
 }
 
 void SetNativeBhopInput(bool enabled, bool spaceHeld, bool onGround)
@@ -1449,6 +1769,27 @@ void SetNativeStrafeInput(bool enabled, float forward, float left)
     native_strafe_forward.store(forward, std::memory_order_relaxed);
     native_strafe_left.store(left, std::memory_order_relaxed);
     native_strafe_enabled.store(enabled, std::memory_order_release);
+}
+
+void SetNativeCombatInput(bool attack, bool duck, bool scope, bool stop)
+{
+    native_combat_attack.store(attack, std::memory_order_release);
+    native_combat_duck.store(duck, std::memory_order_release);
+    native_combat_scope.store(scope, std::memory_order_release);
+    native_combat_stop.store(stop, std::memory_order_release);
+}
+
+void AddNativeCombatInput(bool attack, bool duck, bool scope, bool stop)
+{
+    if (attack) native_combat_attack.store(true, std::memory_order_release);
+    if (duck) native_combat_duck.store(true, std::memory_order_release);
+    if (scope) native_combat_scope.store(true, std::memory_order_release);
+    if (stop) native_combat_stop.store(true, std::memory_order_release);
+}
+
+bool IsNativeCombatAttackRequested()
+{
+    return native_combat_attack.load(std::memory_order_acquire);
 }
 
 #endif // __linux__

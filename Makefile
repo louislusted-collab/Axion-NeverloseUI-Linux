@@ -110,13 +110,14 @@ OBJ_FILES += $(IMGUI)/examples/example_win32_directx9/blur.cpp.o
 OBJ_FILES += $(IMGUI)/backends/imgui_impl_sdl3.cpp.o
 OBJ_FILES += $(IMGUI)/backends/imgui_impl_vulkan.cpp.o
 
-OBJS = $(addprefix obj/, $(OBJ_FILES))
+OBJDIR = obj/$(BUILD)
+OBJS = $(addprefix $(OBJDIR)/, $(OBJ_FILES))
 BIN  = cs2_axion.so
 LOADER = axion_loader
 GTK_CFLAGS = $(shell pkg-config --cflags gtk4)
 GTK_LIBS = $(shell pkg-config --libs gtk4)
 
-.PHONY: all debug release loader clean
+.PHONY: all debug release loader clean $(BIN)
 
 all: debug loader
 
@@ -135,12 +136,19 @@ $(LOADER): loader/axion_loader.cpp
 	$(CC) $(STD) -O2 -Wall -Wextra $(GTK_CFLAGS) -o $@ $< $(GTK_LIBS)
 
 $(BIN): $(OBJS)
+	@for object in $^; do \
+		if [ ! -s "$$object" ]; then \
+			echo "error: empty object $$object (removed; rerun make)"; \
+			rm -f "$$object"; \
+			exit 1; \
+		fi; \
+	done
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-obj/%.cpp.o: %.cpp
+$(OBJDIR)/%.cpp.o: %.cpp
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-obj/%.cpp.o: /%.cpp
+$(OBJDIR)/%.cpp.o: /%.cpp
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c -o $@ $<

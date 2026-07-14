@@ -20,9 +20,10 @@ void DestroyNativeInputHook();
 bool QueueNativeAimDelta(float x, float y);
 void ClearNativeAimDelta();
 
-// Schedules a schema-resolved pawn angle for the next CCSGOInput::CreateMove.
-// The destination remains inside CS2; no OS or kernel input device is used.
-bool QueueNativeAimAngles(void* destination, float pitch, float yaw, float roll);
+// Schedules an angle for the next verified CCSGOInput::CreateMove command.
+// requestToken identifies the live pawn/request generation but is never
+// dereferenced by the hook. No OS or kernel input device is used.
+bool QueueNativeAimAngles(void* requestToken, float pitch, float yaw, float roll);
 unsigned long long GetNativeCreateMoveCalls();
 unsigned long long GetNativeAimAngleApplications();
 bool IsNativeInputHookInstalled();
@@ -36,6 +37,12 @@ void SetNativeThirdPersonInput(bool enabled);
 // verified input axes/button block and never create a kernel input device.
 void SetNativeBhopInput(bool enabled, bool spaceHeld, bool onGround);
 void SetNativeStrafeInput(bool enabled, float forward, float left);
+
+// Combat/movement assists are latched in Present and re-applied at the native
+// CreateMove boundary. False values never clear the player's physical buttons.
+void SetNativeCombatInput(bool attack, bool duck, bool scope, bool stop);
+void AddNativeCombatInput(bool attack, bool duck, bool scope, bool stop);
+bool IsNativeCombatAttackRequested();
 
 // Loads/unloads cs2.png after the ImGui Vulkan backend is ready.
 // AXION_PREVIEW_PNG may be used to override the image path.

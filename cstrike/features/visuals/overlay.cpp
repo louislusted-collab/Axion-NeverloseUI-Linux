@@ -3,6 +3,7 @@
 // used: [stl] sort
 #include <algorithm>
 #include <cstring>
+#include <string>
 
 #include "overlay.h"
 
@@ -206,13 +207,14 @@ void OVERLAY::CBarComponent::Render(ImDrawList* pDrawList, const ImVec2& vecPosi
 	bIsMenuItem &= (MENU::bMainWindowOpened && overlayConfig.bEnable);
 	if (bIsMenuItem)
 	{
+		const std::string popupId = std::to_string(this->uOverlayVarIndex);
 		// @note: padding 2.f incase the thickness is too small
 		this->bIsHovered = ImRect(vecPosition - ImVec2(2.f, 2.f), vecPosition + this->vecSize + ImVec2(2.f, 2.f)).Contains(ImGui::GetIO().MousePos);
 		// if component is hovered + right clicked
 		if (this->bIsHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
-			ImGui::OpenPopup(CS_XOR(std::to_string(this->uOverlayVarIndex).c_str()));
+			ImGui::OpenPopup(popupId.c_str());
 	
-		if (ImGui::BeginPopup(CS_XOR(std::to_string(this->uOverlayVarIndex).c_str()), ImGuiWindowFlags_NoResize  | ImGuiWindowFlags_NoMove))
+		if (ImGui::BeginPopup(popupId.c_str(), ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
 		{
 			ImVec2 size = ImVec2(150, 320);
 			ImGui::SetWindowSize(size);
@@ -310,9 +312,9 @@ void OVERLAY::CTextComponent::Render(ImDrawList* pDrawList, const ImVec2& vecPos
 
 		// if component is hovered + right clicked
 		if (this->bIsHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right))
-			ImGui::OpenPopup(CS_XOR(this->szText));
+			ImGui::OpenPopup(this->szText);
 
-		if (ImGui::BeginPopup(CS_XOR(this->szText), ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+		if (ImGui::BeginPopup(this->szText, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
 		{
 
 			ImVec2 size = ImVec2(90, 150);
@@ -893,19 +895,28 @@ void OVERLAY::CalculateSkeleton(Context_t& ctx, CCSPlayerController* pPlayerCont
 bool OVERLAY::IsValid(CCSPlayerController* player) {
 	if (!player)
 		return false;
+	auto* identity = player->GetIdentity();
+	if (!identity)
+		return false;
 
 	C_CSPlayerPawn* pPlayerPawn = I::GameResourceService->pGameEntitySystem->Get<C_CSPlayerPawn>(player->GetPawnHandle());
 	if (!pPlayerPawn)
 		return false;
 
+	const auto idx = identity->GetEntryIndex();
+	if (idx < 0 || static_cast<std::size_t>(idx) >= (sizeof(mAlpha) / sizeof(mAlpha[0])))
+		return false;
 
-	auto idx = player->GetIdentity()->GetEntryIndex();
 	if (pPlayerPawn->GetHealth() <= 0) {
 		static constexpr auto ALPHA_FREQUENCY = 255 / 70.f;
 		mAlpha[idx] -= ALPHA_FREQUENCY * I::GlobalVars->flFrameTime;
 	}
 	else {
-		if (player->GetGameSceneNode()->IsDormant()) {
+		auto* sceneNode = pPlayerPawn->GetGameSceneNode();
+		if (!sceneNode)
+			return false;
+
+		if (sceneNode->IsDormant()) {
 			if (mAlpha[idx] < 0.6f) {
 				mAlpha[idx] -= (1.0f / 1.0f) * I::GlobalVars->flFrameTime;
 				mAlpha[idx] = std::clamp(mAlpha[idx], 0.f, 0.6f);
@@ -970,7 +981,7 @@ void OVERLAY::OnPlayer(CCSPlayerController* player, const ImVec4& out) {
 
 	/* name esp */
 	if (const auto& name_config = C_GET(TextOverlayVar_t, Vars.overlayName); name_config.bEnable) {
-		const char* szName = CS_XOR("");
+		const char* szName = "";
 
 		if (player->GetPlayerName() != nullptr)
 			szName = player->GetPlayerName();
@@ -996,7 +1007,7 @@ void OVERLAY::OnPlayer(CCSPlayerController* player, const ImVec4& out) {
 				return;
 
 
-			const char* weaponPrefix = CS_XOR("weapon_");
+			constexpr char weaponPrefix[] = "weapon_";
 			const char* weaponNameStart = strstr(szWeaponName, weaponPrefix);
 			const char* extractedWeaponName = weaponNameStart != nullptr
 				? weaponNameStart + strlen(weaponPrefix)
@@ -1008,15 +1019,16 @@ void OVERLAY::OnPlayer(CCSPlayerController* player, const ImVec4& out) {
 #ifdef _DEBUG
 					context.AddComponent(new CTextComponent(true, false, SIDE_BOTTOM, DIR_BOTTOM, FONT::pEspWepName, extractedWeaponName, Vars.Weaponesp, 1.f));
 #else
-					const char weaponIconsName[2] = { WeaponsIcons::get(szWeaponName), '\0' };
+					char weaponIconsName[5] = {};
+					ImTextCharToUtf8(weaponIconsName, static_cast<unsigned int>(WeaponsIcons::get(szWeaponName)));
 					if (weaponIconsName[0] != '\0')
-						context.AddComponent(new CTextComponent(true, true, SIDE_BOTTOM, DIR_BOTTOM, FONT::pEspIcons, weaponIconsName, Vars.Weaponesp, mAlpha[idx]));
+						context.AddComponent(new CTextComponent(true, true, SIDE_BOTTOM, DIR_BOTTOM, FONT::pEspIcons, weaponIconsName, Vars.Weaponesp, 1.f));
 					else
 						context.AddComponent(new CTextComponent(true, false, SIDE_BOTTOM, DIR_BOTTOM, FONT::pEspWepName, extractedWeaponName, Vars.Weaponesp, 1.f));
 #endif
 				}
 				else {
-					context.AddComponent(new CTextComponent(true, false, SIDE_BOTTOM, DIR_BOTTOM, FONT::pEspWepName, CS_XOR(extractedWeaponName), Vars.Weaponesp, 1.f));
+					context.AddComponent(new CTextComponent(true, false, SIDE_BOTTOM, DIR_BOTTOM, FONT::pEspWepName, extractedWeaponName, Vars.Weaponesp, 1.f));
 				}
 			}
 
@@ -1041,10 +1053,7 @@ void OVERLAY::OnPlayer(CCSPlayerController* player, const ImVec4& out) {
 		if (C_GET(unsigned int, Vars.pEspFlags) & FLAGS_ARMOR) {
 			if (pPlayerPawn->GetArmorValue() > 0) {
 				if (const auto& hk_cfg = C_GET(TextOverlayVar_t, Vars.HKFlag); hk_cfg.bEnable) {
-					const char* szName = CS_XOR("K");
-
-					if (player->m_bPawnHasHelmet())
-						szName = CS_XOR("HK");
+					const char* szName = player->m_bPawnHasHelmet() ? "HK" : "K";
 
 					context.AddComponent(new CTextComponent(true, false, SIDE_RIGHT, DIR_RIGHT, FONT::pEspFlagsName, szName, Vars.HKFlag, 1.f));
 				}
@@ -1053,8 +1062,7 @@ void OVERLAY::OnPlayer(CCSPlayerController* player, const ImVec4& out) {
 		if (C_GET(unsigned int, Vars.pEspFlags) & FLAGS_DEFUSER) {
 			if (player->m_bPawnHasDefuser() > 0) {
 				if (const auto& kit_cfg = C_GET(TextOverlayVar_t, Vars.KitFlag); kit_cfg.bEnable) {
-					const char* szName = CS_XOR("KIT");
-					context.AddComponent(new CTextComponent(true, false, SIDE_RIGHT, DIR_BOTTOM, FONT::pEspFlagsName, szName, Vars.KitFlag, 1.f));
+					context.AddComponent(new CTextComponent(true, false, SIDE_RIGHT, DIR_BOTTOM, FONT::pEspFlagsName, "KIT", Vars.KitFlag, 1.f));
 				}
 			}
 	

@@ -29,6 +29,7 @@
 #ifdef __linux__
 #include "../../linux/vulkan_hook.h"
 #include "../../linux/native_esp.h"
+#include "../sdk/interfaces/itrace.h"
 #endif
 #pragma region menu_array_entries
 static void RenderInventoryWindow();
@@ -76,6 +77,12 @@ static constexpr const char* arrLegitCond[] = {
 	"Flashed",
 	"Thru smoke",
 	"Delay on kill"
+};
+static constexpr const char* arrTriggerHitboxes[] = {
+	"Head",
+	"Torso",
+	"Arms",
+	"Legs"
 };
 static constexpr const char* arrMovementStrafer[] = {
 	"Adjust mouse",
@@ -232,7 +239,7 @@ void MENU::RenderMainWindow()
 			std::vector<std::vector<std::string>> tab_columns = {
 				{ "c", "a", "b", "d", "f", "o", "e" },
 				{ "Ragebot", "Legitbot", "Antiaim", "Removals", "Visuals", "Skins", "Misc" },
-				{ "Aims agressively at targets...", "Subtle aim assistance...", "Accuracy assistance...", "Remove obstructive effects...", "Visualisation", "Items customization...", "Save/Load configs, engine..." },
+				{ "Aggressive target assistance...", "Subtle aim assistance...", "Angle and state controls...", "Remove obstructive effects...", "Visualization", "Item customization...", "Runtime, movement, and configs..." },
 				{ "", "", "", "", "", "", "" }
 			};
 
@@ -251,7 +258,9 @@ void MENU::RenderMainWindow()
 		if (tab_alpha < 0.01f && tab_add < 0.01f) active_tab = page;
 
 		ImGui::SetCursorPos(ImVec2(200, 100 - (tab_alpha * 100)));
-		auto current_weapon = C_GET(int, Vars.rage_weapon_selection);
+		int& rageWeaponSelection = C_GET(int, Vars.rage_weapon_selection);
+		rageWeaponSelection = std::clamp(rageWeaponSelection, 0, 6);
+		const int current_weapon = rageWeaponSelection;
 
 		ImGui::PushStyleVar(ImGuiStyleVar_Alpha, tab_alpha * style.Alpha);
 		{
@@ -260,33 +269,59 @@ void MENU::RenderMainWindow()
 				edited::BeginChild(CS_XOR("##Container0"), ImVec2((c::background::size.x - 200) / 2, c::background::size.y), 0);
 				{
 					ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), CS_XOR("Weapons"));
-					const char* weapons[7]{ CS_XOR("Default"), CS_XOR("Pistols"), CS_XOR("Heavy Pistols"),CS_XOR("Assult Rifles"), CS_XOR("Auto"),CS_XOR("Scout"), CS_XOR("Awp") };
+					const char* weapons[7]{ CS_XOR("Default"), CS_XOR("Pistols"), CS_XOR("Heavy Pistols"),CS_XOR("Assault Rifles"), CS_XOR("Auto Snipers"),CS_XOR("Scout"), CS_XOR("AWP") };
 					edited::Combo(CS_XOR("Weapon"), CS_XOR("Select weapon for current configuration"), &C_GET(int, Vars.rage_weapon_selection), weapons, IM_ARRAYSIZE(weapons), 6);
 					// run rage cfg depending on weapon
 					{
 						ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "General");
-						edited::Checkbox("Enabled", "Activate ragebot", &C_GET(bool, Vars.rage_enable));
-						edited::Checkbox("Hitscan", "Evaluate every enabled hitbox and use the best live point", &C_GET(bool, Vars.rage_hitscan));
+							edited::Checkbox("Enabled", "Activate ragebot", &C_GET(bool, Vars.rage_enable));
+							edited::Checkbox("Auto shoot", "Fire through the native command path when every selected condition passes", &C_GET(bool, Vars.rage_auto_shoot));
+							edited::Checkbox("Hitscan", "Evaluate every enabled hitbox and use the best live point", &C_GET(bool, Vars.rage_hitscan));
 
-						const char* targets_select[3]{ CS_XOR("Distance"), CS_XOR("Damage"),CS_XOR("Crosshair") };
+						int& targetSelection = C_GET_ARRAY(int, 7, Vars.rage_target_select, current_weapon);
+						targetSelection = std::clamp(targetSelection, 0, 2);
+						const char* targets_select[3]{ CS_XOR("Distance"), CS_XOR("Damage (blocked)"),CS_XOR("Crosshair") };
 						edited::Combo(CS_XOR("Target selection"), CS_XOR("Select target based on conditions"), &C_GET_ARRAY(int, 7, Vars.rage_target_select, current_weapon), targets_select, IM_ARRAYSIZE(targets_select), 6);
 
 						if (current_weapon > 3)
-							edited::Checkbox("Auto Scope", "Automatically scope if a we found a target hitta...", &C_GET_ARRAY(bool, 7, Vars.rage_auto_scope, current_weapon));
+							edited::Checkbox("Auto scope", "Scope a sniper after a valid target is acquired", &C_GET_ARRAY(bool, 7, Vars.rage_auto_scope, current_weapon));
 
+						#ifdef _WIN32
 						edited::Checkbox("Rapid fire", "Allows you to fire multiple bullets ignoring fire rate", &C_GET_ARRAY(bool, 7, Vars.rapid_fire, current_weapon));
+						#endif
 
-						edited::Checkbox("Auto stop", "Stops local player in order to maintain best accuracy", &C_GET_ARRAY(bool, 7, Vars.rage_auto_stop, current_weapon));
+							edited::Checkbox("Auto stop", "Stops local player in order to maintain best accuracy", &C_GET_ARRAY(bool, 7, Vars.rage_auto_stop, current_weapon));
+							edited::Checkbox("Auto crouch", "Crouch while committing a valid shot", &C_GET_ARRAY(bool, 7, Vars.rage_auto_crouch, current_weapon));
+							edited::Checkbox("Multipoint", "Scan center and scaled side points on each selected hitbox", &C_GET_ARRAY(bool, 7, Vars.rage_multipoint, current_weapon));
+							if (C_GET_ARRAY(bool, 7, Vars.rage_multipoint, current_weapon))
+								edited::SliderFloat("Multipoint scale", "Percentage of the approximate hitbox radius", &C_GET_ARRAY(float, 7, Vars.rage_multipoint_scale, current_weapon), 10.f, 100.f, "%.0f%%");
 
 						ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "Accuracy");
+						#ifdef __linux__
+						ImGui::TextWrapped("Damage, hitchance, penetration, lethal-body, prefer-damage, and delay-until-accurate remain fail-closed until native ballistics validates. Enabling a saved option holds firing, but no longer disables aiming.");
+						#endif
 
 						edited::Checkbox("Hitchance", "Allows you to hit players with more accuracy", &C_GET_ARRAY(bool, 7, Vars.rage_hitchance, current_weapon));
 						if (C_GET_ARRAY(bool, 7, Vars.rage_hitchance, current_weapon))
+						{
 							ImGui::SliderInt(CS_XOR("chance"), &C_GET_ARRAY(int, 7, Vars.rage_minimum_hitchance, current_weapon), 0, 100);
+						}
 
-						edited::Checkbox("Penetration", "Allows you to hit players thru objects", &C_GET_ARRAY(bool, 7, Vars.rage_penetration, current_weapon));
-						if (C_GET_ARRAY(bool, 7, Vars.rage_penetration, current_weapon))
-							ImGui::SliderInt(CS_XOR("Damage"), &C_GET_ARRAY(int, 7, Vars.rage_minimum_damage, current_weapon), 0, 100);
+							edited::Checkbox("Penetration", "Allows you to hit players through objects", &C_GET_ARRAY(bool, 7, Vars.rage_penetration, current_weapon));
+							ImGui::SliderInt(CS_XOR("Minimum damage"), &C_GET_ARRAY(int, 7, Vars.rage_minimum_damage, current_weapon), 0, 130);
+							edited::Checkbox("Damage preview", "Draw estimated penetration damage beside the selected target", &C_GET_ARRAY(bool, 7, Vars.rage_damage_preview, current_weapon));
+
+							ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "Preferences");
+							edited::Checkbox("Lethal body", "Prefer a body point when its estimated damage is lethal", &C_GET_ARRAY(bool, 7, Vars.rage_lethal_body, current_weapon));
+							edited::Checkbox("Prefer exposed", "Score visible points ahead of penetrated points", &C_GET_ARRAY(bool, 7, Vars.rage_prefer_exposed, current_weapon));
+							edited::Checkbox("Prefer low health", "Prioritize enemies with less remaining health", &C_GET_ARRAY(bool, 7, Vars.rage_prefer_low_health, current_weapon));
+							edited::Checkbox("Prefer damage", "Prioritize the point with the highest estimated damage", &C_GET_ARRAY(bool, 7, Vars.rage_prefer_high_damage, current_weapon));
+							edited::Checkbox("Delay until accurate", "Wait until the configured hitchance is reached", &C_GET_ARRAY(bool, 7, Vars.rage_delay_accurate, current_weapon));
+							edited::Checkbox("Delay until visible", "Do not fire a penetrated point until it becomes exposed", &C_GET_ARRAY(bool, 7, Vars.rage_delay_visible, current_weapon));
+							edited::Keybind("Force body", "Hold to restrict scanning to torso and pelvis", &C_GET(int, Vars.rage_force_body_key));
+							edited::Keybind("Force head", "Hold to restrict scanning to the head", &C_GET(int, Vars.rage_force_head_key));
+							edited::Checkbox("Decision overlay", "Show target, damage, hitchance and shot decision", &C_GET(bool, Vars.rage_decision_overlay));
+							edited::Checkbox("Shot logging", "Write every fire/hold reason to the native diagnostics log", &C_GET(bool, Vars.rage_shot_logging));
 					}
 				}
 				edited::EndChild();
@@ -372,16 +407,27 @@ void MENU::RenderMainWindow()
 				edited::BeginChild("##LegitbotContainer", ImVec2(c::background::size.x - 200, c::background::size.y), 0);
 				{
 					ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "Legitbot");
-					edited::Checkbox("Enable", "Master switch for every Legitbot feature", &C_GET(bool, Vars.legit_ui_enable));
-					edited::Checkbox("Legit Aim", "Smooth aim assistance while firing", &C_GET(bool, Vars.legit_ui_aim));
-					edited::Keybind("Aim key", "Click the button, then press mouse 1-5", &C_GET(int, Vars.legit_ui_key));
-					edited::Checkbox("Toggle aim key", "Press once for on/off instead of holding", &C_GET(bool, Vars.legit_ui_toggle));
-					edited::SliderFloat("Smoothness (ms)", "Time used to settle onto the target", &C_GET(float, Vars.legit_ui_smoothness), 1.f, 500.f, "%.0f ms");
+						edited::Checkbox("Enable", "Master switch for every Legitbot feature", &C_GET(bool, Vars.legit_ui_enable));
+						edited::Checkbox("Per-weapon profiles", "Use a separate targeting profile for each weapon group", &C_GET(bool, Vars.legit_ui_per_weapon));
+						const char* legitProfiles[7]{ "Default", "Pistols", "Heavy Pistols", "Assault Rifles", "Auto Snipers", "Scout", "AWP" };
+						if (C_GET(bool, Vars.legit_ui_per_weapon))
+							edited::Combo("Edit profile", "The active weapon automatically selects its matching profile", &C_GET(int, Vars.legit_ui_profile_selection), legitProfiles, IM_ARRAYSIZE(legitProfiles), 7);
+						const int legitProfile = std::clamp(C_GET(int, Vars.legit_ui_profile_selection), 0, 6);
+						edited::Checkbox("Legit Aim", "Smooth aim assistance while firing", &C_GET(bool, Vars.legit_ui_aim));
+						edited::Keybind("Aim key", "Click the button, then press mouse 1-5", &C_GET(int, Vars.legit_ui_key));
+						edited::Checkbox("Toggle aim key", "Press once for on/off instead of holding", &C_GET(bool, Vars.legit_ui_toggle));
+						if (C_GET(bool, Vars.legit_ui_per_weapon))
+							edited::SliderFloat("Smoothness (ms)", "Time used to settle onto the target", &C_GET_ARRAY(float, 7, Vars.legit_profile_smoothness, legitProfile), 1.f, 500.f, "%.0f ms");
+						else
+							edited::SliderFloat("Smoothness (ms)", "Time used to settle onto the target", &C_GET(float, Vars.legit_ui_smoothness), 1.f, 500.f, "%.0f ms");
 					edited::SliderFloat("Acceleration (ms)", "Time to ramp from a gentle start to full aim speed; 0 disables the ramp", &C_GET(float, Vars.legit_ui_acceleration_ms), 0.f, 500.f, "%.0f ms");
 					edited::SliderFloat("Deceleration zone", "Start slowing this many degrees before the target; 0 disables it", &C_GET(float, Vars.legit_ui_deceleration_degrees), 0.f, 10.f, "%.1f deg");
 					edited::SliderFloat("Recovery (ms)", "Correction time after naturally crossing the target; this does not add artificial overshoot", &C_GET(float, Vars.legit_ui_recovery_ms), 5.f, 250.f, "%.0f ms");
 					edited::Checkbox("Draw FoV", "Draw the active aim field of view", &C_GET(bool, Vars.legit_ui_draw_fov));
-					edited::SliderFloat("FoV Size", "Field of view size", &C_GET(float, Vars.legit_ui_fov_size), 5.f, 60.f, "%.0f°");
+						if (C_GET(bool, Vars.legit_ui_per_weapon))
+							edited::SliderFloat("FoV Size", "Field of view size", &C_GET_ARRAY(float, 7, Vars.legit_profile_fov, legitProfile), 5.f, 60.f, "%.0f°");
+						else
+							edited::SliderFloat("FoV Size", "Field of view size", &C_GET(float, Vars.legit_ui_fov_size), 5.f, 60.f, "%.0f°");
 					edited::Checkbox("Recoil compensation", "Compensate the current camera punch", &C_GET(bool, Vars.legit_ui_recoil));
 					edited::Checkbox("Velocity prediction", "Lead moving targets", &C_GET(bool, Vars.legit_ui_prediction));
 					if (C_GET(bool, Vars.legit_ui_prediction))
@@ -389,23 +435,86 @@ void MENU::RenderMainWindow()
 					edited::Checkbox("Auto shoot", "Fire when the selected bone is centered", &C_GET(bool, Vars.legit_ui_auto_shoot));
 					edited::Checkbox("Target head", "Highest target priority", &C_GET(bool, Vars.legit_ui_bone_head));
 					edited::Checkbox("Target torso", "Fallback to upper spine", &C_GET(bool, Vars.legit_ui_bone_torso));
-					edited::Checkbox("Target arms", "Fallback to elbows", &C_GET(bool, Vars.legit_ui_bone_arms));
-					edited::Checkbox("Target legs", "Fallback to knees", &C_GET(bool, Vars.legit_ui_bone_legs));
+						edited::Checkbox("Target arms", "Fallback to elbows", &C_GET(bool, Vars.legit_ui_bone_arms));
+						edited::Checkbox("Target legs", "Fallback to knees", &C_GET(bool, Vars.legit_ui_bone_legs));
+						const char* legitTargets[3]{ "Closest to crosshair", "Closest distance", "Lowest health" };
+						const char* legitHitboxModes[2]{ "Priority order", "Nearest hitbox" };
+						if (C_GET(bool, Vars.legit_ui_per_weapon))
+						{
+							edited::Combo("Target selection", "How enemies are ranked", &C_GET_ARRAY(int, 7, Vars.legit_profile_target_selection, legitProfile), legitTargets, IM_ARRAYSIZE(legitTargets), 3);
+							edited::Combo("Hitbox selection", "Priority follows the toggles above; nearest chooses the smallest angular delta", &C_GET_ARRAY(int, 7, Vars.legit_profile_hitbox_mode, legitProfile), legitHitboxModes, IM_ARRAYSIZE(legitHitboxModes), 2);
+							edited::Checkbox("Visibility check", "Ignore points blocked by world geometry", &C_GET_ARRAY(bool, 7, Vars.legit_profile_visibility_check, legitProfile));
+							edited::Checkbox("Smoke check", "Do not acquire while the local view is inside smoke", &C_GET_ARRAY(bool, 7, Vars.legit_profile_smoke_check, legitProfile));
+							edited::Checkbox("Flash check", "Pause aim while flashed", &C_GET_ARRAY(bool, 7, Vars.legit_profile_flash_check, legitProfile));
+							edited::SliderFloat("Reaction delay", "Wait after acquiring a new target", &C_GET_ARRAY(float, 7, Vars.legit_profile_reaction_ms, legitProfile), 0.f, 500.f, "%.0f ms");
+						}
+						else
+						{
+							edited::Combo("Target selection", "How enemies are ranked", &C_GET(int, Vars.legit_ui_target_selection), legitTargets, IM_ARRAYSIZE(legitTargets), 3);
+							edited::Combo("Hitbox selection", "Priority follows the toggles above; nearest chooses the smallest angular delta", &C_GET(int, Vars.legit_ui_hitbox_mode), legitHitboxModes, IM_ARRAYSIZE(legitHitboxModes), 2);
+							edited::Checkbox("Visibility check", "Ignore points blocked by world geometry", &C_GET(bool, Vars.legit_ui_visibility_check));
+							edited::Checkbox("Smoke check", "Do not acquire while the local view is inside smoke", &C_GET(bool, Vars.legit_ui_smoke_check));
+							edited::Checkbox("Flash check", "Pause aim while flashed", &C_GET(bool, Vars.legit_ui_flash_check));
+							edited::SliderFloat("Reaction delay", "Wait after acquiring a new target", &C_GET(float, Vars.legit_ui_reaction_ms), 0.f, 500.f, "%.0f ms");
+						}
+
+						ImGui::Separator();
+						ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "Triggerbot and recoil");
+						edited::Checkbox("Triggerbot", "Fire when an allowed hitbox is under the crosshair", &C_GET(bool, Vars.trigger_ui_enable));
+						if (C_GET(bool, Vars.trigger_ui_enable))
+						{
+							edited::Keybind("Trigger key", "Hold to arm triggerbot", &C_GET(int, Vars.trigger_ui_key));
+							edited::SliderFloat("Trigger delay", "Wait before firing a stable target", &C_GET(float, Vars.trigger_ui_delay_ms), 0.f, 500.f, "%.0f ms");
+							edited::MultiCombo("Trigger hitboxes", &C_GET(unsigned int, Vars.trigger_ui_hitboxes), arrTriggerHitboxes, CS_ARRAYSIZE(arrTriggerHitboxes));
+							edited::Checkbox("Trigger visibility", "Require an exposed target", &C_GET(bool, Vars.trigger_ui_visibility_check));
+							edited::Checkbox("Trigger smoke check", "Pause while the local view is in smoke", &C_GET(bool, Vars.trigger_ui_smoke_check));
+							edited::Checkbox("Scoped only", "Require scope for sniper groups", &C_GET(bool, Vars.trigger_ui_scoped_only));
+							edited::Checkbox("Trigger diagnostics", "Log acquisition, delay and command decisions", &C_GET(bool, Vars.trigger_ui_diagnostics));
+						}
+						edited::Checkbox("Standalone recoil control", "Compensate punch while firing even without an aim target", &C_GET(bool, Vars.recoil_ui_enable));
+						if (C_GET(bool, Vars.recoil_ui_enable))
+							edited::SliderFloat("Recoil smoothing", "Time used to settle the recoil correction", &C_GET(float, Vars.recoil_ui_smoothing_ms), 1.f, 300.f, "%.0f ms");
 				}
 				edited::EndChild();
 			}
 			else if (active_tab == 2)
 			{
-				edited::BeginChild("##Container0", ImVec2((c::background::size.x - 200) / 2, c::background::size.y), 0);
-				{
-					ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "Antiaim");
-					edited::Checkbox(CS_XOR("Enable"), CS_XOR("Enables Antiaim"), &C_GET(bool, Vars.bAntiAim));
-					const char* PitchTypes[4]{ CS_XOR("Off"), CS_XOR("Down"),CS_XOR("Up"), CS_XOR("Zero")};
-					edited::Combo(CS_XOR("Pitch"), CS_XOR("Pitch Type"), &C_GET(int, Vars.iPitchType), PitchTypes, IM_ARRAYSIZE(PitchTypes), 4);
+					edited::BeginChild("##Container0", ImVec2(c::background::size.x - 200, c::background::size.y), 0);
+					{
+						ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "Antiaim");
+						edited::Checkbox(CS_XOR("Enable"), CS_XOR("Enables Antiaim"), &C_GET(bool, Vars.bAntiAim));
+						const char* PitchTypes[5]{ CS_XOR("Off"), CS_XOR("Down"),CS_XOR("Up"), CS_XOR("Zero"), CS_XOR("Custom")};
+						edited::Combo(CS_XOR("Pitch"), CS_XOR("Pitch Type"), &C_GET(int, Vars.iPitchType), PitchTypes, IM_ARRAYSIZE(PitchTypes), 5);
+						if (C_GET(int, Vars.iPitchType) == 4)
+							edited::SliderFloat("Custom pitch", "Exact pitch angle", &C_GET(float, Vars.antiaim_custom_pitch), -89.f, 89.f, "%.0f°");
 
-					const char* BaseYawTypes[3]{ CS_XOR("Off"), CS_XOR("Backwards"),CS_XOR("Forwards") };
-					edited::Combo(CS_XOR("Base Yaw"), CS_XOR("Backwards / Forwards"), &C_GET(int, Vars.iBaseYawType), BaseYawTypes, IM_ARRAYSIZE(BaseYawTypes), 3);
-				}
+						const char* BaseYawTypes[5]{ CS_XOR("Off"), CS_XOR("Backwards"),CS_XOR("Forwards"), CS_XOR("Sideways"), CS_XOR("Custom") };
+						edited::Combo(CS_XOR("Base Yaw"), CS_XOR("Yaw direction"), &C_GET(int, Vars.iBaseYawType), BaseYawTypes, IM_ARRAYSIZE(BaseYawTypes), 5);
+						if (C_GET(int, Vars.iBaseYawType) == 4)
+							edited::SliderFloat("Custom yaw", "Offset from the current view yaw", &C_GET(float, Vars.antiaim_custom_yaw), -180.f, 180.f, "%.0f°");
+
+						const char* jitterModes[3]{ "Off", "Static", "Random" };
+						edited::Combo("Jitter", "Alternate or randomize around the base yaw", &C_GET(int, Vars.antiaim_jitter_mode), jitterModes, IM_ARRAYSIZE(jitterModes), 3);
+						if (C_GET(int, Vars.antiaim_jitter_mode) != 0)
+							edited::SliderFloat("Jitter amount", "Maximum yaw displacement", &C_GET(float, Vars.antiaim_jitter_amount), 0.f, 180.f, "%.0f°");
+						edited::Checkbox("Spin", "Continuously rotate the yaw", &C_GET(bool, Vars.antiaim_spin));
+						if (C_GET(bool, Vars.antiaim_spin))
+							edited::SliderFloat("Spin speed", "Degrees per second", &C_GET(float, Vars.antiaim_spin_speed), 1.f, 720.f, "%.0f°/s");
+
+						ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "Movement profiles");
+						const char* aaProfiles[5]{ "Standing", "Moving", "Airborne", "Crouching", "Slow walking" };
+						edited::Combo("Edit profile", "The matching movement state is selected automatically", &C_GET(int, Vars.antiaim_profile_selection), aaProfiles, IM_ARRAYSIZE(aaProfiles), 5);
+						const int aaProfile = std::clamp(C_GET(int, Vars.antiaim_profile_selection), 0, 4);
+						edited::Checkbox("Enable profile", "Apply this state's additional yaw and jitter", &C_GET_ARRAY(bool, 5, Vars.antiaim_profile_enable, aaProfile));
+						if (C_GET_ARRAY(bool, 5, Vars.antiaim_profile_enable, aaProfile))
+						{
+							edited::SliderFloat("Profile yaw", "State-specific yaw offset", &C_GET_ARRAY(float, 5, Vars.antiaim_profile_yaw, aaProfile), -180.f, 180.f, "%.0f°");
+							edited::SliderFloat("Profile jitter", "State-specific jitter amount", &C_GET_ARRAY(float, 5, Vars.antiaim_profile_jitter, aaProfile), 0.f, 180.f, "%.0f°");
+						}
+						edited::Keybind("Manual back", "Hold to force backward yaw", &C_GET(int, Vars.antiaim_manual_back_key));
+						edited::Keybind("Manual forward", "Hold to preserve forward yaw", &C_GET(int, Vars.antiaim_manual_forward_key));
+						edited::Checkbox("Disable while using", "Suspend anti-aim while the Use key is held", &C_GET(bool, Vars.antiaim_disable_use));
+					}
 				edited::EndChild();
 			}
 			else if (active_tab == 3) {
@@ -443,8 +552,19 @@ void MENU::RenderMainWindow()
 					}
 					edited::Checkbox(CS_XOR("Filled box"), CS_XOR("Draws a translucent background inside the player box"), &C_GET(bool, Vars.esp_box_fill));
 					if (C_GET(bool, Vars.esp_box_fill))
+					{
+						edited::Checkbox(CS_XOR("Fill gradient"), CS_XOR("Blends independently configured top and bottom colors"), &C_GET(bool, Vars.esp_box_fill_gradient));
+						if (C_GET(bool, Vars.esp_box_fill_gradient))
+						{
+							edited::Color(CS_XOR("##boxfilltop"), CS_XOR("Filled box top color"), &C_GET(ColorPickerVar_t, Vars.esp_box_fill_top_color).colValue,
+								ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
+							edited::Color(CS_XOR("##boxfillbottom"), CS_XOR("Filled box bottom color"), &C_GET(ColorPickerVar_t, Vars.esp_box_fill_bottom_color).colValue,
+								ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
+						}
+						else
 						edited::Color(CS_XOR("##boxfill"), CS_XOR("Filled box color"), &C_GET(ColorPickerVar_t, Vars.esp_box_fill_color).colValue,
 							ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
+					}
 					edited::Checkbox(CS_XOR("Name"), CS_XOR("Shows player name"), &C_GET(TextOverlayVar_t, Vars.overlayName).bEnable);
 					edited::Checkbox(CS_XOR("Health bar"), CS_XOR("Shows player health"), &C_GET(BarOverlayVar_t, Vars.overlayHealthBar).bEnable);
 					if (C_GET(BarOverlayVar_t, Vars.overlayHealthBar).bEnable)
@@ -481,21 +601,50 @@ void MENU::RenderMainWindow()
 					if (C_GET(bool, Vars.bVisualChamsIgnoreZ))
 						edited::Color(CS_XOR("##chamscolorxqz"), CS_XOR("Change xqz chams color"), &C_GET(ColorPickerVar_t, Vars.colVisualChamsIgnoreZ).colValue, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
 					edited::Checkbox(CS_XOR("Arms chams"), CS_XOR("Overrides first-person arm materials"), &C_GET(bool, Vars.chams_arms));
+					if (C_GET(bool, Vars.chams_arms))
+						edited::Color(CS_XOR("##armschamscolor"), CS_XOR("Independent arms color"), &C_GET(ColorPickerVar_t, Vars.chams_arms_color).colValue,
+							ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
 					edited::Checkbox(CS_XOR("Sleeve chams"), CS_XOR("Overrides first-person sleeve materials"), &C_GET(bool, Vars.chams_sleeves));
+					if (C_GET(bool, Vars.chams_sleeves))
+						edited::Color(CS_XOR("##sleevechamscolor"), CS_XOR("Independent sleeve color"), &C_GET(ColorPickerVar_t, Vars.chams_sleeves_color).colValue,
+							ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
 					edited::Checkbox(CS_XOR("Held weapon chams"), CS_XOR("Overrides the local first-person weapon"), &C_GET(bool, Vars.chams_held_weapon));
+					edited::Checkbox(CS_XOR("Knife chams"), CS_XOR("Overrides knives independently from held-weapon chams"), &C_GET(bool, Vars.chams_knife));
+					if (C_GET(bool, Vars.chams_knife))
+						edited::Color(CS_XOR("##knifechamscolor"), CS_XOR("Independent knife color"), &C_GET(ColorPickerVar_t, Vars.chams_knife_color).colValue,
+							ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
 					edited::Checkbox(CS_XOR("Grenade chams"), CS_XOR("Overrides locally owned grenade models"), &C_GET(bool, Vars.chams_grenades));
-					edited::Checkbox(CS_XOR("Bomb chams"), CS_XOR("Overrides the locally carried C4 model"), &C_GET(bool, Vars.chams_bomb));
+					edited::Checkbox(CS_XOR("Bomb chams"), CS_XOR("Overrides carried, dropped, and planted C4 even after the planter dies"), &C_GET(bool, Vars.chams_bomb));
 
 				#ifdef _WIN32
 					const char* chams[3]{ CS_XOR("Flat"), CS_XOR("Default"),CS_XOR("Illumin") };
 					edited::Combo(CS_XOR("Models"), CS_XOR(""), &C_GET(int, Vars.nVisualChamMaterial), chams, IM_ARRAYSIZE(chams), 3);
 				#else
-					const char* chams[5]{ CS_XOR("Flat"), CS_XOR("Metallic"), CS_XOR("Glow"), CS_XOR("Glass"), CS_XOR("Wireframe") };
-					edited::Combo(CS_XOR("Material"), CS_XOR("Select a solid, lit, emissive, translucent, or mesh-line material"),
-						&C_GET(int, Vars.nVisualChamMaterial), chams, IM_ARRAYSIZE(chams), 5);
-				#endif
+						const char* chams[5]{ CS_XOR("Flat"), CS_XOR("Metallic"), CS_XOR("Glow"), CS_XOR("Glass"), CS_XOR("Wireframe") };
+						edited::Combo(CS_XOR("Material"), CS_XOR("Select a solid, lit, emissive, translucent, or mesh-line material"),
+							&C_GET(int, Vars.nVisualChamMaterial), chams, IM_ARRAYSIZE(chams), 5);
+						if (C_GET(int, Vars.nVisualChamMaterial) == 2)
+							edited::SliderFloat(CS_XOR("Glow intensity"), CS_XOR("0 is dark/subtle; 100 is the conservative maximum"),
+								&C_GET(float, Vars.chams_glow_intensity), 0.f, 100.f, "%.0f%%");
+					#endif
 
-				}
+						ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "World, grenades and bomb");
+						edited::Checkbox("World modulation", "Tint map and prop materials in the native scene draw", &C_GET(bool, Vars.world_color_enable));
+						if (C_GET(bool, Vars.world_color_enable))
+							edited::Color("##worldcolor", "World tint", &C_GET(ColorPickerVar_t, Vars.world_color).colValue, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
+						edited::Checkbox("Sky modulation", "Tint sky materials independently", &C_GET(bool, Vars.sky_color_enable));
+						if (C_GET(bool, Vars.sky_color_enable))
+							edited::Color("##skycolor", "Sky tint", &C_GET(ColorPickerVar_t, Vars.sky_color).colValue, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
+						edited::Checkbox("Dropped weapon ESP", "Label unowned weapons in the world", &C_GET(bool, Vars.dropped_weapon_esp));
+						edited::Checkbox("Grenade trajectory", "Predict the held grenade path", &C_GET(bool, Vars.grenade_trajectory));
+						edited::Checkbox("Trajectory bounces", "Mark each predicted bounce", &C_GET(bool, Vars.grenade_bounce_markers));
+						edited::Checkbox("Trajectory landing", "Mark the predicted final position", &C_GET(bool, Vars.grenade_landing_marker));
+						edited::Checkbox("Smoke timer", "Show remaining smoke duration", &C_GET(bool, Vars.smoke_duration_timer));
+						edited::Checkbox("Molotov timer", "Show remaining fire duration", &C_GET(bool, Vars.molotov_expiration_timer));
+						edited::Checkbox("Bomb timer", "Show planted C4 time and defuse state", &C_GET(bool, Vars.planted_bomb_timer));
+						edited::Color("##worldespcolor", "World ESP and trajectory color", &C_GET(ColorPickerVar_t, Vars.world_esp_color).colValue, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
+
+					}
 				edited::EndChild();
 
 				ImGui::SameLine(0, 0);
@@ -636,10 +785,23 @@ void MENU::RenderMainWindow()
 					edited::SliderInt(CS_XOR("Bunny hop chance"), CS_XOR("Chance to jump on each landing"), &C_GET(int, Vars.nAutoBHopChance), 1, 100, "%d%%");
 				edited::Checkbox(CS_XOR("Auto strafer"), CS_XOR("Applies alternating air-strafe input through CreateMove"), &C_GET(bool, Vars.bAutostrafe));
 				if (C_GET(bool, Vars.bAutostrafe))
+				{
 					edited::SliderFloat(CS_XOR("Strafe strength"), CS_XOR("Side-movement strength"), &C_GET(float, Vars.autostrafe_smooth), 1.f, 100.f, "%.0f%%");
-				edited::Checkbox(CS_XOR("Edge bug"), CS_XOR("Edge bug"), &C_GET(bool, Vars.edge_bug));
-				edited::MultiCombo(CS_XOR("Strafe modes"), &C_GET(unsigned int, Vars.bAutostrafeMode), arrMovementStrafer, CS_ARRAYSIZE(arrMovementStrafer));
-				edited::Color(CS_XOR("##menuaccent"), CS_XOR("Change menu accent color"), &color, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
+					edited::MultiCombo(CS_XOR("Strafe modes"), &C_GET(unsigned int, Vars.bAutostrafeMode), arrMovementStrafer, CS_ARRAYSIZE(arrMovementStrafer));
+				}
+					#ifdef _WIN32
+					edited::Checkbox(CS_XOR("Edge bug"), CS_XOR("Edge bug"), &C_GET(bool, Vars.edge_bug));
+					#endif
+					edited::Color(CS_XOR("##menuaccent"), CS_XOR("Change menu accent color"), &color, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
+					#ifdef __linux__
+					ImGui::Separator();
+					ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "Native runtime health");
+					ImGui::Text("CreateMove: %s | calls: %llu | angle writes: %llu",
+						IsNativeInputHookInstalled() ? "ready" : "waiting",
+						GetNativeCreateMoveCalls(), GetNativeAimAngleApplications());
+					ImGui::Text("Trace/collision: %s", TRACE::NativeReady() ? "self-test passed" : "fail-closed / waiting");
+					ImGui::TextWrapped("Runtime-only rows in SELECTED_FEATURES.md still require an actual match test before they are marked verified.");
+					#endif
 
 			}
 			edited::EndChild();
@@ -693,19 +855,38 @@ void MENU::RenderMainWindow()
 				}
 				ImGui::NextColumn();
 				{
-					ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(ImGui::GetStyle().FramePadding.x, 0));
+					ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(ImGui::GetStyle().FramePadding.x, 3.f * MENU::flDpiScale));
 					ImGui::PushItemWidth(-1);
+					ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.f, 1.f, 1.f, 1.f));
+					ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.08f, 0.08f, 0.10f, 0.95f));
 					const bool createOnEnter = ImGui::InputTextWithHint(CS_XOR("##config.file"), "config name...", szConfigFile, sizeof(szConfigFile), ImGuiInputTextFlags_EnterReturnsTrue);
+					ImGui::PopStyleColor(2);
 					if (ImGui::Button(CS_XOR("create"), ImVec2(-1, 15 * MENU::flDpiScale)) || createOnEnter)
 					{
 						// check if the filename isn't empty
 						if (const std::size_t nConfigFileLength = CRT::StringLength(szConfigFile); nConfigFileLength > 0U)
 						{
-							CRT::WString_t wszConfigFile(szConfigFile);
+							wchar_t wszConfigFile[65] = {};
+							const std::size_t wideLength = std::min(nConfigFileLength, CS_ARRAYSIZE(wszConfigFile) - 1U);
+							for (std::size_t index = 0; index < wideLength; ++index)
+								wszConfigFile[index] = static_cast<unsigned char>(szConfigFile[index]);
 
-							if (C::CreateFile(wszConfigFile.Data()))
-								// set created config as selected @todo: dependent on current 'C::CreateFile' behaviour, generally it must be replaced by search
-								nSelectedConfig = C::vecFileNames.size() - 1U;
+							if (C::CreateFile(wszConfigFile))
+							{
+								std::wstring createdName(wszConfigFile);
+								if (createdName.size() < 4U || createdName.substr(createdName.size() - 4U) != CS_CONFIGURATION_FILE_EXTENSION)
+									createdName += CS_CONFIGURATION_FILE_EXTENSION;
+								nSelectedConfig = ~0ULL;
+								for (std::size_t i = 0U; i < C::vecFileNames.size(); ++i)
+									if (createdName == C::vecFileNames[i])
+									{
+										nSelectedConfig = i;
+										break;
+									}
+								NOTIFY::Push({ N_TYPE_SUCCESS, CS_XOR("config created") });
+							}
+							else
+								NOTIFY::Push({ N_TYPE_ERROR, CS_XOR("invalid, duplicate, or unwritable config name") });
 
 							// clear string
 							CRT::MemorySet(szConfigFile, 0U, sizeof(szConfigFile));
@@ -720,8 +901,11 @@ void MENU::RenderMainWindow()
 					{
 						if (CRT::StringLength(szConfigFile) > 0U)
 						{
-							CRT::WString_t newName(szConfigFile);
-							if (C::RenameFile(nSelectedConfig, newName.Data()))
+							wchar_t newName[65] = {};
+							const std::size_t nameLength = std::min(CRT::StringLength(szConfigFile), CS_ARRAYSIZE(newName) - 1U);
+							for (std::size_t index = 0; index < nameLength; ++index)
+								newName[index] = static_cast<unsigned char>(szConfigFile[index]);
+							if (C::RenameFile(nSelectedConfig, newName))
 							{
 								NOTIFY::Push({ N_TYPE_SUCCESS, CS_XOR("config renamed") });
 								CRT::MemorySet(szConfigFile, 0U, sizeof(szConfigFile));
@@ -783,12 +967,13 @@ void MENU::RenderMainWindow()
 
 						if (ImGui::Button(CS_XOR("yes"), ImVec2(ImGui::GetContentRegionAvail().x, 0)))
 						{
-							C::RemoveFile(nSelectedConfig);
-
-							// reset selected configuration index
-							nSelectedConfig = ~0ULL;
-
-							NOTIFY::Push({ N_TYPE_WARNING, CS_XOR("config removed") });
+							if (C::RemoveFile(nSelectedConfig))
+							{
+								nSelectedConfig = ~0ULL;
+								NOTIFY::Push({ N_TYPE_WARNING, CS_XOR("config removed") });
+							}
+							else
+								NOTIFY::Push({ N_TYPE_ERROR, CS_XOR("config remove failed") });
 
 							ImGui::CloseCurrentPopup();
 						}

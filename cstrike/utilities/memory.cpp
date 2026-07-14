@@ -47,8 +47,16 @@ bool MEM::Setup()
 	}
 #endif
 
+#ifdef _WIN32
 	const void* hSDL3 = spoof_call<void*>(_fake_addr, &GetModuleBaseHandle, SDL3_DLL);
 	const void* hDbgHelp = spoof_call<void*>(_fake_addr, &GetModuleBaseHandle, DBGHELP_DLL);
+#else
+	// Linux calls the native ELF module lookup directly. The spoof-call helper is
+	// Windows-specific and its exact function signature rejects xorstr's mutable
+	// runtime buffer in optimized builds.
+	const void* hSDL3 = GetModuleBaseHandle(SDL3_DLL);
+	const void* hDbgHelp = GetModuleBaseHandle(DBGHELP_DLL);
+#endif
 	const void* hTier0 = GetModuleBaseHandle(TIER0_DLL);
 
 	L_PRINT(LOG_INFO) << CS_XOR("[MEM] hSDL3=") << (std::uintptr_t)hSDL3

@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 class CConVar;
 
 namespace CONVAR
@@ -10,6 +12,14 @@ namespace CONVAR
 	bool Setup();
 	// Native-safe exact-name lookup used by Linux features and the runtime dump.
 	CConVar* Find(const char* name);
+	// Type-checked value access. Linux additionally validates the mapped value
+	// storage and confirms every write by reading it back.
+	bool ReadBool(CConVar* convar, bool& value);
+	bool ReadFloat(CConVar* convar, float& value);
+	bool ReadInt32(CConVar* convar, std::int32_t& value);
+	bool WriteBool(CConVar* convar, bool value, bool* readback = nullptr);
+	bool WriteFloat(CConVar* convar, float value, float* readback = nullptr);
+	bool WriteInt32(CConVar* convar, std::int32_t value, std::int32_t* readback = nullptr);
 
 	inline CConVar* m_pitch = nullptr;
 	inline CConVar* m_yaw = nullptr;

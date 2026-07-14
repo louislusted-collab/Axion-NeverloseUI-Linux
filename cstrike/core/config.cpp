@@ -6,6 +6,8 @@
 #endif
 
 #include <cstdio>
+#include <algorithm>
+#include <cwchar>
 
 #include "config.h"
 // used: getworkingpath
@@ -32,6 +34,31 @@ static wchar_t wszConfigurationsPath[MAX_PATH];
 static bool IsValidFileIndex(const std::size_t nFileIndex)
 {
 	return nFileIndex < C::vecFileNames.size() && C::vecFileNames[nFileIndex] != nullptr;
+}
+
+static bool GetSafeConfigStemLength(const wchar_t* fileName, std::size_t& stemLength)
+{
+	stemLength = 0U;
+	if (fileName == nullptr || *fileName == L'\0')
+		return false;
+	const wchar_t* extension = CRT::StringCharR(fileName, L'.');
+	stemLength = extension != nullptr
+		? static_cast<std::size_t>(extension - fileName)
+		: CRT::StringLength(fileName);
+	if (stemLength == 0U || stemLength > 64U || fileName[0] == L' ' || fileName[stemLength - 1U] == L' ')
+		return false;
+	for (std::size_t index = 0; index < stemLength; ++index)
+	{
+		const wchar_t character = fileName[index];
+		const bool alphaNumeric =
+			(character >= L'a' && character <= L'z') ||
+			(character >= L'A' && character <= L'Z') ||
+			(character >= L'0' && character <= L'9');
+		if (!alphaNumeric && character != L'_' && character != L'-' && character != L' ')
+			return false;
+	}
+	return extension == nullptr ||
+		CRT::StringCompare(extension, CS_CONFIGURATION_FILE_EXTENSION) == 0;
 }
 
 #pragma region config_user_data_type
@@ -183,7 +210,6 @@ bool C::Setup(const wchar_t* wszDefaultFileName)
 	{
 		if (!CreateFile(wszDefaultFileName))
 			return false;
-		nDefaultIndex = vecFileNames.size() - 1U;
 	}
 	else if (!LoadFile(nDefaultIndex))
 	{
@@ -223,6 +249,9 @@ void C::Refresh()
 
 		::FindClose(hFindFile);
 	}
+	std::sort(vecFileNames.begin(), vecFileNames.end(), [](const wchar_t* left, const wchar_t* right) {
+		return std::wcscmp(left, right) < 0;
+	});
 }
 
 void C::AddUserType(const FNV1A_t uTypeHash, const std::initializer_list<UserDataMember_t> vecUserMembers)
@@ -313,13 +342,9 @@ bool C::RemoveFileVariable(const std::size_t nFileIndex, const VariableObject_t&
 
 bool C::CreateFile(const wchar_t* wszFileName)
 {
-	if (wszFileName == nullptr || *wszFileName == L'\0')
+	std::size_t nFileNameLength = 0U;
+	if (!GetSafeConfigStemLength(wszFileName, nFileNameLength))
 		return false;
-
-	const wchar_t* wszFileExtension = CRT::StringCharR(wszFileName, L'.');
-
-	// get length of the given filename and strip out extension if there any
-	const std::size_t nFileNameLength = (wszFileExtension != nullptr ? wszFileExtension - wszFileName : CRT::StringLength(wszFileName));
 	wchar_t* wszFullFileName = new wchar_t[nFileNameLength + CRT::StringLength(CS_CONFIGURATION_FILE_EXTENSION) + 1U];
 
 	// copy filename without extension
@@ -327,6 +352,14 @@ bool C::CreateFile(const wchar_t* wszFileName)
 	*wszFullFileNameEnd = L'\0';
 	// append correct extension to the filename
 	CRT::StringCat(wszFullFileNameEnd, CS_XOR(CS_CONFIGURATION_FILE_EXTENSION));
+	for (const wchar_t* existing : vecFileNames)
+	{
+		if (CRT::StringCompare(existing, wszFullFileName) == 0)
+		{
+			delete[] wszFullFileName;
+			return false;
+		}
+	}
 
 	// add filename to the list
 	vecFileNames.push_back(wszFullFileName);
@@ -335,6 +368,7 @@ bool C::CreateFile(const wchar_t* wszFileName)
 	if (SaveFile(vecFileNames.size() - 1U))
 	{
 		L_PRINT(LOG_INFO) << CS_XOR("created configuration file: \"") << wszFullFileName << CS_XOR("\"");
+		Refresh();
 		return true;
 	}
 
@@ -346,19 +380,10 @@ bool C::CreateFile(const wchar_t* wszFileName)
 
 bool C::RenameFile(const std::size_t nFileIndex, const wchar_t* wszNewFileName)
 {
-	if (!IsValidFileIndex(nFileIndex) || wszNewFileName == nullptr || *wszNewFileName == L'\0')
+	std::size_t stemLength = 0U;
+	if (!IsValidFileIndex(nFileIndex) || !GetSafeConfigStemLength(wszNewFileName, stemLength))
 		return false;
 	if (CRT::StringCompare(vecFileNames[nFileIndex], CS_XOR(CS_CONFIGURATION_DEFAULT_FILE_NAME CS_CONFIGURATION_FILE_EXTENSION)) == 0)
-		return false;
-	for (const wchar_t* cursor = wszNewFileName; *cursor != L'\0'; ++cursor)
-		if (*cursor == L'/' || *cursor == L'\\')
-			return false;
-
-	const wchar_t* extension = CRT::StringCharR(wszNewFileName, L'.');
-	const std::size_t stemLength = extension != nullptr
-		? static_cast<std::size_t>(extension - wszNewFileName)
-		: CRT::StringLength(wszNewFileName);
-	if (stemLength == 0U)
 		return false;
 	wchar_t* fullName = new wchar_t[stemLength + CRT::StringLength(CS_CONFIGURATION_FILE_EXTENSION) + 1U];
 	wchar_t* end = CRT::StringCopyN(fullName, wszNewFileName, stemLength);
@@ -382,7 +407,7 @@ bool C::RenameFile(const std::size_t nFileIndex, const wchar_t* wszNewFileName)
 	auto narrow = [](const wchar_t* input, char* output, std::size_t capacity) {
 		std::size_t i = 0;
 		for (; input[i] != L'\0' && i + 1 < capacity; ++i)
-			output[i] = static_cast<char>(input[i]);
+			output[i] = input[i] == L'\\' ? '/' : static_cast<char>(input[i]);
 		output[i] = '\0';
 	};
 	char sourcePath[MAX_PATH * 2] = {}, destinationPath[MAX_PATH * 2] = {};
@@ -411,7 +436,29 @@ bool C::SaveFile(const std::size_t nFileIndex)
 	CRT::StringCat(CRT::StringCopy(wszFilePath, wszConfigurationsPath), wszFileName);
 
 #if defined(CS_CONFIGURATION_BINARY)
+	#ifdef __linux__
+	wchar_t temporaryPath[MAX_PATH] = {};
+	CRT::StringCat(CRT::StringCopy(temporaryPath, wszFilePath), L".tmp");
+	bool saved = BIN::SaveFile(temporaryPath);
+	if (saved)
+	{
+		auto narrow = [](const wchar_t* input, char* output, std::size_t capacity) {
+			std::size_t index = 0U;
+			for (; input[index] != L'\0' && index + 1U < capacity; ++index)
+				output[index] = input[index] == L'\\' ? '/' : static_cast<char>(input[index]);
+			output[index] = '\0';
+		};
+		char temporaryNarrow[MAX_PATH * 2] = {}, finalNarrow[MAX_PATH * 2] = {};
+		narrow(temporaryPath, temporaryNarrow, sizeof(temporaryNarrow));
+		narrow(wszFilePath, finalNarrow, sizeof(finalNarrow));
+		saved = std::rename(temporaryNarrow, finalNarrow) == 0;
+		if (!saved)
+			std::remove(temporaryNarrow);
+	}
+	if (saved)
+	#else
 	if (BIN::SaveFile(wszFilePath))
+	#endif
 #elif defined(CS_CONFIGURATION_JSON)
 	if (JSON::SaveFile(wszFilePath))
 #elif defined(CS_CONFIGURATION_TOML)
@@ -452,10 +499,10 @@ bool C::LoadFile(const std::size_t nFileIndex)
 	return false;
 }
 
-void C::RemoveFile(const std::size_t nFileIndex)
+bool C::RemoveFile(const std::size_t nFileIndex)
 {
 	if (!IsValidFileIndex(nFileIndex))
-		return;
+		return false;
 
 	const wchar_t* wszFileName = vecFileNames[nFileIndex];
 
@@ -463,7 +510,7 @@ void C::RemoveFile(const std::size_t nFileIndex)
 	if (CRT::StringCompare(wszFileName, CS_XOR(CS_CONFIGURATION_DEFAULT_FILE_NAME CS_CONFIGURATION_FILE_EXTENSION)) == 0)
 	{
 		L_PRINT(LOG_WARNING) << CS_XOR("unable to remove default configuration file: \"") << wszFileName << CS_XOR("\"");
-		return;
+		return false;
 	}
 
 	wchar_t wszFilePath[MAX_PATH];
@@ -471,12 +518,11 @@ void C::RemoveFile(const std::size_t nFileIndex)
 
 	if (::DeleteFileW(wszFilePath))
 	{
-		// erase and free filename from the list
-		delete[] vecFileNames[nFileIndex];
-		vecFileNames.erase(vecFileNames.cbegin() + nFileIndex);
-
 		L_PRINT(LOG_INFO) << CS_XOR("removed configuration file");
+		Refresh();
+		return true;
 	}
+	return false;
 }
 
 #pragma endregion

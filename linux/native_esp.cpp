@@ -15,6 +15,8 @@
 #include "../cstrike/sdk/interfaces/cgameentitysystem.h"
 #include "../cstrike/sdk/interfaces/ienginecvar.h"
 #include "../cstrike/sdk/interfaces/iengineclient.h"
+#include "../cstrike/sdk/interfaces/iglobalvars.h"
+#include "../cstrike/sdk/interfaces/itrace.h"
 #include "../cstrike/utilities/draw.h"
 #include "../cstrike/utilities/inputsystem.h"
 #include "../cstrike/utilities/memory.h"
@@ -24,6 +26,7 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cctype>
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
@@ -34,6 +37,10 @@
 #include <string>
 #include <string_view>
 #include <vector>
+
+#include <sys/syscall.h>
+#include <sys/uio.h>
+#include <unistd.h>
 
 #include <SDL3/SDL.h>
 
@@ -170,11 +177,7 @@ void RefreshNativeInputObject()
                 MEM::GetAbsoluteAddress(match + 10, 3, 0) + 0x10);
     }
     if (inputStorage != nullptr && *inputStorage != nullptr)
-    {
         I::Input = *inputStorage;
-        native_view_angles = reinterpret_cast<QAngle_t*>(
-            reinterpret_cast<std::uint8_t*>(I::Input) + 0x2D8);
-    }
 }
 
 bool LoadResolvedOffsets()
@@ -205,12 +208,9 @@ bool LoadResolvedOffsets()
         native_view_matrix = reinterpret_cast<ViewMatrix_t*>(resolve("dwViewMatrixNative", "dwViewMatrix"));
         native_local_controller = reinterpret_cast<CCSPlayerController**>(
             resolve("dwLocalPlayerControllerNative", "dwLocalPlayerController"));
-        // The dumper's native dwViewAngles export is a static staging area in
-        // current Linux builds. The live command angles are inside the
-        // dereferenced CCSGOInput object.
-        native_view_angles = I::Input != nullptr
-            ? reinterpret_cast<QAngle_t*>(reinterpret_cast<std::uint8_t*>(I::Input) + 0x2D8)
-            : nullptr;
+        // The dumper export and the legacy auxiliary input object are not a
+        // verified live command-angle destination in the current native build.
+        native_view_angles = nullptr;
         return native_view_matrix != nullptr && native_local_controller != nullptr;
     }
     catch (const std::exception&)
@@ -250,21 +250,6 @@ void ResolveViewMatrix()
             native_local_controller = reinterpret_cast<CCSPlayerController**>(MEM::GetAbsoluteAddress(local_match, 3, 1));
     }
 
-    if (native_view_angles == nullptr)
-    {
-        std::uint8_t* input_match = MEM::FindPattern(CLIENT_DLL, "F3 41 0F 7E 06 F3 0F 7E 4D B0 48 8D 05 ? ? ? ? 0F 58 C1");
-        if (input_match != nullptr)
-        {
-            auto* inputTable = MEM::GetAbsoluteAddress(input_match + 10, 3, 0) + 0x10;
-            CCSGOInput* inputObject = *reinterpret_cast<CCSGOInput**>(inputTable);
-            if (inputObject != nullptr)
-            {
-                I::Input = inputObject;
-                native_view_angles = reinterpret_cast<QAngle_t*>(
-                    reinterpret_cast<std::uint8_t*>(inputObject) + 0x2D8);
-            }
-        }
-    }
     EspLog("[ESP] view_matrix=%p local_controller_ptr=%p view_angles=%p",
            native_view_matrix, native_local_controller, native_view_angles);
 }
@@ -364,9 +349,16 @@ void DrawOffscreenArrow(ImDrawList* draw, const Vector_t& localOrigin,
     const ImVec2 tangent(-direction.y, direction.x);
     const ImVec2 display = ImGui::GetIO().DisplaySize;
     const ImVec2 center = display * 0.5f;
-    const float radius = std::max(40.f, std::min(display.x, display.y) * 0.42f);
-    const ImVec2 tip = center + direction * radius;
-    const ImVec2 base = center + direction * (radius - 18.f);
+    const float radiusX = std::max(40.f, center.x - 28.f);
+    const float radiusY = std::max(40.f, center.y - 28.f);
+    const float denominator = std::sqrt(
+        (direction.x * direction.x) / (radiusX * radiusX) +
+        (direction.y * direction.y) / (radiusY * radiusY));
+    if (!std::isfinite(denominator) || denominator <= 0.f)
+        return;
+    const float edgeDistance = 1.f / denominator;
+    const ImVec2 tip = center + direction * edgeDistance;
+    const ImVec2 base = center + direction * (edgeDistance - 18.f);
     const ImVec2 left = base + tangent * 8.f;
     const ImVec2 right = base - tangent * 8.f;
     draw->AddTriangleFilled(tip, left, right, color);
@@ -389,61 +381,230 @@ bool IsNativeButtonDown(int key)
     }
 }
 
-bool GetWeaponName(C_CSWeaponBase* weapon, std::string& name, int* maximumAmmo = nullptr)
+template <typename T>
+bool SafeNativeRead(const void* address, T& value)
 {
-    if (weapon == nullptr)
+    if (address == nullptr)
         return false;
-    auto* data = weapon->GetVData();
-    if (data == nullptr)
+    iovec local{&value, sizeof(value)};
+    iovec remote{const_cast<void*>(address), sizeof(value)};
+    const long read = ::syscall(SYS_process_vm_readv, ::getpid(), &local, 1UL, &remote, 1UL, 0UL);
+    return read == static_cast<long>(sizeof(value));
+}
+
+bool IsSaneSchemaOffset(std::uint32_t offset, std::uint32_t maximum)
+{
+    return offset != 0 && offset <= maximum;
+}
+
+struct WeaponDisplayOffsets
+{
+    std::uint32_t weaponServices = 0;
+    std::uint32_t activeWeapon = 0;
+    std::uint32_t subclassId = 0;
+    std::uint32_t clip1 = 0;
+    std::uint32_t name = 0;
+    std::uint32_t maximumClip1 = 0;
+    bool valid = false;
+};
+
+const WeaponDisplayOffsets& GetWeaponDisplayOffsets()
+{
+    static const WeaponDisplayOffsets offsets = [] {
+        WeaponDisplayOffsets result{};
+        result.weaponServices = SCHEMA::GetOffset("C_BasePlayerPawn->m_pWeaponServices");
+        result.activeWeapon = SCHEMA::GetOffset("CPlayer_WeaponServices->m_hActiveWeapon");
+        result.subclassId = SCHEMA::GetOffset("C_BaseEntity->m_nSubclassID");
+        result.clip1 = SCHEMA::GetOffset("C_BasePlayerWeapon->m_iClip1");
+        result.name = SCHEMA::GetOffset("CCSWeaponBaseVData->m_szName");
+        result.maximumClip1 = SCHEMA::GetOffset("CBasePlayerWeaponVData->m_iMaxClip1");
+        result.valid = IsSaneSchemaOffset(result.weaponServices, 0x10000) &&
+            IsSaneSchemaOffset(result.activeWeapon, 0x1000) &&
+            IsSaneSchemaOffset(result.subclassId, 0x10000 - sizeof(void*)) &&
+            IsSaneSchemaOffset(result.clip1, 0x10000) &&
+            IsSaneSchemaOffset(result.name, 0x10000) &&
+            IsSaneSchemaOffset(result.maximumClip1, 0x10000);
+        EspLog("[WEAPON] schema services=0x%x active=0x%x subclass=0x%x clip=0x%x name=0x%x max_clip=0x%x valid=%d",
+            result.weaponServices, result.activeWeapon, result.subclassId, result.clip1,
+            result.name, result.maximumClip1, result.valid ? 1 : 0);
+        return result;
+    }();
+    return offsets;
+}
+
+void LogWeaponReadFailure(const char* stage, const void* pawn, const void* services,
+                          const void* weapon, const void* data)
+{
+    static std::uint64_t failures = 0;
+    ++failures;
+    if (failures <= 12 || failures % 600 == 0)
+        EspLog("[WEAPON] read failed stage=%s pawn=%p services=%p weapon=%p data=%p count=%llu",
+            stage, pawn, services, weapon, data, static_cast<unsigned long long>(failures));
+}
+
+bool SafeReadWeaponName(const char* rawName, std::string& name)
+{
+    if (rawName == nullptr)
         return false;
-    static const std::uint32_t nameOffset = SCHEMA::GetOffset("CCSWeaponBaseVData->m_szName");
-    static const std::uint32_t clipOffset = SCHEMA::GetOffset("CBasePlayerWeaponVData->m_iMaxClip1");
-    if (nameOffset != 0)
+    std::array<char, 96> buffer{};
+    iovec local{buffer.data(), buffer.size()};
+    iovec remote{const_cast<char*>(rawName), buffer.size()};
+    const long read = ::syscall(SYS_process_vm_readv, ::getpid(), &local, 1UL, &remote, 1UL, 0UL);
+    if (read <= 0)
+        return false;
+    const auto end = std::find(buffer.begin(), buffer.begin() + read, '\0');
+    if (end == buffer.begin() || end == buffer.begin() + read)
+        return false;
+    for (auto iterator = buffer.begin(); iterator != end; ++iterator)
     {
-        const char* rawName = *reinterpret_cast<const char* const*>(reinterpret_cast<std::uint8_t*>(data) + nameOffset);
-        if (rawName != nullptr)
-        {
-            name = rawName;
-            constexpr const char prefix[] = "weapon_";
-            if (name.starts_with(prefix))
-                name.erase(0, sizeof(prefix) - 1);
-        }
+        const unsigned char character = static_cast<unsigned char>(*iterator);
+        if (!(std::isalnum(character) || character == '_' || character == '-'))
+            return false;
     }
-    if (maximumAmmo != nullptr)
-        *maximumAmmo = clipOffset == 0 ? 0 :
-            *reinterpret_cast<const int*>(reinterpret_cast<std::uint8_t*>(data) + clipOffset);
+    name.assign(buffer.begin(), end);
+    constexpr std::string_view prefix = "weapon_";
+    if (name.starts_with(prefix))
+        name.erase(0, prefix.size());
     return !name.empty();
+}
+
+bool SafeGetEntity(CGameEntitySystem* entities, std::uint32_t handle, C_CSWeaponBase*& weapon)
+{
+    weapon = nullptr;
+    if (entities == nullptr || handle == INVALID_EHANDLE_INDEX)
+        return false;
+    const int entry = static_cast<int>(handle & ENT_ENTRY_MASK);
+    if (entry < 0 || entry >= MAX_TOTAL_ENTITIES)
+        return false;
+    std::uintptr_t bucket = 0;
+    if (!SafeNativeRead(reinterpret_cast<const std::uint8_t*>(entities) + 0x10 + 0x8 * (entry >> 9), bucket) ||
+        bucket == 0)
+        return false;
+    if (!SafeNativeRead(reinterpret_cast<const void*>(bucket + 0x70 * (entry & 0x1FF)), weapon) ||
+        weapon == nullptr)
+        return false;
+    void* vtable = nullptr;
+    if (!SafeNativeRead(weapon, vtable) || vtable == nullptr)
+    {
+        weapon = nullptr;
+        return false;
+    }
+    return true;
 }
 
 bool GetWeaponDisplay(CGameEntitySystem* entities, C_CSPlayerPawn* pawn, std::string& name,
                       int& ammo, int& maximumAmmo, C_CSWeaponBase** activeWeapon = nullptr)
 {
-    CPlayer_WeaponServices* services = pawn != nullptr ? pawn->GetWeaponServices() : nullptr;
-    if (services == nullptr)
+    name.clear();
+    ammo = 0;
+    maximumAmmo = 0;
+    if (activeWeapon != nullptr)
+        *activeWeapon = nullptr;
+
+    const WeaponDisplayOffsets& offsets = GetWeaponDisplayOffsets();
+    if (entities == nullptr || pawn == nullptr || !offsets.valid)
+    {
+        LogWeaponReadFailure("prerequisite", pawn, nullptr, nullptr, nullptr);
         return false;
-    C_CSWeaponBase* weapon = entities->Get<C_CSWeaponBase>(services->m_hActiveWeapon());
-    if (weapon == nullptr)
+    }
+
+    CPlayer_WeaponServices* services = nullptr;
+    if (!SafeNativeRead(reinterpret_cast<const std::uint8_t*>(pawn) + offsets.weaponServices, services) ||
+        services == nullptr)
+    {
+        LogWeaponReadFailure("services", pawn, services, nullptr, nullptr);
         return false;
+    }
+    std::uint32_t handle = INVALID_EHANDLE_INDEX;
+    if (!SafeNativeRead(reinterpret_cast<const std::uint8_t*>(services) + offsets.activeWeapon, handle))
+    {
+        LogWeaponReadFailure("active-handle", pawn, services, nullptr, nullptr);
+        return false;
+    }
+    C_CSWeaponBase* weapon = nullptr;
+    if (!SafeGetEntity(entities, handle, weapon))
+    {
+        LogWeaponReadFailure("entity", pawn, services, weapon, nullptr);
+        return false;
+    }
     if (activeWeapon != nullptr)
         *activeWeapon = weapon;
-    ammo = std::max(0, weapon->clip1());
-    return GetWeaponName(weapon, name, &maximumAmmo) || maximumAmmo > 0;
+
+    void* data = nullptr;
+    const auto* weaponBytes = reinterpret_cast<const std::uint8_t*>(weapon);
+    const bool readData = SafeNativeRead(weaponBytes + offsets.subclassId + sizeof(void*), data) && data != nullptr;
+    int rawAmmo = 0;
+    const bool readAmmo = SafeNativeRead(weaponBytes + offsets.clip1, rawAmmo) &&
+        rawAmmo >= -1 && rawAmmo <= 1000;
+    int rawMaximumAmmo = 0;
+    const bool readMaximumAmmo = readData &&
+        SafeNativeRead(reinterpret_cast<const std::uint8_t*>(data) + offsets.maximumClip1, rawMaximumAmmo) &&
+        rawMaximumAmmo > 0 && rawMaximumAmmo <= 1000;
+    const char* rawName = nullptr;
+    const bool readName = readData &&
+        SafeNativeRead(reinterpret_cast<const std::uint8_t*>(data) + offsets.name, rawName) &&
+        SafeReadWeaponName(rawName, name);
+
+    if (readAmmo)
+        ammo = std::max(0, rawAmmo);
+    if (readMaximumAmmo)
+        maximumAmmo = rawMaximumAmmo;
+    if (!readData || (!readName && !readMaximumAmmo))
+        LogWeaponReadFailure(!readData ? "vdata" : "vdata-fields", pawn, services, weapon, data);
+    return readName || (readAmmo && readMaximumAmmo);
+}
+
+bool GetWeaponName(C_CSWeaponBase* weapon, std::string& name, int* maximumAmmo = nullptr)
+{
+    name.clear();
+    if (maximumAmmo != nullptr)
+        *maximumAmmo = 0;
+    if (weapon == nullptr)
+        return false;
+    const WeaponDisplayOffsets& offsets = GetWeaponDisplayOffsets();
+    if (!offsets.valid)
+        return false;
+    void* data = nullptr;
+    if (!SafeNativeRead(reinterpret_cast<const std::uint8_t*>(weapon) + offsets.subclassId + sizeof(void*), data) ||
+        data == nullptr)
+        return false;
+    const char* rawName = nullptr;
+    const bool hasName = SafeNativeRead(reinterpret_cast<const std::uint8_t*>(data) + offsets.name, rawName) &&
+        SafeReadWeaponName(rawName, name);
+    if (maximumAmmo != nullptr)
+    {
+        int rawMaximumAmmo = 0;
+        if (SafeNativeRead(reinterpret_cast<const std::uint8_t*>(data) + offsets.maximumClip1, rawMaximumAmmo) &&
+            rawMaximumAmmo > 0 && rawMaximumAmmo <= 1000)
+            *maximumAmmo = rawMaximumAmmo;
+    }
+    return hasName;
 }
 
 bool PlayerHasC4(CGameEntitySystem* entities, C_CSPlayerPawn* pawn)
 {
     static const std::uint32_t myWeapons = SCHEMA::GetOffset("CPlayer_WeaponServices->m_hMyWeapons");
-    CPlayer_WeaponServices* services = pawn != nullptr ? pawn->GetWeaponServices() : nullptr;
-    if (entities == nullptr || services == nullptr || myWeapons == 0)
+    const WeaponDisplayOffsets& offsets = GetWeaponDisplayOffsets();
+    if (entities == nullptr || pawn == nullptr || myWeapons == 0 || !offsets.valid)
         return false;
-    auto* collection = reinterpret_cast<C_NetworkUtlVectorBase<CBaseHandle>*>(
-        reinterpret_cast<std::uint8_t*>(services) + myWeapons);
-    if (collection->pElements == nullptr || collection->nSize > 64)
+    CPlayer_WeaponServices* services = nullptr;
+    if (!SafeNativeRead(reinterpret_cast<const std::uint8_t*>(pawn) + offsets.weaponServices, services) ||
+        services == nullptr)
         return false;
-    for (std::uint32_t index = 0; index < collection->nSize; ++index)
+    C_NetworkUtlVectorBase<CBaseHandle> collection{};
+    if (!SafeNativeRead(reinterpret_cast<const std::uint8_t*>(services) + myWeapons, collection) ||
+        collection.pElements == nullptr || collection.nSize > 64)
+        return false;
+    for (std::uint32_t index = 0; index < collection.nSize; ++index)
     {
+        std::uint32_t handle = INVALID_EHANDLE_INDEX;
+        if (!SafeNativeRead(collection.pElements + index, handle))
+            continue;
+        C_CSWeaponBase* weapon = nullptr;
+        if (!SafeGetEntity(entities, handle, weapon))
+            continue;
         std::string name;
-        if (GetWeaponName(entities->Get<C_CSWeaponBase>(collection->pElements[index]), name) && name == "c4")
+        if (GetWeaponName(weapon, name) && name == "c4")
             return true;
     }
     return false;
@@ -590,23 +751,28 @@ void ApplySmokeRemoval(CGameEntitySystem* entities, C_CSPlayerPawn* localPawn)
     static bool originalEnhance = true;
     static bool originalShadow = true;
     static bool originalDrawParticles = true;
+    static bool capturedVolume = false;
+    static bool capturedFullResolution = false;
+    static bool capturedEnhance = false;
+    static bool capturedShadow = false;
+    static bool capturedDrawParticles = false;
 
     const bool enabled = C_GET(bool, Vars.bRemoveSmoke);
     if (enabled && !previousEnabled)
     {
-        if (smokeVolume != nullptr) originalVolume = smokeVolume->GetValue<bool>();
-        if (smokeFullResolution != nullptr) originalFullResolution = smokeFullResolution->GetValue<bool>();
-        if (smokeEnhance != nullptr) originalEnhance = smokeEnhance->GetValue<bool>();
-        if (smokeShadow != nullptr) originalShadow = smokeShadow->GetValue<bool>();
-        if (drawParticles != nullptr) originalDrawParticles = drawParticles->GetValue<bool>();
+        capturedVolume = CONVAR::ReadBool(smokeVolume, originalVolume);
+        capturedFullResolution = CONVAR::ReadBool(smokeFullResolution, originalFullResolution);
+        capturedEnhance = CONVAR::ReadBool(smokeEnhance, originalEnhance);
+        capturedShadow = CONVAR::ReadBool(smokeShadow, originalShadow);
+        capturedDrawParticles = CONVAR::ReadBool(drawParticles, originalDrawParticles);
     }
     else if (!enabled && previousEnabled)
     {
-        if (smokeVolume != nullptr) smokeVolume->GetValue<bool>() = originalVolume;
-        if (smokeFullResolution != nullptr) smokeFullResolution->GetValue<bool>() = originalFullResolution;
-        if (smokeEnhance != nullptr) smokeEnhance->GetValue<bool>() = originalEnhance;
-        if (smokeShadow != nullptr) smokeShadow->GetValue<bool>() = originalShadow;
-        if (drawParticles != nullptr) drawParticles->GetValue<bool>() = originalDrawParticles;
+        if (capturedVolume) CONVAR::WriteBool(smokeVolume, originalVolume);
+        if (capturedFullResolution) CONVAR::WriteBool(smokeFullResolution, originalFullResolution);
+        if (capturedEnhance) CONVAR::WriteBool(smokeEnhance, originalEnhance);
+        if (capturedShadow) CONVAR::WriteBool(smokeShadow, originalShadow);
+        if (capturedDrawParticles) CONVAR::WriteBool(drawParticles, originalDrawParticles);
     }
     previousEnabled = enabled;
     if (!enabled || localPawn == nullptr)
@@ -616,11 +782,16 @@ void ApplySmokeRemoval(CGameEntitySystem* entities, C_CSPlayerPawn* localPawn)
     // Those handles can disappear on the particle thread exactly when smoke
     // blooms, which was the source of the reported crash. These are stable
     // client render controls plus the local pawn's schema-resolved overlay.
-    if (smokeVolume != nullptr) smokeVolume->GetValue<bool>() = false;
-    if (smokeFullResolution != nullptr) smokeFullResolution->GetValue<bool>() = false;
-    if (smokeEnhance != nullptr) smokeEnhance->GetValue<bool>() = false;
-    if (smokeShadow != nullptr) smokeShadow->GetValue<bool>() = false;
-    if (drawParticles != nullptr) drawParticles->GetValue<bool>() = false;
+    bool volumeReadback = true;
+    bool fullResolutionReadback = true;
+    bool enhanceReadback = true;
+    bool shadowReadback = true;
+    bool particlesReadback = true;
+    const bool wroteVolume = CONVAR::WriteBool(smokeVolume, false, &volumeReadback);
+    const bool wroteFullResolution = CONVAR::WriteBool(smokeFullResolution, false, &fullResolutionReadback);
+    const bool wroteEnhance = CONVAR::WriteBool(smokeEnhance, false, &enhanceReadback);
+    const bool wroteShadow = CONVAR::WriteBool(smokeShadow, false, &shadowReadback);
+    const bool wroteParticles = CONVAR::WriteBool(drawParticles, false, &particlesReadback);
 
     auto* pawnBytes = reinterpret_cast<std::uint8_t*>(localPawn);
     if (overlayAlpha != 0)
@@ -633,9 +804,10 @@ void ApplySmokeRemoval(CGameEntitySystem* entities, C_CSPlayerPawn* localPawn)
     if (now >= nextLog)
     {
         nextLog = now + 2000;
-        EspLog("[removals] smoke safe_path active=1 overlay=0x%x age=0x%x cvars volume=%p fullres=%p enhance=%p shadow=%p particles=%p",
-            overlayAlpha, smokeAge, smokeVolume, smokeFullResolution,
-            smokeEnhance, smokeShadow, drawParticles);
+        EspLog("[removals] smoke active=1 overlay=0x%x age=0x%x write/readback volume=%d/%d fullres=%d/%d enhance=%d/%d shadow=%d/%d particles=%d/%d",
+            overlayAlpha, smokeAge, wroteVolume, !volumeReadback,
+            wroteFullResolution, !fullResolutionReadback, wroteEnhance, !enhanceReadback,
+            wroteShadow, !shadowReadback, wroteParticles, !particlesReadback);
     }
 }
 
@@ -660,55 +832,76 @@ void ApplyCameraAndRemovals(C_CSPlayerPawn* localPawn)
     static float originalDofMaxBlur = 0.f;
     static float originalDofFarBlur = 0.f;
     static float originalDofNearBlur = 0.f;
+    static bool capturedCameraFov = false;
+    static bool capturedViewmodelFov = false;
+    static bool capturedScope = false;
+    static bool capturedDofOverride = false;
+    static bool capturedDofMaxBlur = false;
+    static bool capturedDofFarBlur = false;
+    static bool capturedDofNearBlur = false;
+
+    bool cameraFovWrite = true;
+    bool viewmodelFovWrite = true;
+    bool scopeWrite = true;
+    bool blurWrite = true;
+    float cameraFovReadback = originalCameraFov;
+    float viewmodelFovReadback = originalViewmodelFov;
+    bool scopeReadback = originalScope;
+    bool dofOverrideReadback = originalDofOverride;
+    float dofMaxBlurReadback = originalDofMaxBlur;
+    float dofFarBlurReadback = originalDofFarBlur;
+    float dofNearBlurReadback = originalDofNearBlur;
 
     const bool cameraFovEnabled = C_GET(bool, Vars.bFOV);
-    if (cameraFovEnabled && !previousCameraFov && cameraFov != nullptr)
-        originalCameraFov = cameraFov->GetValue<float>();
-    if (!cameraFovEnabled && previousCameraFov && cameraFov != nullptr)
-        cameraFov->GetValue<float>() = originalCameraFov;
-    if (cameraFovEnabled && cameraFov != nullptr)
-        cameraFov->GetValue<float>() = std::clamp(C_GET(float, Vars.fFOVAmount), 30.f, 150.f);
+    if (cameraFovEnabled && !previousCameraFov)
+        capturedCameraFov = CONVAR::ReadFloat(cameraFov, originalCameraFov);
+    if (!cameraFovEnabled && previousCameraFov && capturedCameraFov)
+        CONVAR::WriteFloat(cameraFov, originalCameraFov);
+    if (cameraFovEnabled)
+        cameraFovWrite = CONVAR::WriteFloat(cameraFov,
+            std::clamp(C_GET(float, Vars.fFOVAmount), 30.f, 150.f), &cameraFovReadback);
     previousCameraFov = cameraFovEnabled;
 
     const bool viewmodelFovEnabled = C_GET(bool, Vars.bSetViewModelFOV);
-    if (viewmodelFovEnabled && !previousViewmodelFov && viewmodelFov != nullptr)
-        originalViewmodelFov = viewmodelFov->GetValue<float>();
-    if (!viewmodelFovEnabled && previousViewmodelFov && viewmodelFov != nullptr)
-        viewmodelFov->GetValue<float>() = originalViewmodelFov;
-    if (viewmodelFovEnabled && viewmodelFov != nullptr)
-        viewmodelFov->GetValue<float>() = std::clamp(C_GET(float, Vars.flSetViewModelFOV), 40.f, 150.f);
+    if (viewmodelFovEnabled && !previousViewmodelFov)
+        capturedViewmodelFov = CONVAR::ReadFloat(viewmodelFov, originalViewmodelFov);
+    if (!viewmodelFovEnabled && previousViewmodelFov && capturedViewmodelFov)
+        CONVAR::WriteFloat(viewmodelFov, originalViewmodelFov);
+    if (viewmodelFovEnabled)
+        viewmodelFovWrite = CONVAR::WriteFloat(viewmodelFov,
+            std::clamp(C_GET(float, Vars.flSetViewModelFOV), 40.f, 150.f), &viewmodelFovReadback);
     previousViewmodelFov = viewmodelFovEnabled;
 
     const bool removeScope = C_GET(bool, Vars.bRemoveScopeOverlay);
-    if (removeScope && !previousScope && sniperStencil != nullptr)
-        originalScope = sniperStencil->GetValue<bool>();
-    if (!removeScope && previousScope && sniperStencil != nullptr)
-        sniperStencil->GetValue<bool>() = originalScope;
-    if (removeScope && sniperStencil != nullptr)
-        sniperStencil->GetValue<bool>() = false;
+    if (removeScope && !previousScope)
+        capturedScope = CONVAR::ReadBool(sniperStencil, originalScope);
+    if (!removeScope && previousScope && capturedScope)
+        CONVAR::WriteBool(sniperStencil, originalScope);
+    if (removeScope)
+        scopeWrite = CONVAR::WriteBool(sniperStencil, false, &scopeReadback);
     previousScope = removeScope;
 
     const bool removeBlur = C_GET(bool, Vars.bRemoveMotionBlur);
     if (removeBlur && !previousBlur)
     {
-        if (dofOverride != nullptr) originalDofOverride = dofOverride->GetValue<bool>();
-        if (dofMaxBlur != nullptr) originalDofMaxBlur = dofMaxBlur->GetValue<float>();
-        if (dofFarBlur != nullptr) originalDofFarBlur = dofFarBlur->GetValue<float>();
-        if (dofNearBlur != nullptr) originalDofNearBlur = dofNearBlur->GetValue<float>();
+        capturedDofOverride = CONVAR::ReadBool(dofOverride, originalDofOverride);
+        capturedDofMaxBlur = CONVAR::ReadFloat(dofMaxBlur, originalDofMaxBlur);
+        capturedDofFarBlur = CONVAR::ReadFloat(dofFarBlur, originalDofFarBlur);
+        capturedDofNearBlur = CONVAR::ReadFloat(dofNearBlur, originalDofNearBlur);
     }
     if (!removeBlur && previousBlur)
     {
-        if (dofOverride != nullptr) dofOverride->GetValue<bool>() = originalDofOverride;
-        if (dofMaxBlur != nullptr) dofMaxBlur->GetValue<float>() = originalDofMaxBlur;
-        if (dofFarBlur != nullptr) dofFarBlur->GetValue<float>() = originalDofFarBlur;
-        if (dofNearBlur != nullptr) dofNearBlur->GetValue<float>() = originalDofNearBlur;
+        if (capturedDofOverride) CONVAR::WriteBool(dofOverride, originalDofOverride);
+        if (capturedDofMaxBlur) CONVAR::WriteFloat(dofMaxBlur, originalDofMaxBlur);
+        if (capturedDofFarBlur) CONVAR::WriteFloat(dofFarBlur, originalDofFarBlur);
+        if (capturedDofNearBlur) CONVAR::WriteFloat(dofNearBlur, originalDofNearBlur);
     }
     if (removeBlur)
     {
-        if (dofOverride != nullptr) dofOverride->GetValue<bool>() = true;
-        if (dofMaxBlur != nullptr) dofMaxBlur->GetValue<float>() = 0.f;
-        if (dofFarBlur != nullptr) dofFarBlur->GetValue<float>() = 0.f;
-        if (dofNearBlur != nullptr) dofNearBlur->GetValue<float>() = 0.f;
+        blurWrite = CONVAR::WriteBool(dofOverride, true, &dofOverrideReadback);
+        blurWrite &= CONVAR::WriteFloat(dofMaxBlur, 0.f, &dofMaxBlurReadback);
+        blurWrite &= CONVAR::WriteFloat(dofFarBlur, 0.f, &dofFarBlurReadback);
+        blurWrite &= CONVAR::WriteFloat(dofNearBlur, 0.f, &dofNearBlurReadback);
     }
     previousBlur = removeBlur;
 
@@ -747,10 +940,12 @@ void ApplyCameraAndRemovals(C_CSPlayerPawn* localPawn)
          C_GET(bool, Vars.bRemoveAimPunch)))
     {
         nextLog = SDL_GetTicks() + 2000;
-        EspLog("[camera/removals] fov=%d/%p viewmodel=%d/%p scope=%d/%p blur=%d flash=%d alpha=%.0f punch=%d",
-            cameraFovEnabled, cameraFov, viewmodelFovEnabled, viewmodelFov,
-            removeScope, sniperStencil, removeBlur, removeFlash,
-            C_GET(float, Vars.flFlashOpacity), C_GET(bool, Vars.bRemoveAimPunch));
+        EspLog("[camera/removals] fov=%d write=%d readback=%.1f viewmodel=%d write=%d readback=%.1f scope=%d write=%d readback=%d blur=%d write=%d readback=%d/%.1f/%.1f/%.1f flash=%d alpha=%.0f punch=%d",
+            cameraFovEnabled, cameraFovWrite, cameraFovReadback,
+            viewmodelFovEnabled, viewmodelFovWrite, viewmodelFovReadback,
+            removeScope, scopeWrite, scopeReadback, removeBlur, blurWrite,
+            dofOverrideReadback, dofMaxBlurReadback, dofFarBlurReadback, dofNearBlurReadback,
+            removeFlash, C_GET(float, Vars.flFlashOpacity), C_GET(bool, Vars.bRemoveAimPunch));
     }
 }
 
@@ -759,6 +954,49 @@ void ApplyThirdPerson(C_CSPlayerPawn* localPawn)
     const bool featureEnabled = C_GET(bool, Vars.bThirdperson);
     static bool wasPressed = false;
     static bool wasEnabled = false;
+    static bool capturedClThirdPerson = false;
+    static bool capturedIdealDistance = false;
+    static bool capturedCollision = false;
+    static bool capturedSnap = false;
+    static bool capturedShoulder = false;
+    static bool capturedShoulderAimDistance = false;
+    static bool capturedShoulderDistance = false;
+    static bool capturedShoulderHeight = false;
+    static bool capturedShoulderOffset = false;
+    static bool originalClThirdPerson = false;
+    static float originalIdealDistance = 0.f;
+    static std::int32_t originalCollision = 0;
+    static bool originalSnap = false;
+    static bool originalShoulder = false;
+    static float originalShoulderAimDistance = 0.f;
+    static float originalShoulderDistance = 0.f;
+    static float originalShoulderHeight = 0.f;
+    static float originalShoulderOffset = 0.f;
+
+    if (featureEnabled && !wasEnabled)
+    {
+        capturedClThirdPerson = CONVAR::ReadBool(CONVAR::cl_thirdperson, originalClThirdPerson);
+        capturedIdealDistance = CONVAR::ReadFloat(CONVAR::cam_idealdist, originalIdealDistance);
+        capturedCollision = CONVAR::ReadInt32(CONVAR::cam_collision, originalCollision);
+        capturedSnap = CONVAR::ReadBool(CONVAR::cam_snapto, originalSnap);
+        capturedShoulder = CONVAR::ReadBool(CONVAR::c_thirdpersonshoulder, originalShoulder);
+        capturedShoulderAimDistance = CONVAR::ReadFloat(CONVAR::c_thirdpersonshoulderaimdist, originalShoulderAimDistance);
+        capturedShoulderDistance = CONVAR::ReadFloat(CONVAR::c_thirdpersonshoulderdist, originalShoulderDistance);
+        capturedShoulderHeight = CONVAR::ReadFloat(CONVAR::c_thirdpersonshoulderheight, originalShoulderHeight);
+        capturedShoulderOffset = CONVAR::ReadFloat(CONVAR::c_thirdpersonshoulderoffset, originalShoulderOffset);
+    }
+    else if (!featureEnabled && wasEnabled)
+    {
+        if (capturedClThirdPerson) CONVAR::WriteBool(CONVAR::cl_thirdperson, originalClThirdPerson);
+        if (capturedIdealDistance) CONVAR::WriteFloat(CONVAR::cam_idealdist, originalIdealDistance);
+        if (capturedCollision) CONVAR::WriteInt32(CONVAR::cam_collision, originalCollision);
+        if (capturedSnap) CONVAR::WriteBool(CONVAR::cam_snapto, originalSnap);
+        if (capturedShoulder) CONVAR::WriteBool(CONVAR::c_thirdpersonshoulder, originalShoulder);
+        if (capturedShoulderAimDistance) CONVAR::WriteFloat(CONVAR::c_thirdpersonshoulderaimdist, originalShoulderAimDistance);
+        if (capturedShoulderDistance) CONVAR::WriteFloat(CONVAR::c_thirdpersonshoulderdist, originalShoulderDistance);
+        if (capturedShoulderHeight) CONVAR::WriteFloat(CONVAR::c_thirdpersonshoulderheight, originalShoulderHeight);
+        if (capturedShoulderOffset) CONVAR::WriteFloat(CONVAR::c_thirdpersonshoulderoffset, originalShoulderOffset);
+    }
     if (!featureEnabled)
     {
         native_thirdperson_active = false;
@@ -784,27 +1022,30 @@ void ApplyThirdPerson(C_CSPlayerPawn* localPawn)
     const float distance = std::clamp(C_GET(float, Vars.flThirdperson), 50.f, 300.f);
     SetNativeThirdPersonInput(enabled);
 
-    if (CONVAR::cl_thirdperson != nullptr)
-        CONVAR::cl_thirdperson->GetValue<bool>() = enabled;
-    if (CONVAR::cam_idealdist != nullptr)
-        CONVAR::cam_idealdist->GetValue<float>() = distance;
-    if (CONVAR::cam_collision != nullptr)
-        CONVAR::cam_collision->GetValue<std::int32_t>() =
-            C_GET(bool, Vars.thirdperson_collision) ? 1 : 0;
-    if (CONVAR::cam_snapto != nullptr)
-        CONVAR::cam_snapto->GetValue<bool>() = true;
-    if (CONVAR::c_thirdpersonshoulder != nullptr)
-        CONVAR::c_thirdpersonshoulder->GetValue<bool>() = enabled;
-    if (enabled)
+    bool clThirdPersonReadback = false;
+    float distanceReadback = 0.f;
+    std::int32_t collisionReadback = 0;
+    bool snapReadback = false;
+    bool shoulderReadback = false;
+    bool cvarWrites = true;
+    if (featureEnabled)
     {
-        if (CONVAR::c_thirdpersonshoulderaimdist != nullptr)
-            CONVAR::c_thirdpersonshoulderaimdist->GetValue<float>() = 0.f;
-        if (CONVAR::c_thirdpersonshoulderdist != nullptr)
-            CONVAR::c_thirdpersonshoulderdist->GetValue<float>() = 0.f;
-        if (CONVAR::c_thirdpersonshoulderheight != nullptr)
-            CONVAR::c_thirdpersonshoulderheight->GetValue<float>() = 0.f;
-        if (CONVAR::c_thirdpersonshoulderoffset != nullptr)
-            CONVAR::c_thirdpersonshoulderoffset->GetValue<float>() = 0.f;
+        // cl_thirdperson is absent in some current native builds, so the
+        // shoulder and input paths remain independently validated.
+        if (CONVAR::cl_thirdperson != nullptr)
+            cvarWrites &= CONVAR::WriteBool(CONVAR::cl_thirdperson, enabled, &clThirdPersonReadback);
+        cvarWrites &= CONVAR::WriteFloat(CONVAR::cam_idealdist, distance, &distanceReadback);
+        cvarWrites &= CONVAR::WriteInt32(CONVAR::cam_collision,
+            C_GET(bool, Vars.thirdperson_collision) ? 1 : 0, &collisionReadback);
+        cvarWrites &= CONVAR::WriteBool(CONVAR::cam_snapto, true, &snapReadback);
+        cvarWrites &= CONVAR::WriteBool(CONVAR::c_thirdpersonshoulder, enabled, &shoulderReadback);
+        if (enabled)
+        {
+            cvarWrites &= CONVAR::WriteFloat(CONVAR::c_thirdpersonshoulderaimdist, 0.f);
+            cvarWrites &= CONVAR::WriteFloat(CONVAR::c_thirdpersonshoulderdist, 0.f);
+            cvarWrites &= CONVAR::WriteFloat(CONVAR::c_thirdpersonshoulderheight, 0.f);
+            cvarWrites &= CONVAR::WriteFloat(CONVAR::c_thirdpersonshoulderoffset, 0.f);
+        }
     }
 
     static const std::uint32_t thirdPersonOffset = [] {
@@ -826,9 +1067,10 @@ void ApplyThirdPerson(C_CSPlayerPawn* localPawn)
     if (enabled && SDL_GetTicks() - lastConfirmation > 2000)
     {
         lastConfirmation = SDL_GetTicks();
-        EspLog("[thirdperson] writing ON input=%p schema=0x%x cvar=%p distance=%.0f create_move_calls=%llu",
-               I::Input, thirdPersonOffset, CONVAR::cl_thirdperson, distance,
-               GetNativeCreateMoveCalls());
+        EspLog("[thirdperson] requested=1 writes=%d input=%p schema=0x%x cl=%p/%d ideal=%.0f collision=%d snap=%d shoulder=%d create_move_calls=%llu",
+               cvarWrites, I::Input, thirdPersonOffset, CONVAR::cl_thirdperson,
+               clThirdPersonReadback, distanceReadback, collisionReadback,
+               snapReadback, shoulderReadback, GetNativeCreateMoveCalls());
     }
 }
 
@@ -840,6 +1082,7 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
         int bone = -2;
         QAngle_t delta{};
         float fov = 9999.f;
+        float score = 9999999.f;
         bool valid = false;
     };
 
@@ -857,6 +1100,7 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
     static int previousDeltaBone = -2;
     const auto stopAim = [&](bool releaseTarget) {
         ClearNativeAimDelta();
+        SetNativeCombatInput(false, false, false, false);
         if (releaseTarget)
         {
             lockedPawn = 0;
@@ -943,6 +1187,67 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
         return;
     }
     const Vector_t localEye = localScene->GetAbsOrigin() + localPawn->m_vecViewOffset();
+
+    std::string activeWeaponName;
+    int activeAmmo = 0;
+    int activeMaximumAmmo = 0;
+    GetWeaponDisplay(entities, localPawn, activeWeaponName, activeAmmo, activeMaximumAmmo);
+    const int profile = C_GET(bool, Vars.legit_ui_per_weapon)
+        ? GetRageWeaponGroup(activeWeaponName) : 0;
+    const float configuredFov = C_GET(bool, Vars.legit_ui_per_weapon)
+        ? C_GET_ARRAY(float, 7, Vars.legit_profile_fov, profile)
+        : C_GET(float, Vars.legit_ui_fov_size);
+    const float configuredSmoothness = C_GET(bool, Vars.legit_ui_per_weapon)
+        ? C_GET_ARRAY(float, 7, Vars.legit_profile_smoothness, profile)
+        : C_GET(float, Vars.legit_ui_smoothness);
+    const int targetSelection = std::clamp(C_GET(bool, Vars.legit_ui_per_weapon)
+        ? C_GET_ARRAY(int, 7, Vars.legit_profile_target_selection, profile)
+        : C_GET(int, Vars.legit_ui_target_selection), 0, 2);
+    const int hitboxMode = std::clamp(C_GET(bool, Vars.legit_ui_per_weapon)
+        ? C_GET_ARRAY(int, 7, Vars.legit_profile_hitbox_mode, profile)
+        : C_GET(int, Vars.legit_ui_hitbox_mode), 0, 1);
+    const bool visibilityCheck = C_GET(bool, Vars.legit_ui_per_weapon)
+        ? C_GET_ARRAY(bool, 7, Vars.legit_profile_visibility_check, profile)
+        : C_GET(bool, Vars.legit_ui_visibility_check);
+    const bool smokeCheck = C_GET(bool, Vars.legit_ui_per_weapon)
+        ? C_GET_ARRAY(bool, 7, Vars.legit_profile_smoke_check, profile)
+        : C_GET(bool, Vars.legit_ui_smoke_check);
+    const bool flashCheck = C_GET(bool, Vars.legit_ui_per_weapon)
+        ? C_GET_ARRAY(bool, 7, Vars.legit_profile_flash_check, profile)
+        : C_GET(bool, Vars.legit_ui_flash_check);
+    const float reactionMs = std::clamp(C_GET(bool, Vars.legit_ui_per_weapon)
+        ? C_GET_ARRAY(float, 7, Vars.legit_profile_reaction_ms, profile)
+        : C_GET(float, Vars.legit_ui_reaction_ms), 0.f, 500.f);
+
+    if (flashCheck && localPawn->GetFlashDuration() > 0.05f)
+    {
+        stopAim(true);
+        if (diagnose) LegitLog("[%llu] BLOCKED flash duration=%.3f",
+            static_cast<unsigned long long>(currentSequence), localPawn->GetFlashDuration());
+        return;
+    }
+    if (smokeCheck)
+    {
+        static const std::uint32_t smokeOverlayOffset =
+            SCHEMA::GetOffset("C_CSPlayerPawnBase->m_flLastSmokeOverlayAlpha");
+        float smokeOverlay = 0.f;
+        if (smokeOverlayOffset != 0 && SafeNativeRead(
+                reinterpret_cast<const std::uint8_t*>(localPawn) + smokeOverlayOffset, smokeOverlay) &&
+            std::isfinite(smokeOverlay) && smokeOverlay > 0.05f)
+        {
+            stopAim(true);
+            if (diagnose) LegitLog("[%llu] BLOCKED smoke overlay=%.3f",
+                static_cast<unsigned long long>(currentSequence), smokeOverlay);
+            return;
+        }
+    }
+    if (visibilityCheck && !TRACE::NativeReady())
+    {
+        stopAim(true);
+        if (diagnose) LegitLog("[%llu] BLOCKED visibility requested but native trace is unavailable",
+            static_cast<unsigned long long>(currentSequence));
+        return;
+    }
     static const std::uint32_t pawnViewAngleOffset = SCHEMA::GetOffset("C_BasePlayerPawn->v_angle");
     static const std::uint32_t pawnEyeAngleOffset = SCHEMA::GetOffset("C_CSPlayerPawn->m_angEyeAngles");
     if (pawnViewAngleOffset == 0 && pawnEyeAngleOffset == 0 && native_view_angles == nullptr)
@@ -994,7 +1299,7 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
             current.x, current.y, current.z, pawnViewAngleOffset, pawnEyeAngleOffset,
             localEye.x, localEye.y, localEye.z);
 
-    const float acquisitionFov = std::clamp(C_GET(float, Vars.legit_ui_fov_size), 5.f, 60.f);
+    const float acquisitionFov = std::clamp(configuredFov, 0.1f, 60.f);
     // Once acquired, allow a very small margin outside the selection cone.
     // This prevents two nearby players/bones from alternating every frame,
     // while still releasing promptly if the user deliberately moves away.
@@ -1022,11 +1327,25 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
         }
     }
 
-    const auto considerTarget = [&](C_CSPlayerPawn* pawn, int bone, Vector_t target) {
+    const auto considerTarget = [&](C_CSPlayerPawn* pawn, int bone, int bonePriority, Vector_t target) {
         ++bonesTested;
         if (C_GET(bool, Vars.legit_ui_prediction))
             target += pawn->GetAbsVelocity() *
                 (std::clamp(C_GET(float, Vars.legit_ui_prediction_ms), 0.f, 250.f) / 1000.f);
+
+        if (visibilityCheck)
+        {
+            TRACE::NativeResult trace{};
+            if (!TRACE::NativeLine(localEye, target, localPawn, trace) ||
+                (trace.hit && trace.entity != pawn))
+            {
+                if (diagnose)
+                    LegitLog("[%llu] candidate rejected visibility pawn=%p bone=%d hit=%d entity=%p fraction=%.3f",
+                        static_cast<unsigned long long>(currentSequence), pawn, bone,
+                        trace.hit, trace.entity, trace.fraction);
+                return;
+            }
+        }
 
         const Vector_t difference = target - localEye;
         const float horizontal = std::hypot(difference.x, difference.y);
@@ -1042,6 +1361,17 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
         const float fov = std::hypot(delta.x, delta.y);
         if (!std::isfinite(fov))
             return;
+        const float distance = difference.Length();
+        float targetScore = fov;
+        if (targetSelection == 1)
+            targetScore = distance;
+        else if (targetSelection == 2)
+            targetScore = static_cast<float>(pawn->GetHealth());
+        // Priority mode makes the enabled hitbox order decisive; nearest mode
+        // lets angular proximity choose the point on the selected target.
+        const float score = hitboxMode == 0
+            ? static_cast<float>(bonePriority) * 100000.f + targetScore
+            : targetScore + fov * 0.001f;
         ++validCandidates;
 
         if (diagnose)
@@ -1054,11 +1384,11 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
         const std::uintptr_t pawnAddress = reinterpret_cast<std::uintptr_t>(pawn);
         if (pawnAddress == lockedPawn && bone == lockedBone && fov <= lockBreakFov)
         {
-            lockedCandidate = {pawnAddress, bone, delta, fov, true};
+            lockedCandidate = {pawnAddress, bone, delta, fov, score, true};
         }
-        if (fov <= acquisitionFov && fov < bestCandidate.fov)
+        if (fov <= acquisitionFov && score < bestCandidate.score)
         {
-            bestCandidate = {pawnAddress, bone, delta, fov, true};
+            bestCandidate = {pawnAddress, bone, delta, fov, score, true};
         }
     };
 
@@ -1085,17 +1415,18 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
             C_GET(bool, Vars.legit_ui_bone_legs) ? 26 : -1,
         };
         bool foundBone = false;
-        for (const int bone : candidates)
+        for (int candidateIndex = 0; candidateIndex < static_cast<int>(std::size(candidates)); ++candidateIndex)
         {
+            const int bone = candidates[candidateIndex];
             Vector_t target{};
             if (bone >= 0 && GetLiveBonePosition(scene, bone, target))
             {
                 foundBone = true;
-                considerTarget(pawn, bone, target);
+                considerTarget(pawn, bone, candidateIndex, target);
             }
         }
         if (!foundBone)
-            considerTarget(pawn, -1, scene->GetAbsOrigin() + pawn->m_vecViewOffset());
+            considerTarget(pawn, -1, 99, scene->GetAbsOrigin() + pawn->m_vecViewOffset());
     }
 
     AimCandidate chosen = lockedCandidate.valid ? lockedCandidate : bestCandidate;
@@ -1137,14 +1468,24 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
     previousDeltaPawn = chosen.pawn;
     previousDeltaBone = chosen.bone;
 
-    if (C_GET(bool, Vars.legit_ui_auto_shoot) && chosen.fov < 2.f && I::Input != nullptr)
-        *reinterpret_cast<std::uint64_t*>(reinterpret_cast<std::uint8_t*>(I::Input) + 0x240) |= 1ULL;
+    if (reactionMs > 0.f && now - lockStartedAt < static_cast<std::uint64_t>(reactionMs))
+    {
+        ClearNativeAimDelta();
+        if (diagnose) LegitLog("[%llu] REACTION_WAIT target=%p elapsed=%llu required=%.0f",
+            static_cast<unsigned long long>(currentSequence),
+            reinterpret_cast<void*>(chosen.pawn),
+            static_cast<unsigned long long>(now - lockStartedAt), reactionMs);
+        return;
+    }
+
+    AddNativeCombatInput(C_GET(bool, Vars.legit_ui_auto_shoot) && chosen.fov < 2.f,
+        false, false, false);
 
     // A sub-count dead zone prevents the bot from constantly correcting bone
     // animation/noise after it is already centered.
     if (chosen.fov <= angularDeadZone)
     {
-        stopAim(false);
+        ClearNativeAimDelta();
         LegitLog("[%llu] CENTERED target=%p bone=%d fov=%.4f deadzone=%.4f no movement needed",
             static_cast<unsigned long long>(currentSequence),
             reinterpret_cast<void*>(chosen.pawn), chosen.bone, chosen.fov, angularDeadZone);
@@ -1154,7 +1495,7 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
     // Exponential response is stable across frame rates. Clamp hitch time and
     // per-sample angular motion so a stalled frame can never produce a snap.
     const float smoothnessSeconds = std::max(0.005f,
-        C_GET(float, Vars.legit_ui_smoothness) / 1000.f);
+        configuredSmoothness / 1000.f);
     const float frameSeconds = std::clamp(ImGui::GetIO().DeltaTime, 0.001f, 1.f / 30.f);
     const float baseResponse = 1.f - std::exp(-frameSeconds / smoothnessSeconds);
 
@@ -1207,15 +1548,9 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
     bool presentWrite = false;
     bool readbackVerified = false;
     QAngle_t readback{};
-    if (angleDestination != nullptr && !inputHookInstalled)
-    {
-        *angleDestination = result;
-        presentWrite = true;
-        readback = *angleDestination;
-        readbackVerified = usableAngle(readback) &&
-            std::fabs(readback.x - result.x) < 0.001f &&
-            std::fabs(std::remainder(readback.y - result.y, 360.f)) < 0.001f;
-    }
+    // No render-thread fallback writes: without the verified command hook the
+    // feature fails closed instead of mutating a pawn field at an arbitrary
+    // point in the frame.
     // Discard any legacy SDL correction before publishing this frame's single
     // authoritative CreateMove angle update.
     ClearNativeAimDelta();
@@ -1228,7 +1563,7 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
         reinterpret_cast<void*>(chosen.pawn), chosen.bone,
         controllersScanned, enemiesScanned, bonesTested, validCandidates,
         chosen.fov, chosen.delta.x, chosen.delta.y,
-        C_GET(float, Vars.legit_ui_smoothness), frameSeconds, response,
+        configuredSmoothness, frameSeconds, response,
         accelerationFactor, decelerationFactor, recovering,
         stepPitch, stepYaw, result.x, result.y, angleDestination,
         inputHookInstalled, presentWrite, readback.x, readback.y, readbackVerified,
@@ -1236,14 +1571,197 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
         GetNativeCreateMoveCalls(), GetNativeAimAngleApplications(), angleSource);
 }
 
+void ApplyNativeTriggerAndRecoil(CGameEntitySystem* entities,
+    CCSPlayerController* localController, C_CSPlayerPawn* localPawn)
+{
+    static C_CSPlayerPawn* triggerTarget = nullptr;
+    static int triggerBone = -1;
+    static std::uint64_t triggerAcquiredAt = 0;
+    static QAngle_t previousPunch{};
+
+    if (entities == nullptr || localController == nullptr || localPawn == nullptr ||
+        localPawn->GetHealth() <= 0 || MENU::bMainWindowOpened)
+    {
+        triggerTarget = nullptr;
+        triggerBone = -1;
+        triggerAcquiredAt = 0;
+        previousPunch = {};
+        return;
+    }
+
+    static const std::uint32_t viewAngleOffset =
+        SCHEMA::GetOffset("C_BasePlayerPawn->v_angle");
+    QAngle_t current{};
+    if (viewAngleOffset != 0)
+        SafeNativeRead(reinterpret_cast<const std::uint8_t*>(localPawn) + viewAngleOffset, current);
+    if (!current.IsValid() && native_view_angles != nullptr)
+        SafeNativeRead(native_view_angles, current);
+    if (!current.IsValid())
+        return;
+
+    const std::uint64_t now = SDL_GetTicks();
+    if (C_GET(bool, Vars.trigger_ui_enable) &&
+        IsNativeButtonDown(C_GET(int, Vars.trigger_ui_key)))
+    {
+        const bool traceBlocked = C_GET(bool, Vars.trigger_ui_visibility_check) &&
+            !TRACE::NativeReady();
+        bool smokeBlocked = false;
+        if (C_GET(bool, Vars.trigger_ui_smoke_check))
+        {
+            static const std::uint32_t smokeOverlayOffset =
+                SCHEMA::GetOffset("C_CSPlayerPawnBase->m_flLastSmokeOverlayAlpha");
+            float overlay = 0.f;
+            smokeBlocked = smokeOverlayOffset != 0 && SafeNativeRead(
+                reinterpret_cast<const std::uint8_t*>(localPawn) + smokeOverlayOffset, overlay) &&
+                std::isfinite(overlay) && overlay > 0.05f;
+        }
+
+        std::string weaponName;
+        int ammo = 0, maximumAmmo = 0;
+        GetWeaponDisplay(entities, localPawn, weaponName, ammo, maximumAmmo);
+        const int weaponGroup = GetRageWeaponGroup(weaponName);
+        bool scopeBlocked = false;
+        if (C_GET(bool, Vars.trigger_ui_scoped_only) && weaponGroup >= 4)
+        {
+            static const std::uint32_t scopedOffset =
+                SCHEMA::GetOffset("C_CSPlayerPawnBase->m_bIsScoped");
+            std::uint8_t scoped = 0;
+            scopeBlocked = scopedOffset == 0 || !SafeNativeRead(
+                reinterpret_cast<const std::uint8_t*>(localPawn) + scopedOffset, scoped) || scoped != 1;
+        }
+
+        CGameSceneNode* localScene = localPawn->GetGameSceneNode();
+        C_CSPlayerPawn* bestPawn = nullptr;
+        int bestBone = -1;
+        float bestFov = 9999.f;
+        if (!traceBlocked && !smokeBlocked && !scopeBlocked && localScene != nullptr)
+        {
+            const Vector_t eye = localScene->GetAbsOrigin() + localPawn->m_vecViewOffset();
+            const unsigned int mask = C_GET(unsigned int, Vars.trigger_ui_hitboxes);
+            const struct { int bone; unsigned int bit; } bones[] = {
+                {5, 1U << 0}, {3, 1U << 1}, {6, 1U << 1},
+                {9, 1U << 2}, {14, 1U << 2}, {23, 1U << 3}, {26, 1U << 3}
+            };
+            constexpr float degrees = 180.f / 3.14159265358979323846f;
+            for (int index = 1; index <= 128; ++index)
+            {
+                CCSPlayerController* controller = entities->Get<CCSPlayerController>(index);
+                if (controller == nullptr || controller == localController)
+                    continue;
+                C_CSPlayerPawn* pawn = entities->Get<C_CSPlayerPawn>(controller->GetPawnHandle());
+                if (pawn == nullptr || pawn->GetHealth() <= 0 || pawn->GetTeam() == localPawn->GetTeam())
+                    continue;
+                CGameSceneNode* scene = pawn->GetGameSceneNode();
+                if (scene == nullptr || scene->IsDormant())
+                    continue;
+                for (const auto& candidate : bones)
+                {
+                    if ((mask & candidate.bit) == 0)
+                        continue;
+                    Vector_t point{};
+                    if (!GetLiveBonePosition(scene, candidate.bone, point))
+                        continue;
+                    if (C_GET(bool, Vars.trigger_ui_visibility_check))
+                    {
+                        TRACE::NativeResult trace{};
+                        if (!TRACE::NativeLine(eye, point, localPawn, trace) ||
+                            (trace.hit && trace.entity != pawn))
+                            continue;
+                    }
+                    const Vector_t deltaPosition = point - eye;
+                    const float horizontal = std::hypot(deltaPosition.x, deltaPosition.y);
+                    if (horizontal < 0.001f)
+                        continue;
+                    const float pitch = -std::atan2(deltaPosition.z, horizontal) * degrees;
+                    const float yaw = std::atan2(deltaPosition.y, deltaPosition.x) * degrees;
+                    const float fov = std::hypot(std::remainder(pitch - current.x, 360.f),
+                        std::remainder(yaw - current.y, 360.f));
+                    const float angularRadius = candidate.bone == 5 ? 0.38f : 0.55f;
+                    if (std::isfinite(fov) && fov <= angularRadius && fov < bestFov)
+                    {
+                        bestPawn = pawn;
+                        bestBone = candidate.bone;
+                        bestFov = fov;
+                    }
+                }
+            }
+        }
+
+        if (bestPawn != triggerTarget || bestBone != triggerBone)
+        {
+            triggerTarget = bestPawn;
+            triggerBone = bestBone;
+            triggerAcquiredAt = now;
+        }
+        const float delay = std::clamp(C_GET(float, Vars.trigger_ui_delay_ms), 0.f, 500.f);
+        const bool fire = bestPawn != nullptr && now - triggerAcquiredAt >=
+            static_cast<std::uint64_t>(delay);
+        if (fire)
+            AddNativeCombatInput(true, false, false, false);
+
+        if (C_GET(bool, Vars.trigger_ui_diagnostics))
+        {
+            static std::uint64_t nextLog = 0;
+            if (now >= nextLog)
+            {
+                nextLog = now + 250;
+                LegitLog("[trigger] target=%p bone=%d fov=%.3f elapsed=%llu delay=%.0f fire=%d blocked=trace:%d smoke:%d scope:%d hook=%d",
+                    bestPawn, bestBone, bestFov,
+                    static_cast<unsigned long long>(bestPawn ? now - triggerAcquiredAt : 0),
+                    delay, fire, traceBlocked, smokeBlocked, scopeBlocked,
+                    IsNativeInputHookInstalled());
+            }
+        }
+    }
+    else
+    {
+        triggerTarget = nullptr;
+        triggerBone = -1;
+        triggerAcquiredAt = 0;
+    }
+
+    if (!C_GET(bool, Vars.recoil_ui_enable) || localPawn->GetShotsFired() <= 1 ||
+        native_aim_command_queued || !IsNativeInputHookInstalled())
+    {
+        previousPunch = {};
+        return;
+    }
+
+    static const std::uint32_t punchOffset =
+        SCHEMA::GetOffset("CPlayer_CameraServices->m_vecCsViewPunchAngle");
+    CPlayer_CameraServices* camera = localPawn->GetCameraServices();
+    QAngle_t punch{};
+    if (camera == nullptr || punchOffset == 0 || !SafeNativeRead(
+            reinterpret_cast<const std::uint8_t*>(camera) + punchOffset, punch) ||
+        !punch.IsValid())
+        return;
+
+    const QAngle_t punchDelta(punch.x - previousPunch.x, punch.y - previousPunch.y, 0.f);
+    previousPunch = punch;
+    const float smoothingSeconds = std::max(0.001f,
+        C_GET(float, Vars.recoil_ui_smoothing_ms) / 1000.f);
+    const float dt = std::clamp(ImGui::GetIO().DeltaTime, 0.001f, 1.f / 30.f);
+    const float response = std::clamp(1.f - std::exp(-dt / smoothingSeconds), 0.f, 1.f);
+    QAngle_t result(current.x - punchDelta.x * 2.f * response,
+        current.y - punchDelta.y * 2.f * response, 0.f);
+    result.Clamp();
+    native_aim_command_queued = QueueNativeAimAngles(
+        localPawn, result.x, result.y, result.z);
+}
+
 void ApplyNativeAntiAim(C_CSPlayerPawn* localPawn)
 {
     if (!C_GET(bool, Vars.bAntiAim) || native_aim_command_queued ||
-        MENU::bMainWindowOpened || localPawn == nullptr || localPawn->GetHealth() <= 0)
+        MENU::bMainWindowOpened || localPawn == nullptr || localPawn->GetHealth() <= 0 ||
+        IsNativeCombatAttackRequested() || IsNativeButtonDown(VK_LBUTTON))
         return;
 
-    const int pitchType = std::clamp(C_GET(int, Vars.iPitchType), 0, 3);
-    const int yawType = std::clamp(C_GET(int, Vars.iBaseYawType), 0, 2);
+    const bool* keys = SDL_GetKeyboardState(nullptr);
+    if (C_GET(bool, Vars.antiaim_disable_use) && keys != nullptr && keys[SDL_SCANCODE_E])
+        return;
+
+    const int pitchType = std::clamp(C_GET(int, Vars.iPitchType), 0, 4);
+    const int yawType = std::clamp(C_GET(int, Vars.iBaseYawType), 0, 4);
     if (pitchType == 0 && yawType == 0)
         return;
 
@@ -1252,25 +1770,74 @@ void ApplyNativeAntiAim(C_CSPlayerPawn* localPawn)
     QAngle_t* destination = pawnViewAngleOffset != 0
         ? reinterpret_cast<QAngle_t*>(reinterpret_cast<std::uint8_t*>(localPawn) + pawnViewAngleOffset)
         : native_view_angles;
-    if (destination == nullptr || !destination->IsValid())
+    QAngle_t current{};
+    if (destination == nullptr || !SafeNativeRead(destination, current) || !current.IsValid())
         return;
 
-    QAngle_t result = *destination;
+    QAngle_t result = current;
     switch (pitchType)
     {
     case 1: result.x = 89.f; break;
     case 2: result.x = -89.f; break;
     case 3: result.x = 0.f; break;
+    case 4: result.x = std::clamp(C_GET(float, Vars.antiaim_custom_pitch), -89.f, 89.f); break;
     default: break;
     }
     if (yawType == 1)
         result.y = std::remainder(result.y + 180.f, 360.f);
+    else if (yawType == 3)
+        result.y = std::remainder(result.y + 90.f, 360.f);
+    else if (yawType == 4)
+        result.y = std::remainder(result.y +
+            std::clamp(C_GET(float, Vars.antiaim_custom_yaw), -180.f, 180.f), 360.f);
     // Forward yaw intentionally preserves the current yaw.
+
+    const Vector_t velocity = localPawn->GetAbsVelocity();
+    const float speed = std::hypot(velocity.x, velocity.y);
+    const bool onGround = (localPawn->GetFlags() & FL_ONGROUND) != 0;
+    const bool crouching = (localPawn->GetFlags() & FL_DUCKING) != 0;
+    int profile = 0; // standing
+    if (!onGround)
+        profile = 2;
+    else if (crouching)
+        profile = 3;
+    else if (speed > 5.f && speed < 110.f)
+        profile = 4;
+    else if (speed >= 5.f)
+        profile = 1;
+    if (C_GET_ARRAY(bool, 5, Vars.antiaim_profile_enable, profile))
+        result.y = std::remainder(result.y +
+            C_GET_ARRAY(float, 5, Vars.antiaim_profile_yaw, profile), 360.f);
+
+    const bool manualBack = IsNativeButtonDown(C_GET(int, Vars.antiaim_manual_back_key));
+    const bool manualForward = IsNativeButtonDown(C_GET(int, Vars.antiaim_manual_forward_key));
+    if (manualBack)
+        result.y = std::remainder(current.y + 180.f, 360.f);
+    else if (manualForward)
+        result.y = current.y;
+
+    float jitterAmount = std::clamp(C_GET(float, Vars.antiaim_jitter_amount), 0.f, 180.f);
+    if (C_GET_ARRAY(bool, 5, Vars.antiaim_profile_enable, profile))
+        jitterAmount = std::clamp(C_GET_ARRAY(float, 5, Vars.antiaim_profile_jitter, profile), 0.f, 180.f);
+    const int jitterMode = std::clamp(C_GET(int, Vars.antiaim_jitter_mode), 0, 2);
+    if (!manualBack && !manualForward && jitterMode == 1)
+        result.y = std::remainder(result.y + ((frame_counter & 1U) ? jitterAmount : -jitterAmount), 360.f);
+    else if (!manualBack && !manualForward && jitterMode == 2)
+    {
+        const std::uint32_t mixed = static_cast<std::uint32_t>(
+            frame_counter * 1664525ULL + 1013904223ULL);
+        const float unit = static_cast<float>(mixed & 0xFFFFU) / 32767.5f - 1.f;
+        result.y = std::remainder(result.y + unit * jitterAmount, 360.f);
+    }
+    if (!manualBack && !manualForward && C_GET(bool, Vars.antiaim_spin))
+    {
+        const float seconds = static_cast<float>(SDL_GetTicks()) / 1000.f;
+        result.y = std::remainder(result.y + seconds *
+            std::clamp(C_GET(float, Vars.antiaim_spin_speed), 1.f, 720.f), 360.f);
+    }
     result.z = 0.f;
     result.Clamp();
 
-    if (!IsNativeInputHookInstalled())
-        *destination = result;
     const bool queued = QueueNativeAimAngles(
         destination, result.x, result.y, result.z);
     native_aim_command_queued = queued;
@@ -1280,8 +1847,9 @@ void ApplyNativeAntiAim(C_CSPlayerPawn* localPawn)
     if (now >= nextLog)
     {
         nextLog = now + 2000;
-        LegitLog("[antiaim] pitch_type=%d yaw_type=%d result=(%.1f,%.1f) destination=%p hook=%d queued=%d",
-            pitchType, yawType, result.x, result.y, destination,
+        LegitLog("[antiaim] pitch_type=%d yaw_type=%d profile=%d speed=%.1f jitter=%d/%.1f manual=%d/%d spin=%d result=(%.1f,%.1f) destination=%p hook=%d queued=%d",
+            pitchType, yawType, profile, speed, jitterMode, jitterAmount,
+            manualBack, manualForward, C_GET(bool, Vars.antiaim_spin), result.x, result.y, destination,
             IsNativeInputHookInstalled(), queued);
     }
 }
@@ -1306,9 +1874,9 @@ void ApplyNativeRage(CGameEntitySystem* entities, CCSPlayerController* localCont
     QAngle_t* destination = pawnViewAngleOffset != 0
         ? reinterpret_cast<QAngle_t*>(reinterpret_cast<std::uint8_t*>(localPawn) + pawnViewAngleOffset)
         : native_view_angles;
-    if (destination == nullptr || !destination->IsValid())
+    QAngle_t current{};
+    if (destination == nullptr || !SafeNativeRead(destination, current) || !current.IsValid())
         return;
-    const QAngle_t current = *destination;
 
     std::string activeWeapon;
     int ammo = 0;
@@ -1318,14 +1886,56 @@ void ApplyNativeRage(CGameEntitySystem* entities, CCSPlayerController* localCont
     const bool hitscan = C_GET(bool, Vars.rage_hitscan);
     const int selection = std::clamp(
         C_GET_ARRAY(int, 7, Vars.rage_target_select, weaponGroup), 0, 2);
+    const bool ballisticsRequested = selection == 1 ||
+        C_GET_ARRAY(int, 7, Vars.rage_minimum_damage, weaponGroup) > 0 ||
+        C_GET_ARRAY(bool, 7, Vars.rage_hitchance, weaponGroup) ||
+        C_GET_ARRAY(bool, 7, Vars.rage_penetration, weaponGroup) ||
+        C_GET_ARRAY(bool, 7, Vars.rage_lethal_body, weaponGroup) ||
+        C_GET_ARRAY(bool, 7, Vars.rage_prefer_high_damage, weaponGroup) ||
+        C_GET_ARRAY(bool, 7, Vars.rage_delay_accurate, weaponGroup);
+    if (ballisticsRequested && C_GET(bool, Vars.rage_shot_logging))
+    {
+        static std::uint64_t nextBallisticsLog = 0;
+        if (SDL_GetTicks() >= nextBallisticsLog)
+        {
+            nextBallisticsLog = SDL_GetTicks() + 500;
+            LegitLog("[rage] HOLD reason=native_ballistics_unavailable trace_ready=%d selection=%d mindamage=%d hitchance=%d penetration=%d",
+                TRACE::NativeReady(), selection,
+                C_GET_ARRAY(int, 7, Vars.rage_minimum_damage, weaponGroup),
+                C_GET_ARRAY(bool, 7, Vars.rage_hitchance, weaponGroup),
+                C_GET_ARRAY(bool, 7, Vars.rage_penetration, weaponGroup));
+        }
+    }
+
+    // Damage ranking needs a real damage/penetration simulation. Keep target
+    // acquisition and bounded aim assistance available for an old config that
+    // requests it, but rank by angular distance and hold every combat input.
+    // This makes the unsupported part fail closed without making Rage appear
+    // completely dead after loading such a profile.
+    const int selectionForScoring = selection == 1 ? 2 : selection;
+
+    const bool forceBody = IsNativeButtonDown(C_GET(int, Vars.rage_force_body_key));
+    const bool forceHead = IsNativeButtonDown(C_GET(int, Vars.rage_force_head_key));
+    const bool preferExposed = C_GET_ARRAY(bool, 7, Vars.rage_prefer_exposed, weaponGroup);
+    const bool requireVisible = C_GET_ARRAY(bool, 7, Vars.rage_delay_visible, weaponGroup);
+    if ((preferExposed || requireVisible) && !TRACE::NativeReady())
+    {
+        ClearNativeAimDelta();
+        return;
+    }
+    const bool multipoint = C_GET_ARRAY(bool, 7, Vars.rage_multipoint, weaponGroup);
+    const float multipointScale = std::clamp(
+        C_GET_ARRAY(float, 7, Vars.rage_multipoint_scale, weaponGroup), 10.f, 100.f) / 100.f;
 
     struct Candidate
     {
         C_CSPlayerPawn* pawn = nullptr;
         int bone = -1;
         QAngle_t delta{};
+        Vector_t point{};
         float fov = 9999.f;
         float score = 9999999.f;
+        int health = 0;
     } best;
     constexpr float degrees = 180.f / 3.14159265358979323846f;
     int pawnsScanned = 0;
@@ -1354,15 +1964,15 @@ void ApplyNativeRage(CGameEntitySystem* entities, CCSPlayerController* localCont
             C_GET_ARRAY(bool, 7, Vars.hitbox_legs, weaponGroup) ||
             C_GET_ARRAY(bool, 7, Vars.hitbox_feet, weaponGroup);
         const int bones[] = {
-            (!anyConfigured || C_GET_ARRAY(bool, 7, Vars.hitbox_head, weaponGroup)) ? 5 : -1,
-            C_GET_ARRAY(bool, 7, Vars.hitbox_neck, weaponGroup) ? 4 : -1,
-            C_GET_ARRAY(bool, 7, Vars.hitbox_uppeer_chest, weaponGroup) ? 3 : -1,
-            C_GET_ARRAY(bool, 7, Vars.hitbox_chest, weaponGroup) ? 6 : -1,
-            C_GET_ARRAY(bool, 7, Vars.hitbox_stomach, weaponGroup) ? 2 : -1,
-            C_GET_ARRAY(bool, 7, Vars.hitbox_legs, weaponGroup) ? 23 : -1,
-            C_GET_ARRAY(bool, 7, Vars.hitbox_legs, weaponGroup) ? 26 : -1,
-            C_GET_ARRAY(bool, 7, Vars.hitbox_feet, weaponGroup) ? 27 : -1,
-            C_GET_ARRAY(bool, 7, Vars.hitbox_feet, weaponGroup) ? 30 : -1,
+            (!forceBody && (forceHead || !anyConfigured || C_GET_ARRAY(bool, 7, Vars.hitbox_head, weaponGroup))) ? 5 : -1,
+            (!forceBody && !forceHead && C_GET_ARRAY(bool, 7, Vars.hitbox_neck, weaponGroup)) ? 4 : -1,
+            (!forceHead && (forceBody || C_GET_ARRAY(bool, 7, Vars.hitbox_uppeer_chest, weaponGroup))) ? 3 : -1,
+            (!forceHead && (forceBody || C_GET_ARRAY(bool, 7, Vars.hitbox_chest, weaponGroup))) ? 6 : -1,
+            (!forceHead && (forceBody || C_GET_ARRAY(bool, 7, Vars.hitbox_stomach, weaponGroup))) ? 2 : -1,
+            (!forceHead && !forceBody && C_GET_ARRAY(bool, 7, Vars.hitbox_legs, weaponGroup)) ? 23 : -1,
+            (!forceHead && !forceBody && C_GET_ARRAY(bool, 7, Vars.hitbox_legs, weaponGroup)) ? 26 : -1,
+            (!forceHead && !forceBody && C_GET_ARRAY(bool, 7, Vars.hitbox_feet, weaponGroup)) ? 27 : -1,
+            (!forceHead && !forceBody && C_GET_ARRAY(bool, 7, Vars.hitbox_feet, weaponGroup)) ? 30 : -1,
         };
 
         for (const int bone : bones)
@@ -1370,23 +1980,54 @@ void ApplyNativeRage(CGameEntitySystem* entities, CCSPlayerController* localCont
             Vector_t target{};
             if (bone < 0 || !GetLiveBonePosition(scene, bone, target))
                 continue;
-            ++pointsScanned;
-            const Vector_t difference = target - localEye;
-            const float horizontal = std::hypot(difference.x, difference.y);
-            if (horizontal < 0.001f)
-                continue;
-            QAngle_t wanted(-std::atan2(difference.z, horizontal) * degrees,
-                             std::atan2(difference.y, difference.x) * degrees, 0.f);
-            const QAngle_t delta(std::remainder(wanted.x - current.x, 360.f),
-                                 std::remainder(wanted.y - current.y, 360.f), 0.f);
-            const float fov = std::hypot(delta.x, delta.y);
-            float score = fov;
-            if (selection == 0)
-                score = difference.Length();
-            else if (selection == 1)
-                score = static_cast<float>(pawn->GetHealth()) + (bone == 5 ? -20.f : 0.f);
-            if (std::isfinite(score) && score < best.score)
-                best = { pawn, bone, delta, fov, score };
+            std::array<Vector_t, 5> points{target, target, target, target, target};
+            int pointCount = 1;
+            if (multipoint)
+            {
+                const Vector_t toTarget = target - localEye;
+                const float length2d = std::hypot(toTarget.x, toTarget.y);
+                if (length2d > 0.001f)
+                {
+                    const float approximateRadius = (bone == 5 ? 3.5f :
+                        (bone == 2 || bone == 3 || bone == 6 ? 5.5f : 3.f)) * multipointScale;
+                    const Vector_t right(-toTarget.y / length2d, toTarget.x / length2d, 0.f);
+                    points[1] = target + right * approximateRadius;
+                    points[2] = target - right * approximateRadius;
+                    points[3] = target + Vector_t(0.f, 0.f, approximateRadius * 0.6f);
+                    points[4] = target - Vector_t(0.f, 0.f, approximateRadius * 0.6f);
+                    pointCount = 5;
+                }
+            }
+            for (int pointIndex = 0; pointIndex < pointCount; ++pointIndex)
+            {
+                ++pointsScanned;
+                bool exposed = false;
+                if (preferExposed || requireVisible)
+                {
+                    TRACE::NativeResult trace{};
+                    if (!TRACE::NativeLine(localEye, points[pointIndex], localPawn, trace))
+                        continue;
+                    exposed = !trace.hit || trace.entity == pawn;
+                    if (requireVisible && !exposed)
+                        continue;
+                }
+                const Vector_t difference = points[pointIndex] - localEye;
+                const float horizontal = std::hypot(difference.x, difference.y);
+                if (horizontal < 0.001f)
+                    continue;
+                QAngle_t wanted(-std::atan2(difference.z, horizontal) * degrees,
+                                 std::atan2(difference.y, difference.x) * degrees, 0.f);
+                const QAngle_t delta(std::remainder(wanted.x - current.x, 360.f),
+                                     std::remainder(wanted.y - current.y, 360.f), 0.f);
+                const float fov = std::hypot(delta.x, delta.y);
+                float score = selectionForScoring == 0 ? difference.Length() : fov;
+                if (C_GET_ARRAY(bool, 7, Vars.rage_prefer_low_health, weaponGroup))
+                    score += static_cast<float>(pawn->GetHealth()) * 4.f;
+                if (preferExposed && !exposed)
+                    score += 100000.f;
+                if (std::isfinite(score) && score < best.score)
+                    best = { pawn, bone, delta, points[pointIndex], fov, score, pawn->GetHealth() };
+            }
             if (!hitscan)
                 break;
         }
@@ -1406,21 +2047,56 @@ void ApplyNativeRage(CGameEntitySystem* entities, CCSPlayerController* localCont
     QAngle_t result(current.x + stepPitch, current.y + stepYaw, 0.f);
     result.Clamp();
 
-    if (!IsNativeInputHookInstalled())
-        *destination = result;
+    bool scoped = false;
+    static const std::uint32_t scopedOffset =
+        SCHEMA::GetOffset("C_CSPlayerPawnBase->m_bIsScoped");
+    std::uint8_t scopedRaw = 0;
+    scoped = scopedOffset != 0 && SafeNativeRead(
+        reinterpret_cast<const std::uint8_t*>(localPawn) + scopedOffset, scopedRaw) && scopedRaw == 1;
+    const bool requestScope = !ballisticsRequested && weaponGroup >= 4 &&
+        C_GET_ARRAY(bool, 7, Vars.rage_auto_scope, weaponGroup) && !scoped;
+    const bool centered = best.fov <= 0.35f;
+    const bool requestAttack = !ballisticsRequested && centered &&
+        C_GET(bool, Vars.rage_auto_shoot) && !requestScope;
+    const bool requestCrouch = !ballisticsRequested &&
+        C_GET_ARRAY(bool, 7, Vars.rage_auto_crouch, weaponGroup);
+    const bool requestStop = !ballisticsRequested &&
+        C_GET_ARRAY(bool, 7, Vars.rage_auto_stop, weaponGroup);
+    AddNativeCombatInput(requestAttack, requestCrouch, requestScope, requestStop);
+
     ClearNativeAimDelta();
     const bool queued = QueueNativeAimAngles(destination, result.x, result.y, 0.f);
     native_aim_command_queued = queued;
 
+    if (C_GET(bool, Vars.rage_decision_overlay))
+    {
+        ImVec2 screen{};
+        if (D::WorldToScreen(best.point, screen))
+        {
+            char decision[160]{};
+            std::snprintf(decision, sizeof(decision),
+                "RAGE %s | HP %d | FOV %.2f | DMG/HC n/a%s",
+                ballisticsRequested ? "HOLD BALLISTICS" :
+                    (requestAttack ? "FIRE" : (requestScope ? "SCOPE" : "AIM")),
+                best.health, best.fov, TRACE::NativeReady() ? "" : " (trace offline)");
+            DrawOutlinedText(ImGui::GetBackgroundDrawList(), screen + ImVec2(8.f, -18.f),
+                decision, IM_COL32(255, 190, 80, 255), IM_COL32(0, 0, 0, 230));
+        }
+    }
+
     static std::uint64_t nextLog = 0;
     const std::uint64_t now = SDL_GetTicks();
-    if (now >= nextLog)
+    if (C_GET(bool, Vars.rage_shot_logging) && now >= nextLog)
     {
         nextLog = now + 250;
-        LegitLog("[rage] weapon=%s group=%d hitscan=%d selection=%d pawns=%d points=%d target=%p bone=%d fov=%.2f score=%.2f step=(%.2f,%.2f) hook=%d queued=%d",
-            activeWeapon.c_str(), weaponGroup, hitscan, selection, pawnsScanned,
-            pointsScanned, best.pawn, best.bone, best.fov, best.score,
-            stepPitch, stepYaw, IsNativeInputHookInstalled(), queued);
+        LegitLog("[rage] decision=%s weapon=%s group=%d hitscan=%d multipoint=%d selection=%d pawns=%d points=%d target=%p bone=%d hp=%d fov=%.2f score=%.2f step=(%.2f,%.2f) requests=attack:%d crouch:%d scope:%d stop:%d hook=%d queued=%d",
+            ballisticsRequested ? "HOLD_BALLISTICS" :
+                (requestAttack ? "FIRE" : (requestScope ? "SCOPE" : "AIM")),
+            activeWeapon.c_str(), weaponGroup, hitscan, multipoint, selection, pawnsScanned,
+            pointsScanned, best.pawn, best.bone, best.health, best.fov, best.score,
+            stepPitch, stepYaw, requestAttack,
+            requestCrouch, requestScope, requestStop,
+            IsNativeInputHookInstalled(), queued);
     }
 }
 
@@ -1679,6 +2355,11 @@ void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localCont
             }
             continue;
         }
+        // Do not mutate a live econ item if the only known refresh path for
+        // this exact client build is unavailable. Repeated fallback writes
+        // without regeneration previously left half-applied state every frame.
+        if (regenerateWeaponSkins == nullptr)
+            continue;
 
         NativeSkinSettings settings{
             configuredPaint,
@@ -1785,7 +2466,7 @@ void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localCont
     const bool activeProfileSelected = activeDefinition != 0 &&
         activeDefinition < LinuxNativeEsp::SkinWeaponDefinitionCount &&
         C_GET_ARRAY(bool, 1024, Vars.skin_weapon_enable, activeDefinition);
-    const bool activeProfileEnabled = activeProfileSelected &&
+    const bool activeProfileEnabled = regenerateWeaponSkins != nullptr && activeProfileSelected &&
         C_GET(bool, Vars.skin_ui_enable) &&
         C_GET_ARRAY(int, 1024, Vars.skin_weapon_paint_kit, activeDefinition) > 0;
     if (viewModel != nullptr && activeProfileEnabled)
@@ -1824,8 +2505,9 @@ void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localCont
     {
         for (AppliedWeaponSkin* state : appliedThisPass)
         {
-            auto* base = reinterpret_cast<std::uint8_t*>(state->weapon);
-            *reinterpret_cast<std::int32_t*>(base + paintKit) = -1;
+            // Keep fallback fields on the owned weapon for its whole lifetime.
+            // Clearing the paint kit immediately after material regeneration
+            // made the override disappear on later model/material refreshes.
             state->applied = true;
         }
         for (AppliedWeaponSkin* state : restoredThisPass)
@@ -1854,6 +2536,379 @@ void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localCont
         native_skin_runtime_status = NativeSkinRuntimeStatus::Refreshed;
     else
         native_skin_runtime_status = NativeSkinRuntimeStatus::Ready;
+}
+
+void DrawNativeGrenadeTrajectory(CGameEntitySystem* entities, C_CSPlayerPawn* localPawn,
+    ImDrawList* draw)
+{
+    if (!C_GET(bool, Vars.grenade_trajectory) || entities == nullptr ||
+        localPawn == nullptr || draw == nullptr)
+        return;
+
+    std::string weaponName;
+    int ammo = 0, maximumAmmo = 0;
+    C_CSWeaponBase* weapon = nullptr;
+    if (!GetWeaponDisplay(entities, localPawn, weaponName, ammo, maximumAmmo, &weapon) ||
+        weapon == nullptr)
+        return;
+    const bool isGrenade = weaponName == "flashbang" || weaponName == "hegrenade" ||
+        weaponName == "smokegrenade" || weaponName == "molotov" ||
+        weaponName == "incgrenade" || weaponName == "decoy";
+    if (!isGrenade)
+        return;
+    if (!TRACE::NativeReady())
+    {
+        static bool loggedUnavailable = false;
+        if (!loggedUnavailable)
+        {
+            EspLog("[GRENADE] trajectory held because native trace self-test has not passed");
+            loggedUnavailable = true;
+        }
+        return;
+    }
+
+    CGameSceneNode* scene = localPawn->GetGameSceneNode();
+    if (scene == nullptr)
+        return;
+    QAngle_t view{};
+    static const std::uint32_t viewAngleOffset =
+        SCHEMA::GetOffset("C_BasePlayerPawn->v_angle");
+    if (viewAngleOffset != 0)
+        SafeNativeRead(reinterpret_cast<const std::uint8_t*>(localPawn) + viewAngleOffset, view);
+    if (!view.IsValid() && native_view_angles != nullptr)
+        SafeNativeRead(native_view_angles, view);
+    if (!view.IsValid())
+        return;
+
+    static const std::uint32_t throwStrengthOffset =
+        SCHEMA::GetOffset("C_BaseCSGrenade->m_flThrowStrength");
+    static const std::uint32_t throwVelocityOffset =
+        SCHEMA::GetOffset("CCSWeaponBaseVData->m_flThrowVelocity");
+    const WeaponDisplayOffsets& displayOffsets = GetWeaponDisplayOffsets();
+    if (throwStrengthOffset == 0 || throwVelocityOffset == 0 || !displayOffsets.valid)
+        return;
+    float strength = 1.f;
+    if (!SafeNativeRead(reinterpret_cast<const std::uint8_t*>(weapon) + throwStrengthOffset, strength) ||
+        !std::isfinite(strength) || strength < 0.f || strength > 1.01f)
+        return;
+    strength = std::clamp(strength, 0.f, 1.f);
+    void* weaponData = nullptr;
+    float throwVelocity = 0.f;
+    if (!SafeNativeRead(reinterpret_cast<const std::uint8_t*>(weapon) +
+            displayOffsets.subclassId + sizeof(void*), weaponData) || weaponData == nullptr ||
+        !SafeNativeRead(reinterpret_cast<const std::uint8_t*>(weaponData) +
+            throwVelocityOffset, throwVelocity) || !std::isfinite(throwVelocity) ||
+        throwVelocity < 100.f || throwVelocity > 2000.f)
+        return;
+
+    float gravity = 800.f;
+    static CConVar* gravityConvar = nullptr;
+    if (gravityConvar == nullptr)
+        gravityConvar = CONVAR::Find("sv_gravity");
+    float gravityReadback = 0.f;
+    if (gravityConvar != nullptr && CONVAR::ReadFloat(gravityConvar, gravityReadback) &&
+        std::isfinite(gravityReadback) && gravityReadback >= 100.f && gravityReadback <= 2000.f)
+        gravity = gravityReadback;
+
+    constexpr float radians = 3.14159265358979323846f / 180.f;
+    float adjustedPitch = std::remainder(view.x, 360.f);
+    adjustedPitch -= (90.f - std::fabs(adjustedPitch)) * (10.f / 90.f);
+    const float pitch = adjustedPitch * radians;
+    const float yaw = view.y * radians;
+    const Vector_t forward(std::cos(pitch) * std::cos(yaw),
+        std::cos(pitch) * std::sin(yaw), -std::sin(pitch));
+    Vector_t position = scene->GetAbsOrigin() + localPawn->m_vecViewOffset() + forward * 16.f;
+    Vector_t velocity = forward * (throwVelocity * 0.9f * (0.3f + 0.7f * strength)) +
+        localPawn->GetAbsVelocity() * 1.25f;
+    if (!position.IsValid() || !velocity.IsValid())
+        return;
+
+    const float interval = I::GlobalVars != nullptr &&
+        I::GlobalVars->flIntervalPerTick > 0.001f && I::GlobalVars->flIntervalPerTick < 0.1f
+        ? I::GlobalVars->flIntervalPerTick : (1.f / 64.f);
+    float fuse = 3.f;
+    if (weaponName == "flashbang" || weaponName == "hegrenade")
+        fuse = 1.5f;
+    else if (weaponName == "molotov" || weaponName == "incgrenade")
+        fuse = 2.f;
+    const int maximumSteps = std::clamp(static_cast<int>(std::ceil(fuse / interval)), 1, 384);
+    const Vector_t mins(-2.f, -2.f, -2.f);
+    const Vector_t maxs(2.f, 2.f, 2.f);
+    static thread_local std::vector<Vector_t> points;
+    static thread_local std::vector<Vector_t> bounces;
+    points.clear();
+    bounces.clear();
+    if (points.capacity() < static_cast<std::size_t>(maximumSteps) + 1)
+        points.reserve(static_cast<std::size_t>(maximumSteps) + 1);
+    if (bounces.capacity() < 32)
+        bounces.reserve(32);
+    points.push_back(position);
+    for (int step = 0; step < maximumSteps; ++step)
+    {
+        Vector_t next = position + velocity * interval;
+        next.z -= gravity * 0.4f * interval * interval * 0.5f;
+        velocity.z -= gravity * 0.4f * interval;
+        TRACE::NativeResult trace{};
+        if (!TRACE::NativeHull(position, next, mins, maxs, localPawn, trace))
+            return;
+        if (trace.hit)
+        {
+            position = trace.end;
+            points.push_back(position);
+            bounces.push_back(position);
+            const float intoSurface = velocity.Dot(trace.normal);
+            velocity -= trace.normal * (1.f + 0.45f) * intoSurface;
+            velocity *= 0.45f;
+            position += trace.normal * 0.5f;
+            if (velocity.Length() < 20.f || trace.allSolid)
+                break;
+        }
+        else
+        {
+            position = next;
+            points.push_back(position);
+        }
+    }
+    if (points.size() < 2)
+        return;
+
+    const ImU32 color = C_GET(ColorPickerVar_t, Vars.world_esp_color).colValue.GetU32();
+    for (std::size_t index = 1; index < points.size(); ++index)
+    {
+        ImVec2 from{}, to{};
+        if (D::WorldToScreen(points[index - 1], from) && D::WorldToScreen(points[index], to))
+        {
+            draw->AddLine(from, to, IM_COL32(0, 0, 0, 220), 3.f);
+            draw->AddLine(from, to, color, 1.5f);
+        }
+    }
+    if (C_GET(bool, Vars.grenade_bounce_markers))
+    {
+        for (const Vector_t& bounce : bounces)
+        {
+            ImVec2 screen{};
+            if (D::WorldToScreen(bounce, screen))
+                draw->AddCircleFilled(screen, 4.f, color, 12);
+        }
+    }
+    if (C_GET(bool, Vars.grenade_landing_marker))
+    {
+        ImVec2 landing{};
+        if (D::WorldToScreen(points.back(), landing))
+        {
+            draw->AddCircle(landing, 8.f, IM_COL32(0, 0, 0, 230), 24, 3.f);
+            draw->AddCircle(landing, 8.f, color, 24, 1.5f);
+        }
+    }
+}
+
+void DrawNativeWorldEntities(CGameEntitySystem* entities, C_CSPlayerPawn* localPawn,
+    ImDrawList* draw)
+{
+    const bool drawWeapons = C_GET(bool, Vars.dropped_weapon_esp);
+    const bool drawSmoke = C_GET(bool, Vars.smoke_duration_timer);
+    const bool drawMolotov = C_GET(bool, Vars.molotov_expiration_timer);
+    const bool drawBomb = C_GET(bool, Vars.planted_bomb_timer);
+    const bool trackBombChams = C_GET(bool, Vars.chams_bomb);
+    static C_BaseEntity* cachedBombTarget = nullptr;
+    static std::uint64_t nextBombOnlyScan = 0;
+    if ((!drawWeapons && !drawSmoke && !drawMolotov && !drawBomb && !trackBombChams) ||
+        entities == nullptr || localPawn == nullptr || draw == nullptr) {
+        cachedBombTarget = nullptr;
+        NativeChams::UpdateBombTarget(nullptr);
+        return;
+    }
+    const bool bombOnlyScan = trackBombChams && !drawWeapons && !drawSmoke &&
+        !drawMolotov && !drawBomb;
+    const std::uint64_t nowTicks = SDL_GetTicks();
+    if (bombOnlyScan && nowTicks < nextBombOnlyScan) {
+        NativeChams::UpdateBombTarget(cachedBombTarget);
+        return;
+    }
+    // Bomb-only chams does not need thousands of entity/name reads at the
+    // render rate. A 10 Hz refresh reacts within 100 ms while keeping the
+    // present hook light; timer/ESP modes still refresh every frame.
+    if (bombOnlyScan)
+        nextBombOnlyScan = nowTicks + 100;
+    if (!trackBombChams)
+        cachedBombTarget = nullptr;
+    NativeChams::UpdateBombTarget(nullptr);
+
+    static const std::uint32_t identityOffset =
+        SCHEMA::GetOffset("CEntityInstance->m_pEntity");
+    static const std::uint32_t designerNameOffset =
+        SCHEMA::GetOffset("CEntityIdentity->m_designerName");
+    static const std::uint32_t ownerOffset =
+        SCHEMA::GetOffset("C_BaseEntity->m_hOwnerEntity");
+    static const std::uint32_t sceneNodeOffset =
+        SCHEMA::GetOffset("C_BaseEntity->m_pGameSceneNode");
+    static const std::uint32_t sceneOriginOffset =
+        SCHEMA::GetOffset("CGameSceneNode->m_vecAbsOrigin");
+    static const std::uint32_t smokeBeginOffset =
+        SCHEMA::GetOffset("C_SmokeGrenadeProjectile->m_nSmokeEffectTickBegin");
+    static const std::uint32_t infernoBeginOffset =
+        SCHEMA::GetOffset("C_Inferno->m_nFireEffectTickBegin");
+    static const std::uint32_t infernoLifetimeOffset =
+        SCHEMA::GetOffset("C_Inferno->m_nFireLifetime");
+    static const std::uint32_t bombTickingOffset =
+        SCHEMA::GetOffset("C_PlantedC4->m_bBombTicking");
+    static const std::uint32_t bombDefusedOffset =
+        SCHEMA::GetOffset("C_PlantedC4->m_bBombDefused");
+    static const std::uint32_t bombBlowOffset =
+        SCHEMA::GetOffset("C_PlantedC4->m_flC4Blow");
+    static const std::uint32_t bombBeingDefusedOffset =
+        SCHEMA::GetOffset("C_PlantedC4->m_bBeingDefused");
+    static const std::uint32_t bombDefuseOffset =
+        SCHEMA::GetOffset("C_PlantedC4->m_flDefuseCountDown");
+
+    if (identityOffset == 0 || designerNameOffset == 0 ||
+        sceneNodeOffset == 0 || sceneOriginOffset == 0) {
+        cachedBombTarget = nullptr;
+        return;
+    }
+
+    const float currentTime = I::GlobalVars != nullptr &&
+        std::isfinite(I::GlobalVars->flCurtime) ? I::GlobalVars->flCurtime : 0.f;
+    const float tickInterval = I::GlobalVars != nullptr &&
+        I::GlobalVars->flIntervalPerTick > 0.001f && I::GlobalVars->flIntervalPerTick < 0.1f
+        ? I::GlobalVars->flIntervalPerTick : (1.f / 64.f);
+    const ImU32 color = C_GET(ColorPickerVar_t, Vars.world_esp_color).colValue.GetU32();
+    C_BaseEntity* trackedBomb = nullptr;
+
+    // Native entity indices are bucketed in groups of 512. World gameplay
+    // entities stay in the low buckets; a bounded scan avoids relying on the
+    // patch-sensitive highest-index field.
+    for (int index = 1; index < 4096; ++index)
+    {
+        C_BaseEntity* entity = entities->Get<C_BaseEntity>(index);
+        if (entity == nullptr || entity == localPawn)
+            continue;
+        CEntityIdentity* identity = nullptr;
+        const char* rawDesignerName = nullptr;
+        char designerName[96]{};
+        if (!SafeNativeRead(reinterpret_cast<const std::uint8_t*>(entity) + identityOffset, identity) ||
+            identity == nullptr || !SafeNativeRead(
+                reinterpret_cast<const std::uint8_t*>(identity) + designerNameOffset, rawDesignerName) ||
+            rawDesignerName == nullptr)
+            continue;
+        for (std::size_t character = 0; character + 1 < sizeof(designerName); ++character)
+        {
+            if (!SafeNativeRead(rawDesignerName + character, designerName[character]))
+            {
+                designerName[0] = '\0';
+                break;
+            }
+            if (designerName[character] == '\0')
+                break;
+            if (!std::isprint(static_cast<unsigned char>(designerName[character])))
+            {
+                designerName[0] = '\0';
+                break;
+            }
+        }
+        if (designerName[0] == '\0')
+            continue;
+
+        const std::string_view name(designerName);
+        if (trackBombChams) {
+            if (name.find("planted_c4") != std::string_view::npos)
+                trackedBomb = entity;
+            else if (trackedBomb == nullptr && name == "weapon_c4")
+                trackedBomb = entity;
+        }
+
+        CGameSceneNode* scene = nullptr;
+        if (!SafeNativeRead(reinterpret_cast<const std::uint8_t*>(entity) + sceneNodeOffset, scene) ||
+            scene == nullptr)
+            continue;
+        Vector_t origin{};
+        if (!SafeNativeRead(reinterpret_cast<const std::uint8_t*>(scene) + sceneOriginOffset, origin) ||
+            !origin.IsValid())
+            continue;
+        ImVec2 screen{};
+        if (!D::WorldToScreen(origin, screen))
+            continue;
+
+        if (drawWeapons && ownerOffset != 0 && name.starts_with("weapon_"))
+        {
+            CBaseHandle owner{};
+            if (!SafeNativeRead(reinterpret_cast<const std::uint8_t*>(entity) + ownerOffset, owner) ||
+                !owner.IsValid())
+            {
+                std::string weaponName;
+                int maximumAmmo = 0;
+                if (!GetWeaponName(reinterpret_cast<C_CSWeaponBase*>(entity), weaponName, &maximumAmmo) ||
+                    weaponName.empty())
+                    weaponName.assign(name.substr(7));
+                DrawOutlinedText(draw, screen, weaponName.c_str(), color, IM_COL32(0, 0, 0, 230));
+            }
+        }
+        else if (drawSmoke && name.find("smokegrenade_projectile") != std::string_view::npos &&
+            smokeBeginOffset != 0)
+        {
+            int beginTick = 0;
+            if (SafeNativeRead(reinterpret_cast<const std::uint8_t*>(entity) + smokeBeginOffset, beginTick) &&
+                beginTick > 0)
+            {
+                const float remaining = std::clamp(20.f -
+                    (currentTime - static_cast<float>(beginTick) * tickInterval), 0.f, 20.f);
+                if (remaining > 0.f)
+                {
+                    char text[48]{};
+                    std::snprintf(text, sizeof(text), "SMOKE %.1fs", remaining);
+                    DrawOutlinedText(draw, screen, text, color, IM_COL32(0, 0, 0, 230));
+                }
+            }
+        }
+        else if (drawMolotov && (name == "inferno" || name.find("inferno") != std::string_view::npos) &&
+            infernoBeginOffset != 0)
+        {
+            int beginTick = 0;
+            int lifetimeTicks = 0;
+            if (SafeNativeRead(reinterpret_cast<const std::uint8_t*>(entity) + infernoBeginOffset, beginTick) &&
+                SafeNativeRead(reinterpret_cast<const std::uint8_t*>(entity) + infernoLifetimeOffset, lifetimeTicks) &&
+                beginTick > 0)
+            {
+                float lifetime = static_cast<float>(lifetimeTicks) * tickInterval;
+                if (!std::isfinite(lifetime) || lifetime < 0.5f || lifetime > 30.f)
+                    lifetime = 7.f;
+                const float remaining = std::clamp(lifetime -
+                    (currentTime - static_cast<float>(beginTick) * tickInterval), 0.f, lifetime);
+                if (remaining > 0.f)
+                {
+                    char text[48]{};
+                    std::snprintf(text, sizeof(text), "FIRE %.1fs", remaining);
+                    DrawOutlinedText(draw, screen, text, color, IM_COL32(0, 0, 0, 230));
+                }
+            }
+        }
+        else if (drawBomb && name.find("planted_c4") != std::string_view::npos &&
+            bombTickingOffset != 0 && bombBlowOffset != 0)
+        {
+            std::uint8_t ticking = 0, defused = 0, beingDefused = 0;
+            float blowTime = 0.f, defuseTime = 0.f;
+            const bool valid = SafeNativeRead(reinterpret_cast<const std::uint8_t*>(entity) + bombTickingOffset, ticking) &&
+                SafeNativeRead(reinterpret_cast<const std::uint8_t*>(entity) + bombBlowOffset, blowTime) &&
+                (bombDefusedOffset == 0 || SafeNativeRead(reinterpret_cast<const std::uint8_t*>(entity) + bombDefusedOffset, defused));
+            if (valid && ticking == 1 && defused == 0 && std::isfinite(blowTime))
+            {
+                const float remaining = std::max(0.f, blowTime - currentTime);
+                bool hasDefuse = bombBeingDefusedOffset != 0 && bombDefuseOffset != 0 &&
+                    SafeNativeRead(reinterpret_cast<const std::uint8_t*>(entity) + bombBeingDefusedOffset, beingDefused) &&
+                    SafeNativeRead(reinterpret_cast<const std::uint8_t*>(entity) + bombDefuseOffset, defuseTime) &&
+                    beingDefused == 1 && std::isfinite(defuseTime);
+                char text[96]{};
+                if (hasDefuse)
+                    std::snprintf(text, sizeof(text), "C4 %.1fs | DEFUSE %.1fs", remaining,
+                        std::max(0.f, defuseTime - currentTime));
+                else
+                    std::snprintf(text, sizeof(text), "C4 %.1fs", remaining);
+                DrawOutlinedText(draw, screen, text, color, IM_COL32(0, 0, 0, 230));
+            }
+        }
+    }
+    cachedBombTarget = trackedBomb;
+    NativeChams::UpdateBombTarget(cachedBombTarget);
 }
 }
 
@@ -1943,6 +2998,11 @@ void LinuxNativeEsp::RequestSkinRefresh()
 
 void LinuxNativeEsp::Render()
 {
+    // Every present is a new entity generation. Clear last frame's raw target
+    // identities before any early return (menu/loading/disconnect) can leave
+    // chams matching recycled entity addresses.
+    NativeChams::UpdateTargets(nullptr, 0, nullptr);
+    NativeChams::UpdateBombTarget(nullptr);
     static bool logged_entry = false;
     const bool enabled = C_GET(bool, Vars.bVisualOverlay);
     if (!logged_entry)
@@ -1995,10 +3055,12 @@ void LinuxNativeEsp::Render()
     ApplyNativeMovement(local_pawn);
     DrawLegitFov();
     native_aim_command_queued = false;
+    SetNativeCombatInput(false, false, false, false);
     if (C_GET(bool, Vars.rage_enable))
         ApplyNativeRage(entities, local_controller, local_pawn);
     else
         ApplyLegitAim(entities, local_controller, local_pawn);
+    ApplyNativeTriggerAndRecoil(entities, local_controller, local_pawn);
     ApplyNativeAntiAim(local_pawn);
     ApplyNativeSkin(entities, local_controller, local_pawn);
     NativeChams::UpdateColors(
@@ -2009,15 +3071,18 @@ void LinuxNativeEsp::Render()
     if (draw == nullptr)
         return;
 
+    DrawNativeGrenadeTrajectory(entities, local_pawn, draw);
+    DrawNativeWorldEntities(entities, local_pawn, draw);
+
     CGameSceneNode* localScene = local_pawn->GetGameSceneNode();
     const Vector_t localOrigin = localScene != nullptr ? localScene->GetAbsOrigin() : Vector_t{};
     float localYaw = native_view_angles != nullptr ? native_view_angles->y : 0.f;
     static const std::uint32_t localViewAngleOffset = SCHEMA::GetOffset("C_BasePlayerPawn->v_angle");
     if (localViewAngleOffset != 0)
     {
-        const QAngle_t pawnView = *reinterpret_cast<const QAngle_t*>(
-            reinterpret_cast<const std::uint8_t*>(local_pawn) + localViewAngleOffset);
-        if (pawnView.IsValid() && std::fabs(pawnView.y) <= 360.f)
+        QAngle_t pawnView{};
+        if (SafeNativeRead(reinterpret_cast<const std::uint8_t*>(local_pawn) + localViewAngleOffset,
+                pawnView) && pawnView.IsValid() && std::fabs(pawnView.y) <= 360.f)
             localYaw = pawnView.y;
     }
 
@@ -2091,10 +3156,19 @@ void LinuxNativeEsp::Render()
         if (!enabled)
             continue;
 
-        if (C_GET(bool, Vars.esp_box_fill))
-            draw->AddRectFilled(min, max,
-                C_GET(ColorPickerVar_t, Vars.esp_box_fill_color).colValue.GetU32(),
-                C_GET(FrameOverlayVar_t, Vars.overlayBox).flRounding);
+		if (C_GET(bool, Vars.esp_box_fill))
+		{
+			if (C_GET(bool, Vars.esp_box_fill_gradient))
+			{
+				const ImU32 top = C_GET(ColorPickerVar_t, Vars.esp_box_fill_top_color).colValue.GetU32();
+				const ImU32 bottom = C_GET(ColorPickerVar_t, Vars.esp_box_fill_bottom_color).colValue.GetU32();
+				draw->AddRectFilledMultiColor(min, max, top, top, bottom, bottom);
+			}
+			else
+				draw->AddRectFilled(min, max,
+					C_GET(ColorPickerVar_t, Vars.esp_box_fill_color).colValue.GetU32(),
+					C_GET(FrameOverlayVar_t, Vars.overlayBox).flRounding);
+		}
 
         if (const auto& box = C_GET(FrameOverlayVar_t, Vars.overlayBox); box.bEnable)
         {
@@ -2272,25 +3346,57 @@ void LinuxNativeEsp::Render()
             drawFlag("KIT", config.colPrimary.GetU32());
             ++kitFlagsDrawn;
         }
-        if ((flags & FLAGS_SCOPED) != 0 && pawn->IsScoped())
+        static const std::uint32_t scopedOffset =
+            SCHEMA::GetOffset("C_CSPlayerPawnBase->m_bIsScoped");
+        static const std::uint32_t defusingOffset =
+            SCHEMA::GetOffset("C_CSPlayerPawnBase->m_bIsDefusing");
+        std::uint8_t scopedRaw = 0;
+        std::uint8_t defusingRaw = 0;
+        const bool scopedResolved = scopedOffset != 0 && SafeNativeRead(
+            reinterpret_cast<const std::uint8_t*>(pawn) + scopedOffset, scopedRaw) && scopedRaw <= 1;
+        const bool defusingResolved = defusingOffset != 0 && SafeNativeRead(
+            reinterpret_cast<const std::uint8_t*>(pawn) + defusingOffset, defusingRaw) && defusingRaw <= 1;
+        static bool loggedScopedFailure = false;
+        static bool loggedDefusingFailure = false;
+        if ((flags & FLAGS_SCOPED) != 0 && !scopedResolved && !loggedScopedFailure)
+        {
+            EspLog("[ESP flags] scoped unavailable offset=0x%x raw=%u", scopedOffset, scopedRaw);
+            loggedScopedFailure = true;
+        }
+        if ((flags & FLAGS_DEFUSING) != 0 && !defusingResolved && !loggedDefusingFailure)
+        {
+            EspLog("[ESP flags] defusing unavailable offset=0x%x raw=%u", defusingOffset, defusingRaw);
+            loggedDefusingFailure = true;
+        }
+        if ((flags & FLAGS_SCOPED) != 0 && scopedResolved && scopedRaw == 1)
             drawFlag("SCOPED", IM_COL32(100, 170, 255, 255));
         if ((flags & FLAGS_FLASHED) != 0 && pawn->GetFlashDuration() > 0.05f)
             drawFlag("FLASHED", IM_COL32(255, 220, 80, 255));
-        if ((flags & FLAGS_DEFUSING) != 0 && pawn->IsDefusing())
+        if ((flags & FLAGS_DEFUSING) != 0 && defusingResolved && defusingRaw == 1)
             drawFlag("DEFUSING", IM_COL32(70, 150, 255, 255));
 
         static const std::uint32_t reloadingOffset = SCHEMA::GetOffset("C_CSWeaponBase->m_bInReload");
         static const std::uint32_t startedArmingOffset = SCHEMA::GetOffset("C_C4->m_bStartedArming");
         static const std::uint32_t plantingViaUseOffset = SCHEMA::GetOffset("C_C4->m_bIsPlantingViaUse");
+        bool startedArming = false;
+        bool plantingViaUse = false;
+        if (activeWeapon != nullptr && weaponName == "c4")
+        {
+            if (startedArmingOffset != 0)
+                SafeNativeRead(reinterpret_cast<const std::uint8_t*>(activeWeapon) + startedArmingOffset,
+                    startedArming);
+            if (plantingViaUseOffset != 0)
+                SafeNativeRead(reinterpret_cast<const std::uint8_t*>(activeWeapon) + plantingViaUseOffset,
+                    plantingViaUse);
+        }
         const bool planting = activeWeapon != nullptr && weaponName == "c4" &&
-            ((startedArmingOffset != 0 && *reinterpret_cast<const bool*>(
-                reinterpret_cast<const std::uint8_t*>(activeWeapon) + startedArmingOffset)) ||
-             (plantingViaUseOffset != 0 && *reinterpret_cast<const bool*>(
-                reinterpret_cast<const std::uint8_t*>(activeWeapon) + plantingViaUseOffset)));
+            (startedArming || plantingViaUse);
         if ((flags & FLAGS_PLANTING) != 0 && planting)
             drawFlag("PLANTING", IM_COL32(255, 145, 60, 255));
-        if ((flags & FLAGS_RELOADING) != 0 && activeWeapon != nullptr && reloadingOffset != 0 &&
-            *reinterpret_cast<const bool*>(reinterpret_cast<const std::uint8_t*>(activeWeapon) + reloadingOffset))
+        bool reloading = false;
+        if (activeWeapon != nullptr && reloadingOffset != 0)
+            SafeNativeRead(reinterpret_cast<const std::uint8_t*>(activeWeapon) + reloadingOffset, reloading);
+        if ((flags & FLAGS_RELOADING) != 0 && reloading)
             drawFlag("RELOADING", IM_COL32(235, 235, 235, 255));
         if ((flags & FLAGS_BOMB_CARRIER) != 0 && PlayerHasC4(entities, pawn))
             drawFlag("C4", IM_COL32(255, 85, 85, 255));

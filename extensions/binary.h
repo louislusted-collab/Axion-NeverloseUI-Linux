@@ -459,10 +459,18 @@ namespace C::BIN
 			::SetEndOfFile(hFileOut);
 
 			if (::SetFilePointer(hFileOut, 0L, nullptr, FILE_BEGIN) == INVALID_SET_FILE_POINTER)
+			{
+				::CloseHandle(hFileOut);
 				return false;
+			}
 		}
 
 		std::uint8_t* pBuffer = static_cast<std::uint8_t*>(MEM::HeapAlloc(nBufferSize));
+		if (pBuffer == nullptr)
+		{
+			::CloseHandle(hFileOut);
+			return false;
+		}
 		const std::uint8_t* pBufferEnd = pBuffer + nBufferSize;
 
 		std::uint8_t* pCurrentBuffer = pBuffer;
@@ -497,20 +505,23 @@ namespace C::BIN
 			return false;
 		}
 
-		// The binary reader was written for trusted Windows files and performs
-		// unchecked pointer arithmetic. Reject truncated, stale, or oversized
-		// files before parsing so a bad config cannot crash native CS2.
-		std::size_t nExpectedFileSize = sizeof(FNV1A_t[2]) +
-			VariableObject_t(FNV1A::HashConst("version"), FNV1A::HashConst("int"), CS_VERSION).GetSerializationSize();
-		for (const auto& variable : vecVariables)
-			nExpectedFileSize += sizeof(FNV1A_t[2]) + variable.GetSerializationSize();
-		if (dwFileSize != nExpectedFileSize)
+		// Bound the input, then validate every located record before reading it.
+		// Missing variables are allowed so older configs can acquire new options
+		// from their registered defaults instead of being destroyed wholesale.
+		constexpr std::size_t minimumSize = sizeof(FNV1A_t[2]) + sizeof(int);
+		constexpr std::size_t maximumSize = 16U * 1024U * 1024U;
+		if (dwFileSize < minimumSize || dwFileSize > maximumSize)
 		{
 			::CloseHandle(hFileInOut);
 			return false;
 		}
 
 		std::uint8_t* pBuffer = static_cast<std::uint8_t*>(MEM::HeapAlloc(dwFileSize));
+		if (pBuffer == nullptr)
+		{
+			::CloseHandle(hFileInOut);
+			return false;
+		}
 		if (!::ReadFile(hFileInOut, pBuffer, dwFileSize, nullptr, nullptr))
 		{
 			::CloseHandle(hFileInOut);
@@ -527,10 +538,18 @@ namespace C::BIN
 			return false;
 		}
 		ReadBuffer(pBuffer, version);
+		if (*version.GetStorage<int>() > CS_VERSION)
+		{
+			::CloseHandle(hFileInOut);
+			MEM::HeapFree(pBuffer);
+			return false;
+		}
 
 		for (auto& variable : vecVariables)
 		{
 			std::uint8_t* pVariableData = FindBuffer(pBuffer, dwFileSize, variable);
+			if (pVariableData == nullptr)
+				continue;
 			const std::size_t nAvailable = pVariableData != nullptr
 				? static_cast<std::size_t>((pBuffer + dwFileSize) - pVariableData)
 				: 0U;

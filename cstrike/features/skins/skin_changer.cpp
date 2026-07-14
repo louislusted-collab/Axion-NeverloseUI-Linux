@@ -449,15 +449,22 @@ void skin_changer::OnPreFireEvent(IGameEvent* pEvent) {
         return;
 
     const auto pControllerWhoDied = pEvent->get_player_controller("userid");
-    if (pControllerWhoDied == nullptr)
+    if (pControllerWhoDied == nullptr) {
+        return;
+    }
+
+    auto* killerIdentity = pControllerWhoKilled->GetIdentity();
+    auto* victimIdentity = pControllerWhoDied->GetIdentity();
+    if (!killerIdentity || !victimIdentity)
         return;
 
-    if (pControllerWhoKilled->GetIdentity()->GetIndex() == pControllerWhoDied->GetIdentity()->GetIndex())
+    if (killerIdentity->GetIndex() == victimIdentity->GetIndex())
         return;
 
     CCSPlayerController* pLocalPlayerController = CCSPlayerController::GetLocalPlayerController();
+    auto* localIdentity = pLocalPlayerController ? pLocalPlayerController->GetIdentity() : nullptr;
 
-    if (!pLocalPlayerController || pControllerWhoKilled->GetIdentity()->GetIndex() != pLocalPlayerController->GetIdentity()->GetIndex())
+    if (!localIdentity || killerIdentity->GetIndex() != localIdentity->GetIndex())
         return;
 
     C_CSPlayerPawn* pLocalPawn = I::GameResourceService->pGameEntitySystem->Get<C_CSPlayerPawn>(pLocalPlayerController->GetPawnHandle());
@@ -477,8 +484,7 @@ void skin_changer::OnPreFireEvent(IGameEvent* pEvent) {
 
     CEconItemDefinition* pWeaponDefinition = pWeaponItemView->GetStaticData();
     if (!pWeaponDefinition || !pWeaponDefinition->IsKnife(true, pWeaponDefinition->m_pszItemTypeName)) return;
-    const std::string_view token_name = CS_XOR("weapon");
-    CUtlStringToken token(token_name.data());
+    CUtlStringToken token("weapon");
 
     pEvent->SetString(token, pWeaponDefinition->GetSimpleWeaponName());
 }

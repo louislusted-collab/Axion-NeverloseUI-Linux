@@ -16,6 +16,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -38,6 +39,7 @@ constexpr std::size_t kColorOffset = 0x40;
 
 std::array<std::atomic<C_CSPlayerPawn*>, 128> targets{};
 std::atomic<C_CSPlayerPawn*> localTarget{};
+std::atomic<C_BaseEntity*> bombTarget{};
 funchook_t* hook = nullptr;
 DrawArrayFn original = nullptr;
 struct MaterialPair
@@ -57,12 +59,15 @@ enum class MaterialStyle : std::size_t
 };
 
 std::array<MaterialPair, static_cast<std::size_t>(MaterialStyle::Count)> materials{};
+std::array<material2_t*, static_cast<std::size_t>(MaterialStyle::Count)> localMaterials{};
 bool materialLoadAttempted = false;
 bool colorsInitialized = false;
 Color_t activeVisibleColor{255, 255, 255, 255};
 Color_t activeHiddenColor{255, 255, 255, 255};
 Color_t pendingVisibleColor{255, 255, 255, 255};
 Color_t pendingHiddenColor{255, 255, 255, 255};
+float activeGlowIntensity = -1.f;
+float pendingGlowIntensity = -1.f;
 std::chrono::steady_clock::time_point pendingColorSince{};
 unsigned int materialGeneration = 0;
 
@@ -79,7 +84,8 @@ void Log(const char* message, ...)
     std::fflush(file);
 }
 
-material2_t* CreateMaterial(const char* name, MaterialStyle style, bool ignoreDepth, const Color_t& color)
+material2_t* CreateMaterial(const char* name, MaterialStyle style, bool ignoreDepth,
+                            const Color_t& color, float glowIntensity)
 {
     if (I::MaterialSystem2 == nullptr)
         return nullptr;
@@ -149,8 +155,8 @@ material2_t* CreateMaterial(const char* name, MaterialStyle style, bool ignoreDe
     g_tNormal = resource:"materials/default/default_normal_tga_b3f4ec4c.vtex"
     g_tSelfIllumMask = resource:"materials/default/default_mask_tga_fde710a5.vtex"
     g_tAmbientOcclusion = resource:"materials/default/default_mask_tga_fde710a5.vtex"
-    g_flSelfIllumScale = 4.0
-    g_flSelfIllumBrightness = 3.0
+    g_flSelfIllumScale = 1.0
+    g_flSelfIllumBrightness = 1.0
     g_vSelfIllumTint = [1, 1, 1, 1]
 })";
     static constexpr char glowHiddenVmat[] = R"(<!-- kv3 encoding:text:version{e21c7f3c-8a33-41c5-9977-a76d3a32aa0d} format:generic:version{7412167c-06e9-4698-aff2-e63eb59037e7} -->
@@ -167,8 +173,8 @@ material2_t* CreateMaterial(const char* name, MaterialStyle style, bool ignoreDe
     g_tNormal = resource:"materials/default/default_normal_tga_b3f4ec4c.vtex"
     g_tSelfIllumMask = resource:"materials/default/default_mask_tga_fde710a5.vtex"
     g_tAmbientOcclusion = resource:"materials/default/default_mask_tga_fde710a5.vtex"
-    g_flSelfIllumScale = 4.0
-    g_flSelfIllumBrightness = 3.0
+    g_flSelfIllumScale = 1.0
+    g_flSelfIllumBrightness = 1.0
     g_vSelfIllumTint = [1, 1, 1, 1]
 })";
     static constexpr char glassVisibleVmat[] = R"(<!-- kv3 encoding:text:version{e21c7f3c-8a33-41c5-9977-a76d3a32aa0d} format:generic:version{7412167c-06e9-4698-aff2-e63eb59037e7} -->
@@ -244,6 +250,23 @@ material2_t* CreateMaterial(const char* name, MaterialStyle style, bool ignoreDe
             static_cast<float>(color.b) / 255.f, static_cast<float>(color.a) / 255.f);
         vmat.replace(tintPosition, sizeof(tintPlaceholder) - 1, tint);
     }
+    if (style == MaterialStyle::Glow)
+    {
+        const float shaderIntensity = 0.02f +
+            std::clamp(glowIntensity, 0.f, 100.f) * 0.0038f;
+        const auto replaceScalar = [&](std::string_view key) {
+            const std::size_t position = vmat.find(key);
+            if (position == std::string::npos)
+                return;
+            const std::size_t valueStart = position + key.size();
+            const std::size_t valueEnd = vmat.find('\n', valueStart);
+            char value[32] = {};
+            std::snprintf(value, sizeof(value), "%.4f", shaderIntensity);
+            vmat.replace(valueStart, valueEnd - valueStart, value);
+        };
+        replaceScalar("g_flSelfIllumScale = ");
+        replaceScalar("g_flSelfIllumBrightness = ");
+    }
 
     alignas(16) std::array<std::byte, 0x100 + sizeof(CKeyValues3)> storage{};
     auto* kv3 = reinterpret_cast<CKeyValues3*>(storage.data() + 0x100);
@@ -258,10 +281,12 @@ material2_t* CreateMaterial(const char* name, MaterialStyle style, bool ignoreDe
     return binding != nullptr ? *binding : nullptr;
 }
 
-bool RebuildMaterials(const Color_t& visibleColor, const Color_t& hiddenColor)
+bool RebuildMaterials(const Color_t& visibleColor, const Color_t& hiddenColor,
+                      float glowIntensity)
 {
     const unsigned int generation = ++materialGeneration;
     std::array<MaterialPair, static_cast<std::size_t>(MaterialStyle::Count)> replacement{};
+    std::array<material2_t*, static_cast<std::size_t>(MaterialStyle::Count)> localReplacement{};
     static constexpr const char* styleNames[]{"flat", "metallic", "glow", "glass", "wireframe"};
     for (std::size_t index = 0; index < replacement.size(); ++index)
     {
@@ -272,8 +297,8 @@ bool RebuildMaterials(const Color_t& visibleColor, const Color_t& hiddenColor)
             "materials/axion/player_%s_hidden_%u.vmat", styleNames[index], generation);
         const MaterialStyle style = static_cast<MaterialStyle>(index);
         replacement[index] = {
-            CreateMaterial(visibleName, style, false, visibleColor),
-            CreateMaterial(hiddenName, style, true, hiddenColor)};
+            CreateMaterial(visibleName, style, false, visibleColor, glowIntensity),
+            CreateMaterial(hiddenName, style, true, hiddenColor, glowIntensity)};
         if (index == static_cast<std::size_t>(MaterialStyle::Flat) &&
             (replacement[index].visible == nullptr || replacement[index].hidden == nullptr))
             return false;
@@ -282,12 +307,24 @@ bool RebuildMaterials(const Color_t& visibleColor, const Color_t& hiddenColor)
             Log("material style=%s failed; falling back to flat", styleNames[index]);
             replacement[index] = replacement[static_cast<std::size_t>(MaterialStyle::Flat)];
         }
+        char localName[112];
+        std::snprintf(localName, sizeof(localName),
+            "materials/axion/local_%s_%u.vmat", styleNames[index], generation);
+        localReplacement[index] = CreateMaterial(localName, style, false,
+            Color_t(255, 255, 255, 255), glowIntensity);
+        if (index == static_cast<std::size_t>(MaterialStyle::Flat) &&
+            localReplacement[index] == nullptr)
+            return false;
+        if (localReplacement[index] == nullptr)
+            localReplacement[index] = localReplacement[static_cast<std::size_t>(MaterialStyle::Flat)];
     }
 
     materials = replacement;
+    localMaterials = localReplacement;
     activeVisibleColor = visibleColor;
     activeHiddenColor = hiddenColor;
     colorsInitialized = true;
+    activeGlowIntensity = glowIntensity;
     Log("materials generation=%u flat=%p/%p metallic=%p/%p glow=%p/%p glass=%p/%p wire=%p/%p colors=%u,%u,%u/%u,%u,%u",
         generation, materials[0].visible, materials[0].hidden,
         materials[1].visible, materials[1].hidden,
@@ -306,9 +343,11 @@ void LoadMaterials()
     materialLoadAttempted = true;
     const Color_t visible = C_GET(ColorPickerVar_t, Vars.colVisualChams).colValue;
     const Color_t hidden = C_GET(ColorPickerVar_t, Vars.colVisualChamsIgnoreZ).colValue;
-    RebuildMaterials(visible, hidden);
+    const float glowIntensity = std::clamp(C_GET(float, Vars.chams_glow_intensity), 0.f, 100.f);
+    RebuildMaterials(visible, hidden, glowIntensity);
     pendingVisibleColor = visible;
     pendingHiddenColor = hidden;
+    pendingGlowIntensity = glowIntensity;
 }
 
 bool IsTrackedTarget(const C_BaseEntity* entity)
@@ -325,7 +364,8 @@ enum class TargetKind
 {
     None,
     Enemy,
-    Local
+    Local,
+    Bomb
 };
 
 TargetKind ResolvesToTarget(C_BaseEntity* entity)
@@ -337,6 +377,8 @@ TargetKind ResolvesToTarget(C_BaseEntity* entity)
             return TargetKind::Enemy;
         if (localTarget.load(std::memory_order_relaxed) == entity)
             return TargetKind::Local;
+        if (bombTarget.load(std::memory_order_relaxed) == entity)
+            return TargetKind::Bomb;
         const CBaseHandle ownerHandle = entity->GetOwnerHandle();
         C_BaseEntity* owner = entitySystem->Get<C_BaseEntity>(ownerHandle);
         if (owner == entity)
@@ -346,13 +388,24 @@ TargetKind ResolvesToTarget(C_BaseEntity* entity)
     return TargetKind::None;
 }
 
-bool IsLocalMaterialEnabled(material2_t* material)
+enum class LocalMaterialKind
+{
+    None,
+    Arms,
+    Sleeves,
+    Knife,
+    Weapon,
+    Grenade,
+    Bomb,
+};
+
+LocalMaterialKind ClassifyLocalMaterial(material2_t* material)
 {
     if (material == nullptr)
-        return false;
+        return LocalMaterialKind::None;
     const char* rawName = material->get_name();
     if (rawName == nullptr)
-        return false;
+        return LocalMaterialKind::None;
     const std::string_view name(rawName);
     const auto contains = [&](std::string_view token) { return name.find(token) != std::string_view::npos; };
 
@@ -361,18 +414,78 @@ bool IsLocalMaterialEnabled(material2_t* material)
     const bool bomb = contains("c4") || contains("ied") || contains("bomb");
     const bool grenade = contains("grenade") || contains("flashbang") || contains("molotov") ||
         contains("incendiary") || contains("smoke") || contains("decoy") || contains("eq_");
+    const bool knife = contains("knife") || contains("bayonet") || contains("kukri");
     const bool viewWeapon = contains("weapons/v_models") || contains("weapons\\v_models") ||
         contains("v_models/");
 
     if (sleeve)
-        return C_GET(bool, Vars.chams_sleeves);
+        return LocalMaterialKind::Sleeves;
     if (arms)
-        return C_GET(bool, Vars.chams_arms);
+        return LocalMaterialKind::Arms;
     if (bomb)
-        return C_GET(bool, Vars.chams_bomb);
+        return LocalMaterialKind::Bomb;
     if (grenade)
-        return C_GET(bool, Vars.chams_grenades);
-    return viewWeapon && C_GET(bool, Vars.chams_held_weapon);
+        return LocalMaterialKind::Grenade;
+    if (knife)
+        return LocalMaterialKind::Knife;
+    return viewWeapon ? LocalMaterialKind::Weapon : LocalMaterialKind::None;
+}
+
+bool IsLocalMaterialEnabled(LocalMaterialKind kind)
+{
+    switch (kind)
+    {
+    case LocalMaterialKind::Arms: return C_GET(bool, Vars.chams_arms);
+    case LocalMaterialKind::Sleeves: return C_GET(bool, Vars.chams_sleeves);
+    case LocalMaterialKind::Knife: return C_GET(bool, Vars.chams_knife);
+    case LocalMaterialKind::Weapon: return C_GET(bool, Vars.chams_held_weapon);
+    case LocalMaterialKind::Grenade: return C_GET(bool, Vars.chams_grenades);
+    case LocalMaterialKind::Bomb: return C_GET(bool, Vars.chams_bomb);
+    default: return false;
+    }
+}
+
+Color_t GetLocalMaterialColor(LocalMaterialKind kind)
+{
+    if (kind == LocalMaterialKind::Arms)
+        return C_GET(ColorPickerVar_t, Vars.chams_arms_color).colValue;
+    if (kind == LocalMaterialKind::Sleeves)
+        return C_GET(ColorPickerVar_t, Vars.chams_sleeves_color).colValue;
+    if (kind == LocalMaterialKind::Knife)
+        return C_GET(ColorPickerVar_t, Vars.chams_knife_color).colValue;
+    return C_GET(ColorPickerVar_t, Vars.colVisualChams).colValue;
+}
+
+enum class SceneMaterialKind
+{
+    None,
+    World,
+    Sky,
+};
+
+SceneMaterialKind ClassifySceneMaterial(material2_t* material)
+{
+    if (material == nullptr)
+        return SceneMaterialKind::None;
+    const char* rawName = material->get_name();
+    if (rawName == nullptr || *rawName == '\0')
+        return SceneMaterialKind::None;
+    const std::string_view name(rawName);
+    const auto contains = [&](std::string_view token) {
+        return name.find(token) != std::string_view::npos;
+    };
+    if (contains("skybox") || contains("/sky/") || contains("materials/sky") ||
+        contains("sky_") || contains("skybox_"))
+        return SceneMaterialKind::Sky;
+    if (contains("characters") || contains("weapons") || contains("player") ||
+        contains("panorama") || contains("particle") || contains("effects") ||
+        contains("decals") || contains("hud"))
+        return SceneMaterialKind::None;
+    if (contains("materials/world") || contains("materials/maps") || contains("maps/") ||
+        contains("materials/models/props") || contains("materials/props") ||
+        contains("materials/nature") || contains("materials/ground"))
+        return SceneMaterialKind::World;
+    return SceneMaterialKind::None;
 }
 
 TargetKind GetTargetKind(void* mesh)
@@ -407,10 +520,13 @@ void DrawArray(void* descriptor, void* renderContext, void* meshArray, int count
                void* sceneView, void* sceneLayer, void* drawContext, void* frameStats)
 {
     const bool localChams = C_GET(bool, Vars.chams_arms) || C_GET(bool, Vars.chams_sleeves) ||
-        C_GET(bool, Vars.chams_held_weapon) || C_GET(bool, Vars.chams_grenades) ||
+        C_GET(bool, Vars.chams_held_weapon) || C_GET(bool, Vars.chams_knife) ||
+        C_GET(bool, Vars.chams_grenades) ||
         C_GET(bool, Vars.chams_bomb);
+    const bool sceneModulation = C_GET(bool, Vars.world_color_enable) ||
+        C_GET(bool, Vars.sky_color_enable);
     if (original == nullptr || meshArray == nullptr || count <= 0 ||
-        (!C_GET(bool, Vars.bVisualChams) && !localChams))
+        (!C_GET(bool, Vars.bVisualChams) && !localChams && !sceneModulation))
     {
         if (original != nullptr)
             original(descriptor, renderContext, meshArray, count, sceneView, sceneLayer, drawContext, frameStats);
@@ -422,38 +538,74 @@ void DrawArray(void* descriptor, void* renderContext, void* meshArray, int count
         void* mesh;
         material2_t* material;
         Color_t color;
+        TargetKind targetKind = TargetKind::None;
+        LocalMaterialKind localKind = LocalMaterialKind::None;
     };
     // Far-away/alternate-LOD batches regularly contain more than 128 mesh
-    // records. The old fixed array silently ignored every record after 127.
+    // records. Reuse thread-local storage so scene batches do not allocate two
+    // vectors on every render call, while still avoiding cross-thread races.
     const int safeCount = std::min(count, 4096);
-    std::vector<Backup> changed;
-    changed.reserve(static_cast<std::size_t>(safeCount));
+    static thread_local std::vector<Backup> changed;
+    static thread_local std::vector<Backup> modulated;
+    changed.clear();
+    modulated.clear();
+    if (changed.capacity() < static_cast<std::size_t>(safeCount))
+        changed.reserve(static_cast<std::size_t>(safeCount));
+    if (sceneModulation && modulated.capacity() < static_cast<std::size_t>(safeCount))
+        modulated.reserve(static_cast<std::size_t>(safeCount));
     for (int index = 0; index < safeCount; ++index)
     {
         auto* mesh = reinterpret_cast<std::uint8_t*>(meshArray) + index * kMeshStride;
+        material2_t* originalMaterial = *reinterpret_cast<material2_t**>(mesh + kMaterialOffset);
+        if (sceneModulation)
+        {
+            const SceneMaterialKind sceneKind = ClassifySceneMaterial(originalMaterial);
+            const bool tintWorld = sceneKind == SceneMaterialKind::World &&
+                C_GET(bool, Vars.world_color_enable);
+            const bool tintSky = sceneKind == SceneMaterialKind::Sky &&
+                C_GET(bool, Vars.sky_color_enable);
+            if (tintWorld || tintSky)
+            {
+                auto& backup = modulated.emplace_back();
+                backup.mesh = mesh;
+                backup.material = originalMaterial;
+                std::memcpy(&backup.color, mesh + kColorOffset, sizeof(backup.color));
+                SetMeshColor(mesh, tintSky
+                    ? C_GET(ColorPickerVar_t, Vars.sky_color).colValue
+                    : C_GET(ColorPickerVar_t, Vars.world_color).colValue);
+            }
+        }
         const TargetKind kind = GetTargetKind(mesh);
         if (kind == TargetKind::None)
             continue;
-        material2_t* originalMaterial = *reinterpret_cast<material2_t**>(mesh + kMaterialOffset);
         if (kind == TargetKind::Enemy && !C_GET(bool, Vars.bVisualChams))
             continue;
-        if (kind == TargetKind::Local && !IsLocalMaterialEnabled(originalMaterial))
+        const LocalMaterialKind localKind = kind == TargetKind::Local
+            ? ClassifyLocalMaterial(originalMaterial)
+            : (kind == TargetKind::Bomb ? LocalMaterialKind::Bomb : LocalMaterialKind::None);
+        if ((kind == TargetKind::Local || kind == TargetKind::Bomb) &&
+            !IsLocalMaterialEnabled(localKind))
             continue;
         auto& backup = changed.emplace_back();
         backup.mesh = mesh;
         backup.material = originalMaterial;
         std::memcpy(&backup.color, mesh + kColorOffset, sizeof(backup.color));
+        backup.targetKind = kind;
+        backup.localKind = localKind;
     }
 
     if (changed.empty())
     {
         original(descriptor, renderContext, meshArray, count, sceneView, sceneLayer, drawContext, frameStats);
+        for (const Backup& backup : modulated)
+            SetMeshColor(backup.mesh, backup.color);
         return;
     }
 
     const int selectedStyle = std::clamp(C_GET(int, Vars.nVisualChamMaterial), 0,
         static_cast<int>(MaterialStyle::Count) - 1);
     const MaterialPair& selectedMaterials = materials[static_cast<std::size_t>(selectedStyle)];
+    material2_t* selectedLocalMaterial = localMaterials[static_cast<std::size_t>(selectedStyle)];
     const int changedCount = static_cast<int>(changed.size());
 
     static std::uint64_t matchedMeshes = 0;
@@ -475,6 +627,8 @@ void DrawArray(void* descriptor, void* renderContext, void* meshArray, int count
     {
         for (int index = 0; index < changedCount; ++index)
         {
+            if (changed[index].targetKind != TargetKind::Enemy)
+                continue;
             auto* mesh = static_cast<std::uint8_t*>(changed[index].mesh);
             *reinterpret_cast<material2_t**>(mesh + kMaterialOffset) = selectedMaterials.hidden;
             SetMeshColor(mesh, Color_t(255, 255, 255, 255));
@@ -488,9 +642,16 @@ void DrawArray(void* descriptor, void* renderContext, void* meshArray, int count
     for (int index = 0; index < changedCount; ++index)
     {
         auto* mesh = static_cast<std::uint8_t*>(changed[index].mesh);
-        if (selectedMaterials.visible != nullptr)
-            *reinterpret_cast<material2_t**>(mesh + kMaterialOffset) = selectedMaterials.visible;
-        SetMeshColor(mesh, Color_t(255, 255, 255, 255));
+        const bool localMaterial = changed[index].targetKind == TargetKind::Local ||
+            changed[index].targetKind == TargetKind::Bomb;
+        material2_t* visibleMaterial = localMaterial
+            ? selectedLocalMaterial
+            : selectedMaterials.visible;
+        if (visibleMaterial != nullptr)
+            *reinterpret_cast<material2_t**>(mesh + kMaterialOffset) = visibleMaterial;
+        SetMeshColor(mesh, localMaterial
+            ? GetLocalMaterialColor(changed[index].localKind)
+            : Color_t(255, 255, 255, 255));
     }
     original(descriptor, renderContext, meshArray, count, sceneView, sceneLayer, drawContext, frameStats);
 
@@ -500,6 +661,8 @@ void DrawArray(void* descriptor, void* renderContext, void* meshArray, int count
         *reinterpret_cast<material2_t**>(mesh + kMaterialOffset) = changed[index].material;
         SetMeshColor(mesh, changed[index].color);
     }
+    for (const Backup& backup : modulated)
+        SetMeshColor(backup.mesh, backup.color);
 }
 }
 
@@ -545,10 +708,14 @@ void Destroy()
     hook = nullptr;
     original = nullptr;
     materials = {};
+    localMaterials = {};
     materialLoadAttempted = false;
     colorsInitialized = false;
     materialGeneration = 0;
+    activeGlowIntensity = -1.f;
+    pendingGlowIntensity = -1.f;
     UpdateTargets(nullptr, 0, nullptr);
+    UpdateBombTarget(nullptr);
 }
 
 void UpdateTargets(C_CSPlayerPawn* const* newTargets, std::size_t count, C_CSPlayerPawn* newLocalTarget)
@@ -559,18 +726,27 @@ void UpdateTargets(C_CSPlayerPawn* const* newTargets, std::size_t count, C_CSPla
     localTarget.store(newLocalTarget, std::memory_order_relaxed);
 }
 
+void UpdateBombTarget(C_BaseEntity* newBombTarget)
+{
+    bombTarget.store(newBombTarget, std::memory_order_relaxed);
+}
+
 void UpdateColors(const Color_t& visible, const Color_t& hidden)
 {
     if (!materialLoadAttempted || !colorsInitialized)
         return;
-    if (visible == activeVisibleColor && hidden == activeHiddenColor)
+    const float glowIntensity = std::clamp(C_GET(float, Vars.chams_glow_intensity), 0.f, 100.f);
+    if (visible == activeVisibleColor && hidden == activeHiddenColor &&
+        std::fabs(glowIntensity - activeGlowIntensity) < 0.01f)
         return;
 
     const auto now = std::chrono::steady_clock::now();
-    if (visible != pendingVisibleColor || hidden != pendingHiddenColor)
+    if (visible != pendingVisibleColor || hidden != pendingHiddenColor ||
+        std::fabs(glowIntensity - pendingGlowIntensity) >= 0.01f)
     {
         pendingVisibleColor = visible;
         pendingHiddenColor = hidden;
+        pendingGlowIntensity = glowIntensity;
         pendingColorSince = now;
         return;
     }
@@ -578,7 +754,7 @@ void UpdateColors(const Color_t& visible, const Color_t& hidden)
     // the color picker. Rebuild once the selected color has settled briefly.
     if (now - pendingColorSince < std::chrono::milliseconds(150))
         return;
-    if (!RebuildMaterials(pendingVisibleColor, pendingHiddenColor))
+    if (!RebuildMaterials(pendingVisibleColor, pendingHiddenColor, pendingGlowIntensity))
     {
         pendingColorSince = now;
         Log("material color rebuild failed; retaining previous generation");

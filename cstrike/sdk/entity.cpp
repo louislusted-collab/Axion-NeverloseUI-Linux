@@ -41,7 +41,7 @@ static CachedEntity_t::Type GetEntityType(C_BaseEntity* pEntity) {
 
     const FNV1A_t uHashedName = FNV1A::Hash(pClassInfo->szName);
 
-    if (uHashedName == FNV1A::HashConst(CS_XOR("CCSPlayerController"))) {
+    if (uHashedName == FNV1A::HashConst("CCSPlayerController")) {
         return CachedEntity_t::PLAYER_CONTROLLER;
     }
 

@@ -20,7 +20,9 @@ CSigScan::CSigScan(const char* name, const char* libraryName, const std::initial
 void CSigScan::FindSignature() {
     auto& library = CMemory::GetModule(m_LibraryName);
     if (!library) {
-        L_PRINT(LOG_WARNING) << CS_XOR("\"signature\" Couldn't find {} because {} was not loaded.");
+        L_PRINT(LOG_WARNING) << CS_XOR("signature scan skipped: ") << m_Name
+            << CS_XOR(" because ") << m_LibraryName << CS_XOR(" was not loaded");
+        return;
     }
 
     for (size_t i = 0; i < m_Data.size(); ++i) {
@@ -33,11 +35,15 @@ void CSigScan::FindSignature() {
                 data.m_Procedure(m_Value);
             }
 
-            L_PRINT(LOG_INFO) << CS_XOR("\"signature\" Couldn't find " << m_Name << " because{} " << m_Value.Get<void*>() << "was not loaded " << i << " | index.");
+            L_PRINT(LOG_INFO) << CS_XOR("signature found: ") << m_Name
+                << CS_XOR(" address=") << m_Value.Get<void*>()
+                << CS_XOR(" candidate=") << i;
+            return;
         }
     }
 
-    L_PRINT(LOG_ERROR) << CS_XOR("\"signature\" Couldn't find ");
+    L_PRINT(LOG_ERROR) << CS_XOR("signature not found: ") << m_Name
+        << CS_XOR(" in ") << m_LibraryName;
 
 }
 

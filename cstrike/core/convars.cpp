@@ -2,10 +2,12 @@
 #include <vector>
 // used: [stl] find_if
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <limits>
 #include <string>
+#include <type_traits>
 #include <unordered_set>
 
 #include "convars.h"
@@ -26,6 +28,7 @@ struct ReadableRange
 {
 	std::uintptr_t begin;
 	std::uintptr_t end;
+	bool writable;
 };
 
 const std::vector<ReadableRange>& GetReadableRanges()
@@ -41,12 +44,26 @@ const std::vector<ReadableRange>& GetReadableRanges()
 			unsigned long long begin = 0, end = 0;
 			char permissions[5] = {};
 			if (std::sscanf(line, "%llx-%llx %4s", &begin, &end, permissions) == 3 && permissions[0] == 'r')
-				result.push_back({static_cast<std::uintptr_t>(begin), static_cast<std::uintptr_t>(end)});
+				result.push_back({static_cast<std::uintptr_t>(begin), static_cast<std::uintptr_t>(end), permissions[1] == 'w'});
 		}
 		std::fclose(maps);
 		return result;
 	}();
 	return ranges;
+}
+
+bool IsWritable(const void* pointer, std::size_t size)
+{
+	if (pointer == nullptr || size == 0)
+		return false;
+	const auto begin = reinterpret_cast<std::uintptr_t>(pointer);
+	if (begin > std::numeric_limits<std::uintptr_t>::max() - size)
+		return false;
+	const auto end = begin + size;
+	for (const auto& range : GetReadableRanges())
+		if (range.writable && begin >= range.begin && end <= range.end)
+			return true;
+	return false;
 }
 
 bool IsReadable(const void* pointer, std::size_t size)
@@ -117,6 +134,85 @@ std::vector<CConVar*> GetNativeConVars()
 		result.push_back(convar);
 	}
 	return result;
+}
+
+void LogNativeConVarFailure(const char* operation, CConVar* convar, EConVarType expected, const char* reason)
+{
+	static std::unordered_set<std::string> emitted;
+	const char* name = "<invalid>";
+	if (convar != nullptr && IsReadable(convar, sizeof(void*)) &&
+		IsReadableString(*reinterpret_cast<const char* const*>(convar)))
+		name = *reinterpret_cast<const char* const*>(convar);
+	char key[384] = {};
+	std::snprintf(key, sizeof(key), "%s:%p:%d:%s", operation, static_cast<void*>(convar),
+		static_cast<int>(expected), reason);
+	if (!emitted.insert(key).second)
+		return;
+	if (FILE* output = std::fopen("/tmp/cs2_cvar_debug.log", "a"))
+	{
+		std::fprintf(output, "[cvar] %s name=%s ptr=%p expected_type=%d reason=%s\n",
+			operation, name, static_cast<void*>(convar), static_cast<int>(expected), reason);
+		std::fclose(output);
+	}
+}
+
+template <typename T>
+bool ReadNativeConVar(CConVar* convar, EConVarType expected, T& value)
+{
+	if (convar == nullptr || !IsReadable(convar, 0x58))
+	{
+		LogNativeConVarFailure("read", convar, expected, "invalid-object");
+		return false;
+	}
+	if (convar->nType != static_cast<std::uint32_t>(expected))
+	{
+		LogNativeConVarFailure("read", convar, expected, "type-mismatch");
+		return false;
+	}
+	const auto* storage = reinterpret_cast<const std::uint8_t*>(convar) + 0x50;
+	if (!IsReadable(storage, sizeof(T)))
+	{
+		LogNativeConVarFailure("read", convar, expected, "unreadable-value");
+		return false;
+	}
+	std::memcpy(&value, storage, sizeof(T));
+	return true;
+}
+
+template <typename T>
+bool WriteNativeConVar(CConVar* convar, EConVarType expected, T value, T* readback)
+{
+	if (convar == nullptr || !IsReadable(convar, 0x58))
+	{
+		LogNativeConVarFailure("write", convar, expected, "invalid-object");
+		return false;
+	}
+	if (convar->nType != static_cast<std::uint32_t>(expected))
+	{
+		LogNativeConVarFailure("write", convar, expected, "type-mismatch");
+		return false;
+	}
+	auto* storage = reinterpret_cast<std::uint8_t*>(convar) + 0x50;
+	if (!IsWritable(storage, sizeof(T)))
+	{
+		LogNativeConVarFailure("write", convar, expected, "unwritable-value");
+		return false;
+	}
+	std::memcpy(storage, &value, sizeof(T));
+	T confirmed{};
+	if (!ReadNativeConVar(convar, expected, confirmed))
+		return false;
+	if (readback != nullptr)
+		*readback = confirmed;
+	const bool matches = [&] {
+		if constexpr (std::is_floating_point_v<T>)
+			return std::isfinite(confirmed) && std::fabs(confirmed - value) <= 0.0001;
+		else
+			return confirmed == value;
+	}();
+	if (!matches)
+		LogNativeConVarFailure("write", convar, expected, "readback-mismatch");
+	return matches;
 }
 }
 #endif
@@ -280,6 +376,84 @@ CConVar* CONVAR::Find(const char* name)
 	return nullptr;
 #else
 	return I::Cvar != nullptr ? I::Cvar->Find(FNV1A::Hash(name)) : nullptr;
+#endif
+}
+
+bool CONVAR::ReadBool(CConVar* convar, bool& value)
+{
+#ifdef __linux__
+	return ReadNativeConVar(convar, EConVarType_Bool, value);
+#else
+	if (convar == nullptr || convar->nType != EConVarType_Bool)
+		return false;
+	value = convar->GetValue<bool>();
+	return true;
+#endif
+}
+
+bool CONVAR::ReadFloat(CConVar* convar, float& value)
+{
+#ifdef __linux__
+	return ReadNativeConVar(convar, EConVarType_Float32, value);
+#else
+	if (convar == nullptr || convar->nType != EConVarType_Float32)
+		return false;
+	value = convar->GetValue<float>();
+	return true;
+#endif
+}
+
+bool CONVAR::ReadInt32(CConVar* convar, std::int32_t& value)
+{
+#ifdef __linux__
+	return ReadNativeConVar(convar, EConVarType_Int32, value);
+#else
+	if (convar == nullptr || convar->nType != EConVarType_Int32)
+		return false;
+	value = convar->GetValue<std::int32_t>();
+	return true;
+#endif
+}
+
+bool CONVAR::WriteBool(CConVar* convar, bool value, bool* readback)
+{
+#ifdef __linux__
+	return WriteNativeConVar(convar, EConVarType_Bool, value, readback);
+#else
+	if (convar == nullptr || convar->nType != EConVarType_Bool)
+		return false;
+	convar->GetValue<bool>() = value;
+	if (readback != nullptr)
+		*readback = convar->GetValue<bool>();
+	return convar->GetValue<bool>() == value;
+#endif
+}
+
+bool CONVAR::WriteFloat(CConVar* convar, float value, float* readback)
+{
+#ifdef __linux__
+	return WriteNativeConVar(convar, EConVarType_Float32, value, readback);
+#else
+	if (convar == nullptr || convar->nType != EConVarType_Float32)
+		return false;
+	convar->GetValue<float>() = value;
+	if (readback != nullptr)
+		*readback = convar->GetValue<float>();
+	return std::fabs(convar->GetValue<float>() - value) <= 0.0001f;
+#endif
+}
+
+bool CONVAR::WriteInt32(CConVar* convar, std::int32_t value, std::int32_t* readback)
+{
+#ifdef __linux__
+	return WriteNativeConVar(convar, EConVarType_Int32, value, readback);
+#else
+	if (convar == nullptr || convar->nType != EConVarType_Int32)
+		return false;
+	convar->GetValue<std::int32_t>() = value;
+	if (readback != nullptr)
+		*readback = convar->GetValue<std::int32_t>();
+	return convar->GetValue<std::int32_t>() == value;
 #endif
 }
 

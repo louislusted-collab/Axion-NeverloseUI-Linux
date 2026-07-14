@@ -283,21 +283,23 @@ static inline HANDLE FindFirstFileW(const wchar_t* wszPath, WIN32_FIND_DATAW* da
     if (!slash) slash = strrchr(narrow, '\\');
     if (slash) {
         size_t dlen = slash - narrow;
-        strncpy(dir, narrow, dlen); dir[dlen] = '\0';
-        strncpy(pat, slash+1, MAX_PATH*2);
-    } else { strcpy(dir, "."); strcpy(pat, narrow); }
+        if (dlen >= sizeof(dir)) dlen = sizeof(dir) - 1;
+        memcpy(dir, narrow, dlen); dir[dlen] = '\0';
+        snprintf(pat, sizeof(pat), "%s", slash + 1);
+    } else { snprintf(dir, sizeof(dir), "."); snprintf(pat, sizeof(pat), "%s", narrow); }
     DIR* d = opendir(dir);
     if (!d) return INVALID_HANDLE_VALUE;
-    _LinuxFindHandle* h = (_LinuxFindHandle*)malloc(sizeof(_LinuxFindHandle));
+    _LinuxFindHandle* h = (_LinuxFindHandle*)calloc(1, sizeof(_LinuxFindHandle));
+    if (!h) { closedir(d); return INVALID_HANDLE_VALUE; }
     h->dir = d;
-    strncpy(h->path, dir, MAX_PATH*2);
-    strncpy(h->pattern, pat, MAX_PATH*2);
+    snprintf(h->path, sizeof(h->path), "%s", dir);
+    snprintf(h->pattern, sizeof(h->pattern), "%s", pat);
     // find first matching entry
     struct dirent* ent;
     while ((ent = readdir(d)) != nullptr) {
         if (ent->d_name[0] == '.') continue;
         if (_match_pattern(ent->d_name, h->pattern)) {
-            strncpy(h->data._cFileNameA, ent->d_name, MAX_PATH);
+            snprintf(h->data._cFileNameA, sizeof(h->data._cFileNameA), "%s", ent->d_name);
             mbstowcs(h->data.cFileName, ent->d_name, MAX_PATH);
             h->data.cFileName[MAX_PATH-1] = 0;
             h->data.dwFileAttributes = 0;
@@ -313,7 +315,7 @@ static inline BOOL FindNextFileW(HANDLE hFind, WIN32_FIND_DATAW* data) {
     while ((ent = readdir(h->dir)) != nullptr) {
         if (ent->d_name[0] == '.') continue;
         if (_match_pattern(ent->d_name, h->pattern)) {
-            strncpy(h->data._cFileNameA, ent->d_name, MAX_PATH);
+            snprintf(h->data._cFileNameA, sizeof(h->data._cFileNameA), "%s", ent->d_name);
             mbstowcs(h->data.cFileName, ent->d_name, MAX_PATH);
             h->data.cFileName[MAX_PATH-1] = 0;
             h->data.dwFileAttributes = 0;

@@ -469,7 +469,7 @@ void CS_FASTCALL H::HandleGameEvents(void* rcx, IGameEvent* const ev)
 		return 	original(rcx, ev);
 
 	switch (const char* event_name{ ev->GetName() }; FNV1A::Hash(event_name)) {
-	case FNV1A::HashConst(CS_XOR("player_death")): {
+	case FNV1A::HashConst("player_death"): {
 		auto controller = SDK::LocalController;
 		if (!controller)
 			break;
@@ -483,7 +483,7 @@ void CS_FASTCALL H::HandleGameEvents(void* rcx, IGameEvent* const ev)
 		F::LEGIT::legit->Events(ev, F::LEGIT::events::player_death);
 
 	} break;
-	case FNV1A::HashConst(CS_XOR("round_start")): {
+	case FNV1A::HashConst("round_start"): {
 		auto controller = SDK::LocalController;
 		if (!controller)
 			break;

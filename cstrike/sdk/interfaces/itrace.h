@@ -16,6 +16,36 @@
 #include <array>
 #include <cstddef>
 
+namespace TRACE
+{
+	inline constexpr std::uint64_t kNativeShotMask = 0x1C3003ULL;
+	inline constexpr std::uint64_t kNativeSolidMask = 0x1C1003ULL;
+
+	struct NativeResult
+	{
+		Vector_t start{};
+		Vector_t end{};
+		Vector_t normal{};
+		float fraction = 1.0f;
+		C_BaseEntity* entity = nullptr;
+		bool hit = false;
+		bool allSolid = false;
+	};
+
+	// The Linux implementation is build-gated and performs a zero-length trace
+	// self-test before reporting ready. These helpers return false when the ABI
+	// gate is closed; a successful call can still produce result.hit == false.
+	bool NativeReady();
+	bool NativeLine(const Vector_t& start, const Vector_t& end,
+		C_BaseEntity* skip, NativeResult& result,
+		std::uint64_t mask = kNativeShotMask);
+	bool NativeHull(const Vector_t& start, const Vector_t& end,
+		const Vector_t& mins, const Vector_t& maxs, C_BaseEntity* skip,
+		NativeResult& result, std::uint64_t mask = kNativeSolidMask);
+	void RejectNativeCall(const char* operation);
+	std::uint64_t RejectedNativeCalls();
+}
+
 #define PAD_CLASS_DEBUG(sz) int COMBINE2(pad_, __COUNTER__)[sz];
 #define CS2_PAD( number, size )                          \
 private:                                                 \
@@ -197,24 +227,42 @@ class i_trace
 public:	// cHoca
 	void InitializeTraceInfo(game_trace_t* const hit )
 	{
+#ifdef __linux__
+		if (hit != nullptr)
+			*hit = {};
+		TRACE::RejectNativeCall("InitializeTraceInfo");
+		return;
+#else
 		using function_t = void(__fastcall*)(game_trace_t*);
 		static function_t fn = reinterpret_cast<function_t>(MEM::FindPattern(CLIENT_DLL, "48 89 5C 24 08 57 48 83 EC 20 48 8B D9 33 FF 48 8B 0D"));
 		CS_ASSERT(fn != nullptr);
 		fn(hit);
+#endif
 
 	}
 	void InitializeTrace(game_trace_t& trace)
 	{
+#ifdef __linux__
+		trace = {};
+		TRACE::RejectNativeCall("InitializeTrace");
+		return;
+#else
 		using function_t = void(__fastcall*)(game_trace_t&);
 		static function_t fn = reinterpret_cast<function_t>(MEM::FindPattern(CLIENT_DLL, "48 89 5C 24 08 57 48 83 EC 20 48 8B D9 33 FF 48 8B 0D"));
 		CS_ASSERT(fn != nullptr);
 		fn(trace);
+#endif
 
 	}
 	// cHoca
 
 	void Init(trace_filter_t& filter, C_CSPlayerPawn* skip, uint64_t mask, uint8_t layer, uint16_t idk)
 	{
+#ifdef __linux__
+		filter = {};
+		TRACE::RejectNativeCall("InitFilter");
+		return;
+#else
 		//initfilter_19A770((__int64)filter, a2, 536577i64, 4, 7);
 		using function_t = trace_filter_t*(__fastcall*)(trace_filter_t&, void*, uint64_t, uint8_t, uint16_t);
 		static function_t fn = reinterpret_cast<function_t>(MEM::FindPattern(CLIENT_DLL, CS_XOR("48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 20 0F B6 41 37 33")));
@@ -226,6 +274,7 @@ public:	// cHoca
 		CS_ASSERT(fn != nullptr);
 
 		fn(filter, skip, mask, layer, idk);
+#endif
 	}
 	//	__int64 __fastcall sub_695330(__int64 a1, __int64 a2, __int64 a3, __int64 a4, float a5, int a6, float a7)
 	// #STR: "particles/impact_fx/impact_wallbang_heavy.vpcf", "particles/impact_fx/impact_wallbang_light.vpcf", "particles/impact_fx/impact_wallbang_light_silent.vpcf", "gunshotsplash"
@@ -233,6 +282,12 @@ public:	// cHoca
 	//abaixo da funcao
 	void ClipTraceToPlayers(Vector_t& start, Vector_t& end, trace_filter_t* filter, game_trace_t* trace, float min, int length, float max)
 	{	// cHoca
+#ifdef __linux__
+		if (trace != nullptr)
+			*trace = {};
+		TRACE::RejectNativeCall("ClipTraceToPlayers");
+		return;
+#else
 
 		using function_t = void(__fastcall*)(Vector_t&, Vector_t&, trace_filter_t*, game_trace_t*, float, int, float);
 		static function_t fn = reinterpret_cast<function_t>(MEM::FindPattern(CLIENT_DLL, CLIP_TRACE_TO_PLAYERS));
@@ -245,6 +300,7 @@ public:	// cHoca
 		CS_ASSERT(fn != nullptr);
 
 		fn(start, end, filter, trace, min, max, length);
+#endif
 	}
 	// cHoca
 	// client.dll; 48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 48 89 7C 24 20 41 56 48 83 EC 40 F2
@@ -252,27 +308,43 @@ public:	// cHoca
 
 	 static void get_trace_info(trace_data_t* trace, game_trace_t* hit,
 		const float unknown_float, void* unknown) {
+#ifdef __linux__
+		if (hit != nullptr)
+			*hit = {};
+		TRACE::RejectNativeCall("GetTraceInfo");
+		return;
+#else
 	
 		using function_t = void(__fastcall*)(trace_data_t*, game_trace_t*, float, void*);
 		static function_t fn = reinterpret_cast<function_t>(MEM::FindPattern(CLIENT_DLL, CS_XOR("48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 48 83 EC 60 48 8B E9 0F")));
 
 		return fn(trace, hit, unknown_float, unknown);
+#endif
 	}
 	// william: there is no need to rebuild this function.
 	// client.dll; 48 8B C4 44 89 48 20 55 57 41 55
 	static bool handle_bullet_penetration(trace_data_t* const trace, void* stats,
 		UpdateValueT* const mod_value,
 		const bool draw_showimpacts = false) {
+#ifdef __linux__
+		TRACE::RejectNativeCall("HandleBulletPenetration");
+		return false;
+#else
 
 		using function_t = bool(__fastcall*)(trace_data_t*, void*, UpdateValueT*, void*, void*, void*, void*, void*, bool);
 		static function_t fn = reinterpret_cast<function_t>(MEM::FindPattern(CLIENT_DLL, CS_XOR("48 8B C4 44 89 48 20 55 57 41 55")));
 
 		return fn(trace, stats, mod_value, nullptr, nullptr, nullptr, nullptr, nullptr, draw_showimpacts);
+#endif
 	}
 
 	static void CreateTrace(trace_data_t* const trace, const Vector_t start,
 		const Vector_t end, const trace_filter_t& filler,
 		const int penetration_count) {
+#ifdef __linux__
+		TRACE::RejectNativeCall("CreateTrace");
+		return;
+#else
 
 
 		using function_t = void(__fastcall*)(trace_data_t*, Vector_t, Vector_t,
@@ -280,15 +352,22 @@ public:	// cHoca
 		static function_t fn = reinterpret_cast<function_t>(MEM::FindPattern(CLIENT_DLL, CS_XOR("48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 18 57 41 56 41 57 48 83 EC 40 F2")));
 		CS_ASSERT(fn != nullptr);
 		return fn(trace, start, end, filler, penetration_count);
+#endif
 	}
 
 	// #STR: "Physics/TraceShape (Client)" then xref
 	void TraceShape(ray_t& ray, Vector_t* start, Vector_t* end, trace_filter_t filter, game_trace_t& trace)
 	{
+#ifdef __linux__
+		trace = {};
+		TRACE::RejectNativeCall("TraceShape");
+		return;
+#else
 		using function_t = bool(__fastcall*)(void*, ray_t&, Vector_t*, Vector_t*, trace_filter_t, game_trace_t&);
 		static function_t fn = reinterpret_cast<function_t>(MEM::FindPattern(CLIENT_DLL, "48 89 5C 24 10 48 89 74 24 18 48 89 7C 24 20 48 89 4C 24 08 55 41 54 41 55 41 56 41 57 48 8D"));
 		CS_ASSERT(fn != nullptr);
 		fn(this, ray, start, end, filter, trace);
+#endif
 
 	}
 };

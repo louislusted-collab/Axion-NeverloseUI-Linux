@@ -5,6 +5,7 @@
 #include <cstddef>
 
 class C_CSPlayerPawn;
+class C_BaseEntity;
 struct Color_t;
 
 namespace NativeChams
@@ -12,6 +13,7 @@ namespace NativeChams
 bool Install();
 void Destroy();
 void UpdateTargets(C_CSPlayerPawn* const* targets, std::size_t count, C_CSPlayerPawn* localTarget = nullptr);
+void UpdateBombTarget(C_BaseEntity* bombTarget);
 void UpdateColors(const Color_t& visible, const Color_t& hidden);
 }
 

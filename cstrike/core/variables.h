@@ -133,6 +133,9 @@ struct Variables_t
 	C_ADD_VARIABLE(int, esp_box_style, VISUAL_OVERLAY_BOX_FULL);
 	C_ADD_VARIABLE(bool, esp_box_fill, false);
 	C_ADD_VARIABLE(ColorPickerVar_t, esp_box_fill_color, ColorPickerVar_t(0, 0, 0, 70));
+	C_ADD_VARIABLE(bool, esp_box_fill_gradient, false);
+	C_ADD_VARIABLE(ColorPickerVar_t, esp_box_fill_top_color, ColorPickerVar_t(20, 20, 24, 75));
+	C_ADD_VARIABLE(ColorPickerVar_t, esp_box_fill_bottom_color, ColorPickerVar_t(0, 0, 0, 25));
 	C_ADD_VARIABLE(bool, esp_armor_bar, false);
 	C_ADD_VARIABLE(ColorPickerVar_t, esp_armor_color, ColorPickerVar_t(80, 145, 255));
 	C_ADD_VARIABLE(bool, esp_distance, false);
@@ -148,8 +151,13 @@ struct Variables_t
 	C_ADD_VARIABLE(bool, chams_arms, false);
 	C_ADD_VARIABLE(bool, chams_sleeves, false);
 	C_ADD_VARIABLE(bool, chams_held_weapon, false);
+	C_ADD_VARIABLE(bool, chams_knife, false);
 	C_ADD_VARIABLE(bool, chams_grenades, false);
 	C_ADD_VARIABLE(bool, chams_bomb, false);
+	C_ADD_VARIABLE(ColorPickerVar_t, chams_arms_color, ColorPickerVar_t(105, 170, 255));
+	C_ADD_VARIABLE(ColorPickerVar_t, chams_sleeves_color, ColorPickerVar_t(185, 105, 255));
+	C_ADD_VARIABLE(ColorPickerVar_t, chams_knife_color, ColorPickerVar_t(255, 120, 70));
+	C_ADD_VARIABLE(float, chams_glow_intensity, 10.f);
 	C_ADD_VARIABLE(bool, bNoShadow, false);
 
 	C_ADD_VARIABLE(ColorPickerVar_t, colVisualChams, ColorPickerVar_t(0, 255, 0));
@@ -161,6 +169,18 @@ struct Variables_t
 	C_ADD_VARIABLE(bool, bRemoveScopeOverlay, false);
 	C_ADD_VARIABLE(bool, bRemoveAimPunch, false);
 	C_ADD_VARIABLE(bool, bRemoveMotionBlur, false);
+	C_ADD_VARIABLE(bool, world_color_enable, false);
+	C_ADD_VARIABLE(ColorPickerVar_t, world_color, ColorPickerVar_t(180, 180, 180));
+	C_ADD_VARIABLE(bool, sky_color_enable, false);
+	C_ADD_VARIABLE(ColorPickerVar_t, sky_color, ColorPickerVar_t(120, 150, 255));
+	C_ADD_VARIABLE(bool, dropped_weapon_esp, false);
+	C_ADD_VARIABLE(bool, grenade_trajectory, false);
+	C_ADD_VARIABLE(bool, grenade_bounce_markers, false);
+	C_ADD_VARIABLE(bool, grenade_landing_marker, false);
+	C_ADD_VARIABLE(bool, smoke_duration_timer, false);
+	C_ADD_VARIABLE(bool, molotov_expiration_timer, false);
+	C_ADD_VARIABLE(bool, planted_bomb_timer, false);
+	C_ADD_VARIABLE(ColorPickerVar_t, world_esp_color, ColorPickerVar_t(255, 210, 95));
 
 #pragma endregion
 #pragma region legit
@@ -183,6 +203,33 @@ struct Variables_t
 	C_ADD_VARIABLE(bool, legit_ui_bone_torso, false);
 	C_ADD_VARIABLE(bool, legit_ui_bone_arms, false);
 	C_ADD_VARIABLE(bool, legit_ui_bone_legs, false);
+	C_ADD_VARIABLE(bool, legit_ui_per_weapon, false);
+	C_ADD_VARIABLE(int, legit_ui_profile_selection, 0);
+	C_ADD_VARIABLE(int, legit_ui_target_selection, 0);
+	C_ADD_VARIABLE(bool, legit_ui_visibility_check, true);
+	C_ADD_VARIABLE(bool, legit_ui_smoke_check, true);
+	C_ADD_VARIABLE(bool, legit_ui_flash_check, true);
+	C_ADD_VARIABLE(int, legit_ui_hitbox_mode, 0);
+	C_ADD_VARIABLE(float, legit_ui_reaction_ms, 0.f);
+	C_ADD_VARIABLE_ARRAY(float, 7, legit_profile_smoothness, 120.f);
+	C_ADD_VARIABLE_ARRAY(float, 7, legit_profile_fov, 5.f);
+	C_ADD_VARIABLE_ARRAY(int, 7, legit_profile_target_selection, 0);
+	C_ADD_VARIABLE_ARRAY(bool, 7, legit_profile_visibility_check, true);
+	C_ADD_VARIABLE_ARRAY(bool, 7, legit_profile_smoke_check, true);
+	C_ADD_VARIABLE_ARRAY(bool, 7, legit_profile_flash_check, true);
+	C_ADD_VARIABLE_ARRAY(int, 7, legit_profile_hitbox_mode, 0);
+	C_ADD_VARIABLE_ARRAY(float, 7, legit_profile_reaction_ms, 0.f);
+
+	C_ADD_VARIABLE(bool, trigger_ui_enable, false);
+	C_ADD_VARIABLE(int, trigger_ui_key, VK_LBUTTON);
+	C_ADD_VARIABLE(float, trigger_ui_delay_ms, 0.f);
+	C_ADD_VARIABLE(unsigned int, trigger_ui_hitboxes, 1U | 2U);
+	C_ADD_VARIABLE(bool, trigger_ui_visibility_check, true);
+	C_ADD_VARIABLE(bool, trigger_ui_smoke_check, true);
+	C_ADD_VARIABLE(bool, trigger_ui_scoped_only, false);
+	C_ADD_VARIABLE(bool, trigger_ui_diagnostics, false);
+	C_ADD_VARIABLE(bool, recoil_ui_enable, false);
+	C_ADD_VARIABLE(float, recoil_ui_smoothing_ms, 80.f);
 
 	// Native Linux active-weapon skin override. This is intentionally separate
 	// from the legacy fake-inventory implementation, whose Windows hooks are not
@@ -334,10 +381,38 @@ struct Variables_t
 	C_ADD_VARIABLE(bool, bAntiAim, false);
 	C_ADD_VARIABLE(int, iBaseYawType, 0);
 	C_ADD_VARIABLE(int, iPitchType, 0);
+	C_ADD_VARIABLE(float, antiaim_custom_pitch, 0.f);
+	C_ADD_VARIABLE(float, antiaim_custom_yaw, 0.f);
+	C_ADD_VARIABLE(int, antiaim_jitter_mode, 0);
+	C_ADD_VARIABLE(float, antiaim_jitter_amount, 25.f);
+	C_ADD_VARIABLE(bool, antiaim_spin, false);
+	C_ADD_VARIABLE(float, antiaim_spin_speed, 180.f);
+	C_ADD_VARIABLE(int, antiaim_profile_selection, 0);
+	C_ADD_VARIABLE_ARRAY(bool, 5, antiaim_profile_enable, false);
+	C_ADD_VARIABLE_ARRAY(float, 5, antiaim_profile_yaw, 0.f);
+	C_ADD_VARIABLE_ARRAY(float, 5, antiaim_profile_jitter, 0.f);
+	C_ADD_VARIABLE(int, antiaim_manual_back_key, VK_XBUTTON1);
+	C_ADD_VARIABLE(int, antiaim_manual_forward_key, VK_XBUTTON2);
+	C_ADD_VARIABLE(bool, antiaim_disable_use, true);
 #pragma endregion
 #pragma region rage
 
 	C_ADD_VARIABLE(int, rage_weapon_selection, 0);
+	C_ADD_VARIABLE(bool, rage_auto_shoot, true);
+	C_ADD_VARIABLE_ARRAY(bool, 7, rage_multipoint, false);
+	C_ADD_VARIABLE_ARRAY(float, 7, rage_multipoint_scale, 45.f);
+	C_ADD_VARIABLE_ARRAY(bool, 7, rage_damage_preview, false);
+	C_ADD_VARIABLE_ARRAY(bool, 7, rage_auto_crouch, false);
+	C_ADD_VARIABLE(int, rage_force_body_key, VK_XBUTTON1);
+	C_ADD_VARIABLE(int, rage_force_head_key, VK_XBUTTON2);
+	C_ADD_VARIABLE_ARRAY(bool, 7, rage_lethal_body, false);
+	C_ADD_VARIABLE_ARRAY(bool, 7, rage_prefer_exposed, false);
+	C_ADD_VARIABLE_ARRAY(bool, 7, rage_prefer_low_health, false);
+	C_ADD_VARIABLE_ARRAY(bool, 7, rage_prefer_high_damage, false);
+	C_ADD_VARIABLE_ARRAY(bool, 7, rage_delay_accurate, false);
+	C_ADD_VARIABLE_ARRAY(bool, 7, rage_delay_visible, false);
+	C_ADD_VARIABLE(bool, rage_decision_overlay, false);
+	C_ADD_VARIABLE(bool, rage_shot_logging, true);
 	C_ADD_VARIABLE(bool, rage_silent_aim, false);
 	C_ADD_VARIABLE(bool, rage_delay_aim, false);
 	C_ADD_VARIABLE(int, rage_delay_aim_ms, 0);

@@ -226,6 +226,8 @@ namespace C
 				this->storage.pHeap = MEM::HeapAlloc(this->nStorageSize);
 				CRT::MemoryCopy(this->storage.pHeap, other.storage.pHeap, this->nStorageSize);
 			}
+			else
+				this->storage.pHeap = nullptr;
 		}
 
 		~VariableObject_t()
@@ -237,9 +239,12 @@ namespace C
 
 		VariableObject_t& operator=(VariableObject_t&& other) noexcept
 		{
+			if (this == &other)
+				return *this;
 			// check if heap memory is in use and allocated
 			if (this->nStorageSize > sizeof(this->storage.uLocal) && this->storage.pHeap != nullptr)
 				MEM::HeapFree(this->storage.pHeap);
+			this->storage.pHeap = nullptr;
 
 			this->uNameHash = other.uNameHash;
 			this->uTypeHash = other.uTypeHash;
@@ -264,9 +269,12 @@ namespace C
 
 		VariableObject_t& operator=(const VariableObject_t& other)
 		{
+			if (this == &other)
+				return *this;
 			// check if heap memory is in use and allocated
 			if (this->nStorageSize > sizeof(this->storage.uLocal) && this->storage.pHeap != nullptr)
 				MEM::HeapFree(this->storage.pHeap);
+			this->storage.pHeap = nullptr;
 
 			this->uNameHash = other.uNameHash;
 			this->uTypeHash = other.uTypeHash;
@@ -283,6 +291,8 @@ namespace C
 				this->storage.pHeap = MEM::HeapAlloc(this->nStorageSize);
 				CRT::MemoryCopy(this->storage.pHeap, other.storage.pHeap, this->nStorageSize);
 			}
+			else
+				this->storage.pHeap = nullptr;
 
 			return *this;
 		}
@@ -385,7 +395,7 @@ namespace C
 	bool LoadFile(const std::size_t nFileIndex);
 	/// remove configuration file
 	/// @param[in] nFileIndex index of the exist configuration file name
-	void RemoveFile(const std::size_t nFileIndex);
+	bool RemoveFile(const std::size_t nFileIndex);
 
 	/* @section: values */
 	// all user configuration filenames

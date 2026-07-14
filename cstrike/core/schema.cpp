@@ -66,12 +66,12 @@ bool SCHEMA::Setup(const wchar_t* wszFileName, const char* szModuleName)
 	const int nTableSize = pTypeScope->hashClasses.Count();
 	L_PRINT(LOG_INFO) << CS_XOR("found \"") << nTableSize << CS_XOR("\" schema classes in module");
 
-	UtlTSHashHandle_t* pElements = new UtlTSHashHandle_t[nTableSize + 1U];
-	const auto nElements = pTypeScope->hashClasses.GetElements(0, nTableSize, pElements);
+	std::vector<UtlTSHashHandle_t> elements(static_cast<std::size_t>(nTableSize) + 1U);
+	const auto nElements = pTypeScope->hashClasses.GetElements(0, nTableSize, elements.data());
 
 	for (int i = 0; i < nElements; i++)
 	{
-		const UtlTSHashHandle_t hElement = pElements[i];
+		const UtlTSHashHandle_t hElement = elements[static_cast<std::size_t>(i)];
 
 		if (hElement == 0)
 			continue;
@@ -113,8 +113,6 @@ bool SCHEMA::Setup(const wchar_t* wszFileName, const char* szModuleName)
 		L_PRINT(LOG_INFO) << CS_XOR("dumped \"") << pDeclaredClassInfo->szName << CS_XOR("\" (total: ") << pDeclaredClassInfo->nFieldSize << CS_XOR(" fields)");
 		#endif
 	}
-
-	delete[] pElements;
 
 #ifdef _WIN32
 	::CloseHandle(hOutFile);
@@ -203,14 +201,15 @@ std::uint32_t SCHEMA::GetForeignOffset(const char* szModulenName, const FNV1A_t 
 		return false;
 
 	const int nTableSize = pTypeScope->hashClasses.Count();
-	// allocate memory for elements
-	UtlTSHashHandle_t* pElements = new UtlTSHashHandle_t[nTableSize + 1U];
-	const auto nElements = pTypeScope->hashClasses.GetElements(0, nTableSize, pElements);
+	if (nTableSize <= 0)
+		return 0U;
+	std::vector<UtlTSHashHandle_t> elements(static_cast<std::size_t>(nTableSize) + 1U);
+	const auto nElements = pTypeScope->hashClasses.GetElements(0, nTableSize, elements.data());
 	std::uint32_t uOffset = 0x0;
 
 	for (int i = 0; i < nElements; i++)
 	{
-		const UtlTSHashHandle_t hElement = pElements[i];
+		const UtlTSHashHandle_t hElement = elements[static_cast<std::size_t>(i)];
 
 		if (hElement == 0)
 			continue;
