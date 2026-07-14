@@ -220,7 +220,8 @@ native CreateMove hook, typed CVar readback/restoration, build-gated trace
 self-test, crash-hardened weapon ESP, bounded one-shot overshoot/recovery,
 full eye-to-target active-smoke intersection, repaired ESP/chams/config paths, world
 entities/timers, swept-hull grenade prediction, swapchain-recreation handling,
-planted-C4 lifetime tracking and independent knife chams. Restart and inject
+generation-checked entity/skin reads, planted-C4 terminal-state tracking and
+independent knife chams. Restart and inject
 the new library before promoting any `live verification` row to `user verified`
 or `done`. The current-build native ballistics path reads live weapon damage,
 armor, spread/inaccuracy and damage-scale CVars; consumes gated trace hitgroups

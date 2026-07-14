@@ -70,6 +70,20 @@ generated dependency files also force rebuilds after header changes.
   disconnect early return, preventing commands or raw entity identities from a
   prior map from staying latched. Anti-aim also checks the grenade pin/throw
   transition after attack release instead of redirecting the throw.
+- Native entity enumeration snapshots each 512-entry bucket once per render
+  generation, then validates non-null entities before use. Scene nodes, bone
+  caches, origins, view offsets, view angles, smoke/removal writes and local
+  controller/view-matrix reads now fail closed through checked process reads or
+  writes instead of directly dereferencing a stale schema address. Printable
+  entity names are copied in one bounded read rather than one syscall per byte.
+- The ordinary-gun skin path validates every required econ offset, weapon and
+  viewmodel handle, entity-generation token, attribute vector and write. It
+  preserves the true original state while a skinned weapon is dropped, rejects
+  a recycled pointer generation, restores partial writes on failure and never
+  leaves the engine pointing at a temporary attribute vector after refresh.
+- Planted-bomb chams now require the live planted entity to be ticking,
+  non-defused and before its blow time. The target remains independent of the
+  planter, while terminal bomb state clears it even if the entity object lingers.
 - The `make release` target now recursively selects the release object tree;
   the previous target could silently relink debug objects despite its name.
 

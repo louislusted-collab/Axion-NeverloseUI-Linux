@@ -235,7 +235,7 @@ static bool Setup(HMODULE hModule)
 
 #ifdef __linux__
 	if (!InstallNativeInputHook())
-		SetupDebugLog("native CCSGOInput::CreateMove hook unavailable; present-time angle fallback remains active\n");
+		SetupDebugLog("native CCSGOInput::CreateMove hook unavailable; command-mutating features are held\n");
 	else
 		SetupDebugLog("native CCSGOInput::CreateMove hook installed\n");
 #endif

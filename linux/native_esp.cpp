@@ -25,6 +25,7 @@
 #include <cstring>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cctype>
 #include <cfloat>
@@ -52,6 +53,8 @@ CCSPlayerController** native_local_controller = nullptr;
 QAngle_t* native_view_angles = nullptr;
 bool attempted_matrix_lookup = false;
 std::uint64_t frame_counter = 0;
+std::atomic<std::uint64_t> entity_snapshot_counter{0};
+thread_local std::uint64_t entity_snapshot_generation = 0;
 bool native_thirdperson_active = false;
 bool native_aim_command_queued = false;
 std::uint16_t active_skin_weapon_definition = 0;
@@ -128,6 +131,7 @@ struct OriginalWeaponSkin
 struct AppliedWeaponSkin
 {
     C_CSWeaponBase* weapon = nullptr;
+    std::uint32_t entityToken = INVALID_EHANDLE_INDEX;
     std::uint16_t definition = 0;
     NativeSkinSettings settings{};
     OriginalWeaponSkin original{};
@@ -272,14 +276,21 @@ void DrawOutlinedText(ImDrawList* draw, ImFont* font, const ImVec2& position,
     draw->AddText(font, font->FontSize, position, color, text);
 }
 
+template <typename T>
+bool SafeNativeRead(const void* address, T& value);
+bool IsSaneSchemaOffset(std::uint32_t offset, std::uint32_t maximum);
+
 bone_data* GetLiveBoneData(CGameSceneNode* scene)
 {
     static const std::uint32_t modelStateOffset = SCHEMA::GetOffset("CSkeletonInstance->m_modelState");
     static const std::uint32_t boneCacheOffset =
         SCHEMA::GetOffset("CBodyComponentSkeletonInstance->m_skeletonInstance");
-    if (scene == nullptr || modelStateOffset == 0 || boneCacheOffset == 0)
+    if (scene == nullptr || !IsSaneSchemaOffset(modelStateOffset, 0x10000) ||
+        !IsSaneSchemaOffset(boneCacheOffset, 0x10000))
         return nullptr;
-    return *reinterpret_cast<bone_data**>(reinterpret_cast<std::uint8_t*>(scene) + modelStateOffset + boneCacheOffset);
+    bone_data* bones = nullptr;
+    return SafeNativeRead(reinterpret_cast<std::uint8_t*>(scene) + modelStateOffset +
+        boneCacheOffset, bones) ? bones : nullptr;
 }
 
 bool GetLiveBonePosition(CGameSceneNode* scene, int index, Vector_t& output)
@@ -287,8 +298,16 @@ bool GetLiveBonePosition(CGameSceneNode* scene, int index, Vector_t& output)
     bone_data* bones = GetLiveBoneData(scene);
     if (bones == nullptr || index < 0 || index > 128)
         return false;
-    output = bones[index].pos;
-    const Vector_t origin = scene->GetAbsOrigin();
+    bone_data bone{};
+    static const std::uint32_t sceneOriginOffset =
+        SCHEMA::GetOffset("CGameSceneNode->m_vecAbsOrigin");
+    Vector_t origin{};
+    if (!SafeNativeRead(bones + index, bone) ||
+        !IsSaneSchemaOffset(sceneOriginOffset, 0x1000) ||
+        !SafeNativeRead(reinterpret_cast<const std::uint8_t*>(scene) +
+            sceneOriginOffset, origin))
+        return false;
+    output = bone.pos;
     return output.IsValid() && output.DistToSqr(origin) < 90000.f;
 }
 
@@ -393,9 +412,145 @@ bool SafeNativeRead(const void* address, T& value)
     return read == static_cast<long>(sizeof(value));
 }
 
+bool SafeNativeReadBytes(const void* address, void* destination, std::size_t size)
+{
+    if (address == nullptr || destination == nullptr || size == 0)
+        return false;
+    iovec local{destination, size};
+    iovec remote{const_cast<void*>(address), size};
+    const long read = ::syscall(SYS_process_vm_readv, ::getpid(), &local, 1UL,
+        &remote, 1UL, 0UL);
+    return read == static_cast<long>(size);
+}
+
+template <std::size_t Size>
+bool SafeReadPrintableCString(const char* source, std::array<char, Size>& buffer)
+{
+    static_assert(Size > 1);
+    buffer.fill('\0');
+    if (source == nullptr || !SafeNativeReadBytes(source, buffer.data(), buffer.size()))
+        return false;
+    const auto terminator = std::find(buffer.begin(), buffer.end(), '\0');
+    if (terminator == buffer.begin() || terminator == buffer.end())
+        return false;
+    return std::all_of(buffer.begin(), terminator, [](char character) {
+        return std::isprint(static_cast<unsigned char>(character)) != 0;
+    });
+}
+
+template <typename T>
+bool SafeNativeWrite(void* address, const T& value)
+{
+    if (address == nullptr)
+        return false;
+    iovec local{const_cast<T*>(&value), sizeof(value)};
+    iovec remote{address, sizeof(value)};
+    const long written = ::syscall(SYS_process_vm_writev, ::getpid(), &local, 1UL,
+        &remote, 1UL, 0UL);
+    return written == static_cast<long>(sizeof(value));
+}
+
 bool IsSaneSchemaOffset(std::uint32_t offset, std::uint32_t maximum)
 {
     return offset != 0 && offset <= maximum;
+}
+
+bool SafeResolveEntityPointer(CGameEntitySystem* entities, std::uint32_t handle,
+    void*& entity)
+{
+    entity = nullptr;
+    if (entities == nullptr || handle == INVALID_EHANDLE_INDEX)
+        return false;
+    const int entry = static_cast<int>(handle & ENT_ENTRY_MASK);
+    if (entry < 0 || entry >= MAX_TOTAL_ENTITIES)
+        return false;
+    constexpr std::size_t entriesPerBucket = 512;
+    constexpr std::size_t entityStride = 0x70;
+    constexpr std::size_t maximumBucketCount =
+        (static_cast<std::size_t>(MAX_TOTAL_ENTITIES) + entriesPerBucket - 1) /
+        entriesPerBucket;
+    struct BucketSnapshot
+    {
+        CGameEntitySystem* system = nullptr;
+        std::uint64_t generation = 0;
+        std::size_t bucketIndex = maximumBucketCount;
+        bool valid = false;
+        std::array<std::byte, entriesPerBucket * entityStride> bytes{};
+    };
+    // Eight snapshots cover the entire bounded 4,096-slot world scan while
+    // avoiding a multi-megabyte TLS allocation in a library injected after
+    // CS2 has already created its render threads.
+    static thread_local std::array<BucketSnapshot, 8> snapshots{};
+    const std::size_t bucketIndex = static_cast<std::size_t>(entry) >> 9;
+    if (bucketIndex >= maximumBucketCount)
+        return false;
+    BucketSnapshot& snapshot = snapshots[bucketIndex % snapshots.size()];
+    if (snapshot.system != entities || snapshot.generation != entity_snapshot_generation ||
+        snapshot.bucketIndex != bucketIndex)
+    {
+        snapshot.system = entities;
+        snapshot.generation = entity_snapshot_generation;
+        snapshot.bucketIndex = bucketIndex;
+        snapshot.valid = false;
+        std::uintptr_t bucket = 0;
+        if (SafeNativeRead(reinterpret_cast<const std::uint8_t*>(entities) + 0x10 +
+                0x8 * bucketIndex, bucket) && bucket != 0)
+            snapshot.valid = SafeNativeReadBytes(reinterpret_cast<const void*>(bucket),
+                snapshot.bytes.data(), snapshot.bytes.size());
+    }
+    if (!snapshot.valid)
+        return false;
+    std::memcpy(&entity, snapshot.bytes.data() +
+        entityStride * static_cast<std::size_t>(entry & 0x1FF), sizeof(entity));
+    if (entity == nullptr)
+        return false;
+    void* vtable = nullptr;
+    if (!SafeNativeRead(entity, vtable) || vtable == nullptr)
+    {
+        entity = nullptr;
+        return false;
+    }
+    return true;
+}
+
+bool SafeGetSceneNode(const void* entity, CGameSceneNode*& scene)
+{
+    scene = nullptr;
+    static const std::uint32_t sceneNodeOffset =
+        SCHEMA::GetOffset("C_BaseEntity->m_pGameSceneNode");
+    return entity != nullptr && IsSaneSchemaOffset(sceneNodeOffset, 0x10000) &&
+        SafeNativeRead(static_cast<const std::uint8_t*>(entity) + sceneNodeOffset,
+            scene) && scene != nullptr;
+}
+
+bool SafeGetSceneOrigin(CGameSceneNode* scene, Vector_t& origin)
+{
+    origin = Vector_t{};
+    static const std::uint32_t sceneOriginOffset =
+        SCHEMA::GetOffset("CGameSceneNode->m_vecAbsOrigin");
+    return scene != nullptr && IsSaneSchemaOffset(sceneOriginOffset, 0x1000) &&
+        SafeNativeRead(reinterpret_cast<const std::uint8_t*>(scene) + sceneOriginOffset,
+            origin) && origin.IsValid();
+}
+
+bool SafeIsSceneDormant(CGameSceneNode* scene, bool& dormant)
+{
+    dormant = true;
+    static const std::uint32_t dormantOffset =
+        SCHEMA::GetOffset("CGameSceneNode->m_bDormant");
+    return scene != nullptr && IsSaneSchemaOffset(dormantOffset, 0x1000) &&
+        SafeNativeRead(reinterpret_cast<const std::uint8_t*>(scene) + dormantOffset,
+            dormant);
+}
+
+bool SafeGetViewOffset(const C_CSPlayerPawn* pawn, Vector_t& viewOffset)
+{
+    viewOffset = Vector_t{};
+    static const std::uint32_t viewOffsetField =
+        SCHEMA::GetOffset("C_BaseModelEntity->m_vecViewOffset");
+    return pawn != nullptr && IsSaneSchemaOffset(viewOffsetField, 0x10000) &&
+        SafeNativeRead(reinterpret_cast<const std::uint8_t*>(pawn) + viewOffsetField,
+            viewOffset) && viewOffset.IsValid();
 }
 
 enum class SmokeSegmentResult
@@ -456,9 +611,11 @@ SmokeSegmentResult CheckActiveSmokeSegment(CGameEntitySystem* entities,
         bool unreadableActiveSmoke = false;
         for (int index = 1; index < 4096; ++index)
         {
-            C_BaseEntity* entity = entities->Get<C_BaseEntity>(index);
-            if (entity == nullptr)
+            void* rawEntity = nullptr;
+            if (!SafeResolveEntityPointer(entities, static_cast<std::uint32_t>(index),
+                    rawEntity))
                 continue;
+            auto* entity = static_cast<C_BaseEntity*>(rawEntity);
             CEntityIdentity* identity = nullptr;
             const char* rawName = nullptr;
             if (!SafeNativeRead(reinterpret_cast<const std::uint8_t*>(entity) + identityOffset, identity) ||
@@ -466,23 +623,10 @@ SmokeSegmentResult CheckActiveSmokeSegment(CGameEntitySystem* entities,
                     reinterpret_cast<const std::uint8_t*>(identity) + designerNameOffset, rawName) ||
                 rawName == nullptr)
                 continue;
-            char name[64]{};
-            bool validName = false;
-            for (std::size_t character = 0; character + 1 < sizeof(name); ++character)
-            {
-                if (!SafeNativeRead(rawName + character, name[character]) ||
-                    (!std::isprint(static_cast<unsigned char>(name[character])) && name[character] != '\0'))
-                {
-                    name[0] = '\0';
-                    break;
-                }
-                if (name[character] == '\0')
-                {
-                    validName = character != 0;
-                    break;
-                }
-            }
-            if (!validName || std::string_view(name).find("smokegrenade_projectile") == std::string_view::npos)
+            std::array<char, 64> name{};
+            if (!SafeReadPrintableCString(rawName, name) ||
+                std::string_view(name.data()).find("smokegrenade_projectile") ==
+                    std::string_view::npos)
                 continue;
 
             int beginTick = 0;
@@ -650,28 +794,36 @@ bool SafeReadPlayerName(CCSPlayerController* controller, std::string& name)
     return true;
 }
 
-bool SafeGetEntity(CGameEntitySystem* entities, std::uint32_t handle, C_CSWeaponBase*& weapon)
+template <typename T>
+bool SafeGetEntity(CGameEntitySystem* entities, std::uint32_t handle, T*& entity)
 {
-    weapon = nullptr;
-    if (entities == nullptr || handle == INVALID_EHANDLE_INDEX)
+    entity = nullptr;
+    void* rawEntity = nullptr;
+    if (!SafeResolveEntityPointer(entities, handle, rawEntity))
         return false;
-    const int entry = static_cast<int>(handle & ENT_ENTRY_MASK);
-    if (entry < 0 || entry >= MAX_TOTAL_ENTITIES)
+    entity = static_cast<T*>(rawEntity);
+    return entity != nullptr;
+}
+
+bool SafeGetPlayerPawn(CGameEntitySystem* entities, CCSPlayerController* controller,
+    C_CSPlayerPawn*& pawn)
+{
+    pawn = nullptr;
+    if (entities == nullptr || controller == nullptr)
         return false;
-    std::uintptr_t bucket = 0;
-    if (!SafeNativeRead(reinterpret_cast<const std::uint8_t*>(entities) + 0x10 + 0x8 * (entry >> 9), bucket) ||
-        bucket == 0)
-        return false;
-    if (!SafeNativeRead(reinterpret_cast<const void*>(bucket + 0x70 * (entry & 0x1FF)), weapon) ||
-        weapon == nullptr)
-        return false;
-    void* vtable = nullptr;
-    if (!SafeNativeRead(weapon, vtable) || vtable == nullptr)
+    static const std::array<std::uint32_t, 2> pawnHandleOffsets{
+        SCHEMA::GetOffset("CCSPlayerController->m_hPlayerPawn"),
+        SCHEMA::GetOffset("CBasePlayerController->m_hPawn"),
+    };
+    for (const std::uint32_t offset : pawnHandleOffsets)
     {
-        weapon = nullptr;
-        return false;
+        std::uint32_t handle = INVALID_EHANDLE_INDEX;
+        if (IsSaneSchemaOffset(offset, 0x10000) &&
+            SafeNativeRead(reinterpret_cast<const std::uint8_t*>(controller) + offset,
+                handle) && SafeGetEntity(entities, handle, pawn))
+            return true;
     }
-    return true;
+    return false;
 }
 
 bool GetWeaponDisplay(CGameEntitySystem* entities, C_CSPlayerPawn* pawn, std::string& name,
@@ -1294,11 +1446,11 @@ void ApplyNativeMovement(C_CSPlayerPawn* localPawn)
 
     float viewYaw = native_view_angles != nullptr ? native_view_angles->y : 0.f;
     static const std::uint32_t viewAngleOffset = SCHEMA::GetOffset("C_BasePlayerPawn->v_angle");
-    if (viewAngleOffset != 0)
+    if (IsSaneSchemaOffset(viewAngleOffset, 0x10000))
     {
-        const QAngle_t view = *reinterpret_cast<const QAngle_t*>(
-            reinterpret_cast<const std::uint8_t*>(localPawn) + viewAngleOffset);
-        if (view.IsValid())
+        QAngle_t view{};
+        if (SafeNativeRead(reinterpret_cast<const std::uint8_t*>(localPawn) +
+                viewAngleOffset, view) && view.IsValid())
             viewYaw = view.y;
     }
     constexpr float degrees = 180.f / 3.14159265358979323846f;
@@ -1376,18 +1528,20 @@ void ApplySmokeRemoval(CGameEntitySystem* entities, C_CSPlayerPawn* localPawn)
     const bool wroteParticles = CONVAR::WriteBool(drawParticles, false, &particlesReadback);
 
     auto* pawnBytes = reinterpret_cast<std::uint8_t*>(localPawn);
-    if (overlayAlpha != 0)
-        *reinterpret_cast<float*>(pawnBytes + overlayAlpha) = 0.f;
-    if (smokeAge != 0)
-        *reinterpret_cast<float*>(pawnBytes + smokeAge) = 100000.f;
+    const float clearedOverlay = 0.f;
+    const float expiredSmokeAge = 100000.f;
+    const bool wroteOverlay = IsSaneSchemaOffset(overlayAlpha, 0x10000) &&
+        SafeNativeWrite(pawnBytes + overlayAlpha, clearedOverlay);
+    const bool wroteSmokeAge = IsSaneSchemaOffset(smokeAge, 0x10000) &&
+        SafeNativeWrite(pawnBytes + smokeAge, expiredSmokeAge);
 
     const std::uint64_t now = SDL_GetTicks();
     static std::uint64_t nextLog = 0;
     if (now >= nextLog)
     {
         nextLog = now + 2000;
-        EspLog("[removals] smoke active=1 overlay=0x%x age=0x%x write/readback volume=%d/%d fullres=%d/%d enhance=%d/%d shadow=%d/%d particles=%d/%d",
-            overlayAlpha, smokeAge, wroteVolume, !volumeReadback,
+        EspLog("[removals] smoke active=1 overlay=0x%x/%d age=0x%x/%d write/readback volume=%d/%d fullres=%d/%d enhance=%d/%d shadow=%d/%d particles=%d/%d",
+            overlayAlpha, wroteOverlay, smokeAge, wroteSmokeAge, wroteVolume, !volumeReadback,
             wroteFullResolution, !fullResolutionReadback, wroteEnhance, !enhanceReadback,
             wroteShadow, !shadowReadback, wroteParticles, !particlesReadback);
     }
@@ -1510,8 +1664,12 @@ void ApplyCameraAndRemovals(C_CSPlayerPawn* localPawn)
             static const std::uint32_t viewPunchOffset =
                 SCHEMA::GetOffset("CPlayer_CameraServices->m_vecCsViewPunchAngle");
             CPlayer_CameraServices* cameraServices = localPawn->GetCameraServices();
-            if (cameraServices != nullptr && viewPunchOffset != 0)
-                *reinterpret_cast<QAngle_t*>(reinterpret_cast<std::uint8_t*>(cameraServices) + viewPunchOffset) = {};
+            if (cameraServices != nullptr && IsSaneSchemaOffset(viewPunchOffset, 0x10000))
+            {
+                const QAngle_t clearedPunch{};
+                SafeNativeWrite(reinterpret_cast<std::uint8_t*>(cameraServices) +
+                    viewPunchOffset, clearedPunch);
+            }
         }
     }
     previousFlash = removeFlash;
@@ -1642,8 +1800,8 @@ void ApplyThirdPerson(C_CSPlayerPawn* localPawn)
         }
         return 0U;
     }();
-    if (localPawn != nullptr && thirdPersonOffset != 0)
-        *reinterpret_cast<bool*>(reinterpret_cast<std::uint8_t*>(localPawn) + thirdPersonOffset) = enabled;
+    if (localPawn != nullptr && IsSaneSchemaOffset(thirdPersonOffset, 0x10000))
+        SafeNativeWrite(reinterpret_cast<std::uint8_t*>(localPawn) + thirdPersonOffset, enabled);
 
     static std::uint64_t lastConfirmation = 0;
     if (enabled && SDL_GetTicks() - lastConfirmation > 2000)
@@ -1771,14 +1929,18 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
         return;
     }
 
-    CGameSceneNode* localScene = localPawn != nullptr ? localPawn->GetGameSceneNode() : nullptr;
-    if (localScene == nullptr)
+    CGameSceneNode* localScene = nullptr;
+    Vector_t localOrigin{};
+    Vector_t localViewOffset{};
+    if (!SafeGetSceneNode(localPawn, localScene) ||
+        !SafeGetSceneOrigin(localScene, localOrigin) ||
+        !SafeGetViewOffset(localPawn, localViewOffset))
     {
         stopAim(true);
         LegitLog("[%llu] ABORT local scene node is null", static_cast<unsigned long long>(currentSequence));
         return;
     }
-    const Vector_t localEye = localScene->GetAbsOrigin() + localPawn->m_vecViewOffset();
+    const Vector_t localEye = localOrigin + localViewOffset;
 
     std::string activeWeaponName;
     int activeAmmo = 0;
@@ -1860,16 +2022,16 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
         return angle.IsValid() && std::fabs(angle.x) <= 180.f &&
             std::fabs(angle.y) <= 360.f && std::fabs(angle.z) <= 180.f;
     };
-    if (pawnViewAngleOffset != 0)
+    if (IsSaneSchemaOffset(pawnViewAngleOffset, 0x10000) &&
+        SafeNativeRead(reinterpret_cast<std::uint8_t*>(localPawn) +
+            pawnViewAngleOffset, current))
     {
-        current = *reinterpret_cast<QAngle_t*>(
-            reinterpret_cast<std::uint8_t*>(localPawn) + pawnViewAngleOffset);
         angleSource = "pawn.v_angle";
     }
-    if (!usableAngle(current) && pawnEyeAngleOffset != 0)
+    if (!usableAngle(current) && IsSaneSchemaOffset(pawnEyeAngleOffset, 0x10000) &&
+        SafeNativeRead(reinterpret_cast<std::uint8_t*>(localPawn) +
+            pawnEyeAngleOffset, current))
     {
-        current = *reinterpret_cast<QAngle_t*>(
-            reinterpret_cast<std::uint8_t*>(localPawn) + pawnEyeAngleOffset);
         angleSource = "pawn.eye";
     }
     if (!usableAngle(current) && native_view_angles != nullptr)
@@ -1910,10 +2072,10 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
         static const std::uint32_t cameraPunchOffset =
             SCHEMA::GetOffset("CPlayer_CameraServices->m_vecCsViewPunchAngle");
         CPlayer_CameraServices* camera = localPawn->GetCameraServices();
-        if (camera != nullptr && cameraPunchOffset != 0)
+        if (camera != nullptr && IsSaneSchemaOffset(cameraPunchOffset, 0x10000) &&
+            SafeNativeRead(reinterpret_cast<std::uint8_t*>(camera) +
+                cameraPunchOffset, recoilCorrection))
         {
-            recoilCorrection = *reinterpret_cast<QAngle_t*>(
-                reinterpret_cast<std::uint8_t*>(camera) + cameraPunchOffset);
             recoilCorrection.x *= 2.f;
             recoilCorrection.y *= 2.f;
         }
@@ -1999,16 +2161,19 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
 
     for (int index = 1; index <= 128; ++index)
     {
-        CCSPlayerController* controller = entities->Get<CCSPlayerController>(index);
-        if (controller == nullptr || controller == localController)
+        CCSPlayerController* controller = nullptr;
+        if (!SafeGetEntity(entities, static_cast<std::uint32_t>(index), controller) ||
+            controller == localController)
             continue;
         ++controllersScanned;
-        C_CSPlayerPawn* pawn = entities->Get<C_CSPlayerPawn>(controller->GetPawnHandle());
-        if (pawn == nullptr || pawn == localPawn || pawn->GetHealth() <= 0 || pawn->GetTeam() == localPawn->GetTeam())
+        C_CSPlayerPawn* pawn = nullptr;
+        if (!SafeGetPlayerPawn(entities, controller, pawn) || pawn == localPawn ||
+            pawn->GetHealth() <= 0 || pawn->GetTeam() == localPawn->GetTeam())
             continue;
         ++enemiesScanned;
-        CGameSceneNode* scene = pawn->GetGameSceneNode();
-        if (scene == nullptr || scene->IsDormant())
+        CGameSceneNode* scene = nullptr;
+        bool dormant = true;
+        if (!SafeGetSceneNode(pawn, scene) || !SafeIsSceneDormant(scene, dormant) || dormant)
             continue;
 
         const int candidates[] = {
@@ -2031,7 +2196,12 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
             }
         }
         if (!foundBone)
-            considerTarget(pawn, -1, 99, scene->GetAbsOrigin() + pawn->m_vecViewOffset());
+        {
+            Vector_t origin{};
+            Vector_t viewOffset{};
+            if (SafeGetSceneOrigin(scene, origin) && SafeGetViewOffset(pawn, viewOffset))
+                considerTarget(pawn, -1, 99, origin + viewOffset);
+        }
     }
 
     AimCandidate chosen = lockedCandidate.valid ? lockedCandidate : bestCandidate;
@@ -2301,13 +2471,18 @@ void ApplyNativeTriggerAndRecoil(CGameEntitySystem* entities,
                 reinterpret_cast<const std::uint8_t*>(localPawn) + scopedOffset, scoped) || scoped != 1;
         }
 
-        CGameSceneNode* localScene = localPawn->GetGameSceneNode();
+        CGameSceneNode* localScene = nullptr;
+        Vector_t localOrigin{};
+        Vector_t localViewOffset{};
+        const bool localSceneReady = SafeGetSceneNode(localPawn, localScene) &&
+            SafeGetSceneOrigin(localScene, localOrigin) &&
+            SafeGetViewOffset(localPawn, localViewOffset);
         C_CSPlayerPawn* bestPawn = nullptr;
         int bestBone = -1;
         float bestFov = 9999.f;
-        if (!traceBlocked && !smokeBlocked && !scopeBlocked && localScene != nullptr)
+        if (!traceBlocked && !smokeBlocked && !scopeBlocked && localSceneReady)
         {
-            const Vector_t eye = localScene->GetAbsOrigin() + localPawn->m_vecViewOffset();
+            const Vector_t eye = localOrigin + localViewOffset;
             const unsigned int mask = C_GET(unsigned int, Vars.trigger_ui_hitboxes);
             const struct { int bone; unsigned int bit; } bones[] = {
                 {5, 1U << 0}, {3, 1U << 1}, {6, 1U << 1},
@@ -2316,14 +2491,18 @@ void ApplyNativeTriggerAndRecoil(CGameEntitySystem* entities,
             constexpr float degrees = 180.f / 3.14159265358979323846f;
             for (int index = 1; index <= 128; ++index)
             {
-                CCSPlayerController* controller = entities->Get<CCSPlayerController>(index);
-                if (controller == nullptr || controller == localController)
+                CCSPlayerController* controller = nullptr;
+                if (!SafeGetEntity(entities, static_cast<std::uint32_t>(index), controller) ||
+                    controller == localController)
                     continue;
-                C_CSPlayerPawn* pawn = entities->Get<C_CSPlayerPawn>(controller->GetPawnHandle());
-                if (pawn == nullptr || pawn->GetHealth() <= 0 || pawn->GetTeam() == localPawn->GetTeam())
+                C_CSPlayerPawn* pawn = nullptr;
+                if (!SafeGetPlayerPawn(entities, controller, pawn) ||
+                    pawn->GetHealth() <= 0 || pawn->GetTeam() == localPawn->GetTeam())
                     continue;
-                CGameSceneNode* scene = pawn->GetGameSceneNode();
-                if (scene == nullptr || scene->IsDormant())
+                CGameSceneNode* scene = nullptr;
+                bool dormant = true;
+                if (!SafeGetSceneNode(pawn, scene) ||
+                    !SafeIsSceneDormant(scene, dormant) || dormant)
                     continue;
                 for (const auto& candidate : bones)
                 {
@@ -2436,7 +2615,8 @@ void ApplyNativeAntiAim(CGameEntitySystem* entities, C_CSPlayerPawn* localPawn)
 {
     if (!C_GET(bool, Vars.bAntiAim) || native_aim_command_queued ||
         MENU::bMainWindowOpened || localPawn == nullptr || localPawn->GetHealth() <= 0 ||
-        IsNativeCombatAttackRequested() || IsNativeButtonDown(VK_LBUTTON))
+        IsNativeCombatAttackRequested() || IsNativeButtonDown(VK_LBUTTON) ||
+        IsNativeButtonDown(VK_RBUTTON))
         return;
 
     const bool* keys = SDL_GetKeyboardState(nullptr);
@@ -2578,10 +2758,14 @@ void ApplyNativeRage(CGameEntitySystem* entities, CCSPlayerController* localCont
         return;
     }
 
-    CGameSceneNode* localScene = localPawn->GetGameSceneNode();
-    if (localScene == nullptr)
+    CGameSceneNode* localScene = nullptr;
+    Vector_t localOrigin{};
+    Vector_t localViewOffset{};
+    if (!SafeGetSceneNode(localPawn, localScene) ||
+        !SafeGetSceneOrigin(localScene, localOrigin) ||
+        !SafeGetViewOffset(localPawn, localViewOffset))
         return;
-    const Vector_t localEye = localScene->GetAbsOrigin() + localPawn->m_vecViewOffset();
+    const Vector_t localEye = localOrigin + localViewOffset;
     static const std::uint32_t pawnViewAngleOffset =
         SCHEMA::GetOffset("C_BasePlayerPawn->v_angle");
     QAngle_t* destination = pawnViewAngleOffset != 0
@@ -2658,15 +2842,18 @@ void ApplyNativeRage(CGameEntitySystem* entities, CCSPlayerController* localCont
 
     for (int index = 1; index <= 128; ++index)
     {
-        CCSPlayerController* controller = entities->Get<CCSPlayerController>(index);
-        if (controller == nullptr || controller == localController)
+        CCSPlayerController* controller = nullptr;
+        if (!SafeGetEntity(entities, static_cast<std::uint32_t>(index), controller) ||
+            controller == localController)
             continue;
-        C_CSPlayerPawn* pawn = entities->Get<C_CSPlayerPawn>(controller->GetPawnHandle());
-        if (pawn == nullptr || pawn == localPawn || pawn->GetHealth() <= 0 ||
+        C_CSPlayerPawn* pawn = nullptr;
+        if (!SafeGetPlayerPawn(entities, controller, pawn) || pawn == localPawn ||
+            pawn->GetHealth() <= 0 ||
             pawn->GetTeam() == localPawn->GetTeam())
             continue;
-        CGameSceneNode* scene = pawn->GetGameSceneNode();
-        if (scene == nullptr || scene->IsDormant())
+        CGameSceneNode* scene = nullptr;
+        bool dormant = true;
+        if (!SafeGetSceneNode(pawn, scene) || !SafeIsSceneDormant(scene, dormant) || dormant)
             continue;
         ++pawnsScanned;
 
@@ -3058,8 +3245,28 @@ void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localCont
     static const std::uint32_t steamId = SCHEMA::GetOffset("CBasePlayerController->m_steamID");
     static const std::uint32_t modelState = SCHEMA::GetOffset("CSkeletonInstance->m_modelState");
     static const std::uint32_t meshGroupMask = SCHEMA::GetOffset("CModelState->m_MeshGroupMask");
+    static const std::uint32_t viewModelServicesOffset =
+        SCHEMA::GetOffset("C_CSPlayerPawnBase->m_pViewModelServices");
+    static const std::uint32_t viewModelHandleOffset =
+        SCHEMA::GetOffset("CCSPlayer_ViewModelServices->m_hViewModel");
+    static const std::uint32_t sceneNodeOffset =
+        SCHEMA::GetOffset("C_BaseEntity->m_pGameSceneNode");
+    static const std::uint32_t entityIdentityOffset =
+        SCHEMA::GetOffset("CEntityInstance->m_pEntity");
+    const WeaponDisplayOffsets& displayOffsets = GetWeaponDisplayOffsets();
     if (entities == nullptr || localController == nullptr || localPawn == nullptr ||
-        attributeManager == 0 || itemOffset == 0 || idHigh == 0 || paintKit == 0 || definitionIndex == 0)
+        !displayOffsets.valid || !IsSaneSchemaOffset(myWeapons, 0x10000) ||
+        !IsSaneSchemaOffset(entityIdentityOffset, 0x1000) ||
+        !IsSaneSchemaOffset(attributeManager, 0x10000) ||
+        !IsSaneSchemaOffset(itemOffset, 0x10000) ||
+        !IsSaneSchemaOffset(attributeList, 0x10000) ||
+        !IsSaneSchemaOffset(attributes, 0x1000) ||
+        !IsSaneSchemaOffset(idHigh, 0x10000) ||
+        !IsSaneSchemaOffset(paintKit, 0x10000) ||
+        !IsSaneSchemaOffset(seed, 0x10000) ||
+        !IsSaneSchemaOffset(wear, 0x10000) ||
+        !IsSaneSchemaOffset(statTrak, 0x10000) ||
+        !IsSaneSchemaOffset(definitionIndex, 0x10000))
     {
         active_skin_weapon_definition = 0;
         native_skin_runtime_status = entities == nullptr || localController == nullptr || localPawn == nullptr
@@ -3068,21 +3275,37 @@ void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localCont
         return;
     }
 
-    CPlayer_WeaponServices* services = localPawn->GetWeaponServices();
-    if (services == nullptr)
+    CPlayer_WeaponServices* services = nullptr;
+    std::uint32_t activeWeaponHandle = INVALID_EHANDLE_INDEX;
+    if (!SafeNativeRead(reinterpret_cast<const std::uint8_t*>(localPawn) +
+            displayOffsets.weaponServices, services) || services == nullptr ||
+        !SafeNativeRead(reinterpret_cast<const std::uint8_t*>(services) +
+            displayOffsets.activeWeapon, activeWeaponHandle))
     {
         active_skin_weapon_definition = 0;
         native_skin_runtime_status = NativeSkinRuntimeStatus::WaitingForPlayer;
         return;
     }
 
-    C_CSWeaponBase* activeWeapon = entities->Get<C_CSWeaponBase>(services->m_hActiveWeapon());
+    C_CSWeaponBase* activeWeapon = nullptr;
+    SafeGetEntity(entities, activeWeaponHandle, activeWeapon);
     const auto getItem = [&](C_CSWeaponBase* weapon) -> std::uint8_t* {
         return weapon == nullptr ? nullptr : reinterpret_cast<std::uint8_t*>(weapon) + attributeManager + itemOffset;
     };
     const auto getDefinition = [&](C_CSWeaponBase* weapon) -> std::uint16_t {
         std::uint8_t* item = getItem(weapon);
-        return item == nullptr ? 0 : *reinterpret_cast<const std::uint16_t*>(item + definitionIndex);
+        std::uint16_t definition = 0;
+        return item != nullptr && SafeNativeRead(item + definitionIndex, definition)
+            ? definition : 0;
+    };
+    const auto getEntityToken = [&](const void* weapon) -> std::uint32_t {
+        CEntityIdentity* identity = nullptr;
+        std::uint32_t token = INVALID_EHANDLE_INDEX;
+        if (weapon != nullptr && SafeNativeRead(
+                reinterpret_cast<const std::uint8_t*>(weapon) + entityIdentityOffset,
+                identity) && identity != nullptr)
+            SafeNativeRead(reinterpret_cast<const std::uint8_t*>(identity) + 0x10, token);
+        return token;
     };
     active_skin_weapon_definition = getDefinition(activeWeapon);
     if (active_skin_weapon_definition == 0)
@@ -3103,8 +3326,11 @@ void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localCont
         EspLog("[skin] migrated legacy profile to definition=%u", active_skin_weapon_definition);
     }
 
-    const std::uint32_t ownerAccount = steamId == 0 ? 0U : static_cast<std::uint32_t>(
-        *reinterpret_cast<const std::uint64_t*>(reinterpret_cast<std::uint8_t*>(localController) + steamId));
+    std::uint64_t ownerSteamId = 0;
+    if (steamId != 0)
+        SafeNativeRead(reinterpret_cast<const std::uint8_t*>(localController) + steamId,
+            ownerSteamId);
+    const std::uint32_t ownerAccount = static_cast<std::uint32_t>(ownerSteamId);
     static bool loggedOffsets = false;
     if (!loggedOffsets)
     {
@@ -3130,42 +3356,47 @@ void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localCont
 
     std::array<C_CSWeaponBase*, 64> ownedWeapons{};
     std::size_t ownedWeaponCount = 0;
-    if (myWeapons != 0)
+    C_NetworkUtlVectorBase<CBaseHandle> collection{};
+    if (SafeNativeRead(reinterpret_cast<const std::uint8_t*>(services) + myWeapons,
+            collection) && collection.pElements != nullptr && collection.nSize <= 64)
     {
-        auto* collection = reinterpret_cast<C_NetworkUtlVectorBase<CBaseHandle>*>(
-            reinterpret_cast<std::uint8_t*>(services) + myWeapons);
-        if (collection->pElements != nullptr)
+        for (std::uint32_t index = 0; index < collection.nSize; ++index)
         {
-            const std::uint32_t count = std::min(collection->nSize, 64U);
-            for (std::uint32_t index = 0; index < count; ++index)
-            {
-                C_CSWeaponBase* weapon = entities->Get<C_CSWeaponBase>(collection->pElements[index]);
-                if (weapon != nullptr &&
-                    std::find(ownedWeapons.begin(), ownedWeapons.begin() + ownedWeaponCount, weapon) ==
-                        ownedWeapons.begin() + ownedWeaponCount)
-                    ownedWeapons[ownedWeaponCount++] = weapon;
-            }
+            std::uint32_t handle = INVALID_EHANDLE_INDEX;
+            C_CSWeaponBase* weapon = nullptr;
+            if (!SafeNativeRead(collection.pElements + index, handle) ||
+                !SafeGetEntity(entities, handle, weapon))
+                continue;
+            if (std::find(ownedWeapons.begin(), ownedWeapons.begin() + ownedWeaponCount,
+                    weapon) == ownedWeapons.begin() + ownedWeaponCount)
+                ownedWeapons[ownedWeaponCount++] = weapon;
         }
     }
     if (ownedWeaponCount == 0 && activeWeapon != nullptr)
         ownedWeapons[ownedWeaponCount++] = activeWeapon;
 
     static C_CSWeaponBase* previousActiveWeapon = nullptr;
-    const bool activeWeaponChanged = activeWeapon != previousActiveWeapon;
+    static std::uint32_t previousActiveToken = INVALID_EHANDLE_INDEX;
+    const std::uint32_t activeWeaponToken = getEntityToken(activeWeapon);
+    const bool activeWeaponChanged = activeWeapon != previousActiveWeapon ||
+        activeWeaponToken != previousActiveToken;
     previousActiveWeapon = activeWeapon;
+    previousActiveToken = activeWeaponToken;
 
-    // Release state from dropped/destroyed weapons before allocating state for
-    // replacements. This avoids a one-frame failure when a full inventory is
-    // recreated during a team switch or respawn.
+    // Keep state while a dropped weapon entity is still alive. If it is picked
+    // up again, its real pre-override values must remain available for restore;
+    // recapturing the already-overridden fields would make that impossible.
+    // Destroyed/recycled entities fail the checked vtable/definition reads and
+    // release their slot before replacements are processed.
     for (AppliedWeaponSkin& state : appliedStates)
     {
         if (state.weapon == nullptr)
             continue;
-        const bool stillOwned = std::any_of(ownedWeapons.begin(), ownedWeapons.begin() + ownedWeaponCount,
-            [&](C_CSWeaponBase* weapon) {
-                return weapon == state.weapon && getDefinition(weapon) == state.definition;
-            });
-        if (!stillOwned)
+        void* vtable = nullptr;
+        const bool stillValid = SafeNativeRead(state.weapon, vtable) && vtable != nullptr &&
+            getEntityToken(state.weapon) == state.entityToken &&
+            getDefinition(state.weapon) == state.definition;
+        if (!stillValid)
             state = {};
     }
 
@@ -3175,17 +3406,26 @@ void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localCont
     std::vector<AppliedWeaponSkin*> restoredThisPass;
     bool shouldRegenerate = false;
 
+    const auto getSceneNode = [&](const void* entity) -> CGameSceneNode* {
+        CGameSceneNode* scene = nullptr;
+        if (entity != nullptr && IsSaneSchemaOffset(sceneNodeOffset, 0x10000))
+            SafeNativeRead(static_cast<const std::uint8_t*>(entity) + sceneNodeOffset,
+                scene);
+        return scene;
+    };
     const auto getMeshMask = [&](CGameSceneNode* scene) -> std::uint64_t {
         if (scene == nullptr || modelState == 0 || meshGroupMask == 0)
             return 1;
-        return *reinterpret_cast<const std::uint64_t*>(
-            reinterpret_cast<const std::uint8_t*>(scene) + modelState + meshGroupMask);
+        std::uint64_t mask = 1;
+        SafeNativeRead(reinterpret_cast<const std::uint8_t*>(scene) +
+            modelState + meshGroupMask, mask);
+        return mask;
     };
-    const auto setMeshMask = [&](CGameSceneNode* scene, std::uint64_t mask) {
+    const auto setMeshMask = [&](CGameSceneNode* scene, std::uint64_t mask) -> bool {
         if (scene == nullptr || modelState == 0 || meshGroupMask == 0)
-            return;
+            return false;
         auto* state = reinterpret_cast<std::uint8_t*>(scene) + modelState;
-        *reinterpret_cast<std::uint64_t*>(state + meshGroupMask) = mask;
+        return SafeNativeWrite(state + meshGroupMask, mask);
     };
 
     const auto prepareAttributes = [&](std::uint8_t* item, const NativeSkinSettings& settings) {
@@ -3193,21 +3433,31 @@ void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localCont
             return false;
         auto* list = reinterpret_cast<C_NetworkUtlVectorBase<NativeEconAttribute>*>(
             item + attributeList + attributes);
-        if (list->nSize > 64 || (list->nSize != 0 && list->pElements == nullptr))
+        C_NetworkUtlVectorBase<NativeEconAttribute> listSnapshot{};
+        if (!SafeNativeRead(list, listSnapshot) || listSnapshot.nSize > 64 ||
+            (listSnapshot.nSize != 0 && listSnapshot.pElements == nullptr))
         {
             EspLog("[skin] rejected invalid attribute list item=%p count=%u elements=%p",
-                item, list->nSize, list->pElements);
+                item, listSnapshot.nSize, listSnapshot.pElements);
             return false;
         }
 
         temporaryAttributes.emplace_back();
         TemporarySkinAttributes& temporary = temporaryAttributes.back();
         temporary.list = list;
-        temporary.originalSize = list->nSize;
-        temporary.originalElements = list->pElements;
-        temporary.attributes.reserve(static_cast<std::size_t>(list->nSize) + 3);
-        if (list->nSize != 0)
-            temporary.attributes.assign(list->pElements, list->pElements + list->nSize);
+        temporary.originalSize = listSnapshot.nSize;
+        temporary.originalElements = listSnapshot.pElements;
+        temporary.attributes.reserve(static_cast<std::size_t>(listSnapshot.nSize) + 3);
+        for (std::uint32_t index = 0; index < listSnapshot.nSize; ++index)
+        {
+            NativeEconAttribute attribute{};
+            if (!SafeNativeRead(listSnapshot.pElements + index, attribute))
+            {
+                temporaryAttributes.pop_back();
+                return false;
+            }
+            temporary.attributes.push_back(attribute);
+        }
 
         const std::array<std::pair<std::uint16_t, float>, 3> values{{
             {6, static_cast<float>(settings.paint)},
@@ -3228,14 +3478,25 @@ void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localCont
             iterator->value = value;
             iterator->initialValue = value;
         }
-        list->pElements = temporary.attributes.data();
-        list->nSize = static_cast<std::uint32_t>(temporary.attributes.size());
+        NativeEconAttribute* replacement = temporary.attributes.data();
+        const std::uint32_t replacementSize =
+            static_cast<std::uint32_t>(temporary.attributes.size());
+        if (!SafeNativeWrite(&list->pElements, replacement) ||
+            !SafeNativeWrite(&list->nSize, replacementSize))
+        {
+            SafeNativeWrite(&list->pElements, temporary.originalElements);
+            SafeNativeWrite(&list->nSize, temporary.originalSize);
+            temporaryAttributes.pop_back();
+            return false;
+        }
         return true;
     };
 
     const auto findState = [&](C_CSWeaponBase* weapon, std::uint16_t definition) -> AppliedWeaponSkin* {
+        const std::uint32_t token = getEntityToken(weapon);
         for (AppliedWeaponSkin& state : appliedStates)
-            if (state.weapon == weapon && state.definition == definition)
+            if (state.weapon == weapon && state.entityToken == token &&
+                state.definition == definition)
                 return &state;
         return nullptr;
     };
@@ -3245,22 +3506,31 @@ void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localCont
                 return &state;
         return nullptr;
     };
-    const auto restoreState = [&](AppliedWeaponSkin& state, std::uint8_t* base, std::uint8_t* item) {
-        *reinterpret_cast<std::int32_t*>(item + idHigh) = state.original.idHigh;
-        if (idLow != 0) *reinterpret_cast<std::int32_t*>(item + idLow) = state.original.idLow;
-        if (accountId != 0) *reinterpret_cast<std::uint32_t*>(item + accountId) = state.original.account;
-        if (entityQuality != 0) *reinterpret_cast<std::uint32_t*>(item + entityQuality) = state.original.quality;
-        if (initialized != 0) *reinterpret_cast<bool*>(item + initialized) = state.original.initialized;
-        if (disallowSoc != 0) *reinterpret_cast<bool*>(item + disallowSoc) = state.original.disallowSoc;
-        if (storeItem != 0) *reinterpret_cast<bool*>(item + storeItem) = state.original.storeItem;
-        if (restoreMaterial != 0) *reinterpret_cast<bool*>(item + restoreMaterial) = state.original.restoreMaterial;
-        if (attributesInitialized != 0) *reinterpret_cast<bool*>(base + attributesInitialized) = state.original.attributesInitialized;
-        if (attachmentDirty != 0) *reinterpret_cast<bool*>(base + attachmentDirty) = true;
-        *reinterpret_cast<std::int32_t*>(base + paintKit) = state.original.paint;
-        if (seed != 0) *reinterpret_cast<std::int32_t*>(base + seed) = state.original.seed;
-        if (wear != 0) *reinterpret_cast<float*>(base + wear) = state.original.wear;
-        if (statTrak != 0) *reinterpret_cast<std::int32_t*>(base + statTrak) = state.original.statTrak;
-        setMeshMask(state.weapon->GetGameSceneNode(), state.original.meshMask);
+    const auto restoreState = [&](AppliedWeaponSkin& state, std::uint8_t* base,
+            std::uint8_t* item) -> bool {
+        const auto writeOptional = [](std::uint8_t* address, std::uint32_t offset,
+                const auto& value) {
+            return offset == 0 || SafeNativeWrite(address + offset, value);
+        };
+        bool restored = SafeNativeWrite(item + idHigh, state.original.idHigh) &&
+            SafeNativeWrite(base + paintKit, state.original.paint);
+        restored &= writeOptional(item, idLow, state.original.idLow);
+        restored &= writeOptional(item, accountId, state.original.account);
+        restored &= writeOptional(item, entityQuality, state.original.quality);
+        restored &= writeOptional(item, initialized, state.original.initialized);
+        restored &= writeOptional(item, disallowSoc, state.original.disallowSoc);
+        restored &= writeOptional(item, storeItem, state.original.storeItem);
+        restored &= writeOptional(item, restoreMaterial, state.original.restoreMaterial);
+        restored &= writeOptional(base, attributesInitialized,
+            state.original.attributesInitialized);
+        const bool dirty = true;
+        restored &= writeOptional(base, attachmentDirty, dirty);
+        restored &= writeOptional(base, seed, state.original.seed);
+        restored &= writeOptional(base, wear, state.original.wear);
+        restored &= writeOptional(base, statTrak, state.original.statTrak);
+        if (modelState != 0 && meshGroupMask != 0)
+            restored &= setMeshMask(getSceneNode(state.weapon), state.original.meshMask);
+        return restored;
     };
 
     for (std::size_t weaponIndex = 0; weaponIndex < ownedWeaponCount; ++weaponIndex)
@@ -3280,10 +3550,15 @@ void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localCont
         {
             if (state != nullptr && state->applied)
             {
-                restoreState(*state, base, item);
-                restoredThisPass.push_back(state);
-                shouldRegenerate = true;
-                EspLog("[skin] restoring weapon=%p definition=%u", weapon, definition);
+                if (restoreState(*state, base, item))
+                {
+                    restoredThisPass.push_back(state);
+                    shouldRegenerate = true;
+                    EspLog("[skin] restoring weapon=%p definition=%u", weapon, definition);
+                }
+                else
+                    EspLog("[skin] restore held after a fault-safe write failed weapon=%p definition=%u",
+                        weapon, definition);
             }
             continue;
         }
@@ -3310,65 +3585,95 @@ void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localCont
             }
             *state = {};
             state->weapon = weapon;
+            state->entityToken = getEntityToken(weapon);
             state->definition = definition;
-            state->original.idHigh = *reinterpret_cast<const std::int32_t*>(item + idHigh);
-            if (idLow != 0) state->original.idLow = *reinterpret_cast<const std::int32_t*>(item + idLow);
-            if (accountId != 0) state->original.account = *reinterpret_cast<const std::uint32_t*>(item + accountId);
-            if (entityQuality != 0) state->original.quality = *reinterpret_cast<const std::uint32_t*>(item + entityQuality);
-            if (initialized != 0) state->original.initialized = *reinterpret_cast<const bool*>(item + initialized);
-            if (disallowSoc != 0) state->original.disallowSoc = *reinterpret_cast<const bool*>(item + disallowSoc);
-            if (storeItem != 0) state->original.storeItem = *reinterpret_cast<const bool*>(item + storeItem);
-            if (restoreMaterial != 0) state->original.restoreMaterial = *reinterpret_cast<const bool*>(item + restoreMaterial);
-            if (attributesInitialized != 0) state->original.attributesInitialized = *reinterpret_cast<const bool*>(base + attributesInitialized);
-            if (attachmentDirty != 0) state->original.attachmentDirty = *reinterpret_cast<const bool*>(base + attachmentDirty);
-            state->original.paint = *reinterpret_cast<const std::int32_t*>(base + paintKit);
-            if (seed != 0) state->original.seed = *reinterpret_cast<const std::int32_t*>(base + seed);
-            if (wear != 0) state->original.wear = *reinterpret_cast<const float*>(base + wear);
-            if (statTrak != 0) state->original.statTrak = *reinterpret_cast<const std::int32_t*>(base + statTrak);
-            state->original.meshMask = getMeshMask(weapon->GetGameSceneNode());
+            if (state->entityToken == INVALID_EHANDLE_INDEX)
+            {
+                *state = {};
+                continue;
+            }
+            const auto readOptional = [](const std::uint8_t* address,
+                    std::uint32_t offset, auto& value) {
+                return offset == 0 || SafeNativeRead(address + offset, value);
+            };
+            bool captured = SafeNativeRead(item + idHigh, state->original.idHigh) &&
+                SafeNativeRead(base + paintKit, state->original.paint);
+            captured &= readOptional(item, idLow, state->original.idLow);
+            captured &= readOptional(item, accountId, state->original.account);
+            captured &= readOptional(item, entityQuality, state->original.quality);
+            captured &= readOptional(item, initialized, state->original.initialized);
+            captured &= readOptional(item, disallowSoc, state->original.disallowSoc);
+            captured &= readOptional(item, storeItem, state->original.storeItem);
+            captured &= readOptional(item, restoreMaterial, state->original.restoreMaterial);
+            captured &= readOptional(base, attributesInitialized,
+                state->original.attributesInitialized);
+            captured &= readOptional(base, attachmentDirty, state->original.attachmentDirty);
+            captured &= readOptional(base, seed, state->original.seed);
+            captured &= readOptional(base, wear, state->original.wear);
+            captured &= readOptional(base, statTrak, state->original.statTrak);
+            if (!captured)
+            {
+                EspLog("[skin] original-state capture failed weapon=%p definition=%u",
+                    weapon, definition);
+                *state = {};
+                continue;
+            }
+            state->original.meshMask = getMeshMask(getSceneNode(weapon));
         }
 
         const std::uint64_t desiredMeshMask = settings.legacyMesh ? 2U : 1U;
-        const bool identityDrifted = *reinterpret_cast<const std::int32_t*>(item + idHigh) != -1 ||
-            (idLow != 0 && *reinterpret_cast<const std::int32_t*>(item + idLow) != -1);
-        const bool meshDrifted = getMeshMask(weapon->GetGameSceneNode()) != desiredMeshMask;
+        std::int32_t currentIdHigh = 0;
+        std::int32_t currentIdLow = -1;
+        if (!SafeNativeRead(item + idHigh, currentIdHigh) ||
+            (idLow != 0 && !SafeNativeRead(item + idLow, currentIdLow)))
+            continue;
+        const bool identityDrifted = currentIdHigh != -1 || currentIdLow != -1;
+        const bool meshDrifted = getMeshMask(getSceneNode(weapon)) != desiredMeshMask;
         const bool changed = !state->applied || !(state->settings == settings) || identityDrifted ||
             meshDrifted || native_skin_refresh_requested || (activeWeaponChanged && weapon == activeWeapon);
-        setMeshMask(weapon->GetGameSceneNode(), desiredMeshMask);
+        if (modelState != 0 && meshGroupMask != 0 &&
+            !setMeshMask(getSceneNode(weapon), desiredMeshMask))
+            continue;
         if (!changed)
             continue;
 
-        *reinterpret_cast<std::int32_t*>(item + idHigh) = -1;
-        if (idLow != 0)
-            *reinterpret_cast<std::int32_t*>(item + idLow) = -1;
-        if (accountId != 0)
-            *reinterpret_cast<std::uint32_t*>(item + accountId) = ownerAccount;
-        if (initialized != 0)
-            *reinterpret_cast<bool*>(item + initialized) = true;
-        if (disallowSoc != 0)
-            *reinterpret_cast<bool*>(item + disallowSoc) = false;
-        if (storeItem != 0)
-            *reinterpret_cast<bool*>(item + storeItem) = false;
-        if (restoreMaterial != 0)
-            *reinterpret_cast<bool*>(item + restoreMaterial) = true;
-        if (attributesInitialized != 0)
-            *reinterpret_cast<bool*>(base + attributesInitialized) = true;
-        if (attachmentDirty != 0)
-            *reinterpret_cast<bool*>(base + attachmentDirty) = true;
+        const auto writeOptional = [](std::uint8_t* address, std::uint32_t offset,
+                const auto& value) {
+            return offset == 0 || SafeNativeWrite(address + offset, value);
+        };
+        const std::int32_t invalidItemId = -1;
+        const bool trueValue = true;
+        const bool falseValue = false;
+        bool wrote = SafeNativeWrite(item + idHigh, invalidItemId);
+        wrote &= writeOptional(item, idLow, invalidItemId);
+        wrote &= writeOptional(item, accountId, ownerAccount);
+        wrote &= writeOptional(item, initialized, trueValue);
+        wrote &= writeOptional(item, disallowSoc, falseValue);
+        wrote &= writeOptional(item, storeItem, falseValue);
+        wrote &= writeOptional(item, restoreMaterial, trueValue);
+        wrote &= writeOptional(base, attributesInitialized, trueValue);
+        wrote &= writeOptional(base, attachmentDirty, trueValue);
         if (entityQuality != 0 && definitionIndex != 0)
         {
             if (definition >= 500 || definition == 42 || definition == 59)
-                *reinterpret_cast<std::uint32_t*>(item + entityQuality) = 4;
+            {
+                const std::uint32_t quality = 4;
+                wrote &= SafeNativeWrite(item + entityQuality, quality);
+            }
         }
 
-        *reinterpret_cast<std::int32_t*>(base + paintKit) = settings.paint;
-        if (seed != 0)
-            *reinterpret_cast<std::int32_t*>(base + seed) = settings.seed;
-        if (wear != 0)
-            *reinterpret_cast<float*>(base + wear) = settings.wear;
-        if (statTrak != 0)
-            *reinterpret_cast<std::int32_t*>(base + statTrak) = settings.statTrak;
-        prepareAttributes(item, settings);
+        wrote &= SafeNativeWrite(base + paintKit, settings.paint);
+        wrote &= writeOptional(base, seed, settings.seed);
+        wrote &= writeOptional(base, wear, settings.wear);
+        wrote &= writeOptional(base, statTrak, settings.statTrak);
+        wrote &= prepareAttributes(item, settings);
+        if (!wrote)
+        {
+            EspLog("[skin] application held after a fault-safe write failed weapon=%p definition=%u",
+                weapon, definition);
+            restoreState(*state, base, item);
+            continue;
+        }
         state->settings = settings;
         appliedThisPass.push_back(state);
         shouldRegenerate = true;
@@ -3377,21 +3682,30 @@ void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localCont
             settings.legacyMesh ? 2U : 1U, temporaryAttributes.size());
     }
 
-    CCSPlayer_ViewModelServices* viewModelServices = localPawn->GetViewModelServices();
-    C_CSGOViewModel* viewModel = viewModelServices != nullptr
-        ? entities->Get<C_CSGOViewModel>(viewModelServices->m_hViewModel())
-        : nullptr;
+    CCSPlayer_ViewModelServices* viewModelServices = nullptr;
+    std::uint32_t viewModelHandle = INVALID_EHANDLE_INDEX;
+    C_CSGOViewModel* viewModel = nullptr;
+    if (IsSaneSchemaOffset(viewModelServicesOffset, 0x10000) &&
+        IsSaneSchemaOffset(viewModelHandleOffset, 0x1000) &&
+        SafeNativeRead(reinterpret_cast<const std::uint8_t*>(localPawn) +
+            viewModelServicesOffset, viewModelServices) && viewModelServices != nullptr &&
+        SafeNativeRead(reinterpret_cast<const std::uint8_t*>(viewModelServices) +
+            viewModelHandleOffset, viewModelHandle))
+        SafeGetEntity(entities, viewModelHandle, viewModel);
     static C_CSGOViewModel* trackedViewModel = nullptr;
+    static std::uint32_t trackedViewModelToken = INVALID_EHANDLE_INDEX;
     static std::uint64_t originalViewModelMask = 1;
     static bool viewModelOverridden = false;
-    if (viewModel != trackedViewModel)
+    const std::uint32_t viewModelToken = getEntityToken(viewModel);
+    if (viewModel != trackedViewModel || viewModelToken != trackedViewModelToken)
     {
         trackedViewModel = viewModel;
+        trackedViewModelToken = viewModelToken;
         viewModelOverridden = false;
     }
     if (activeWeaponChanged && viewModel != nullptr && viewModelOverridden)
     {
-        setMeshMask(viewModel->GetGameSceneNode(), originalViewModelMask);
+        setMeshMask(getSceneNode(viewModel), originalViewModelMask);
         viewModelOverridden = false;
     }
     const std::uint16_t activeDefinition = getDefinition(activeWeapon);
@@ -3405,15 +3719,15 @@ void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localCont
     {
         if (!viewModelOverridden)
         {
-            originalViewModelMask = getMeshMask(viewModel->GetGameSceneNode());
+            originalViewModelMask = getMeshMask(getSceneNode(viewModel));
             viewModelOverridden = true;
         }
-        setMeshMask(viewModel->GetGameSceneNode(),
+        setMeshMask(getSceneNode(viewModel),
             C_GET_ARRAY(bool, 1024, Vars.skin_weapon_legacy_mesh, activeDefinition) ? 2U : 1U);
     }
     else if (viewModel != nullptr && viewModelOverridden)
     {
-        setMeshMask(viewModel->GetGameSceneNode(), originalViewModelMask);
+        setMeshMask(getSceneNode(viewModel), originalViewModelMask);
         viewModelOverridden = false;
     }
 
@@ -3429,8 +3743,9 @@ void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localCont
     // vectors immediately so no entity retains a pointer into our stack.
     for (TemporarySkinAttributes& temporary : temporaryAttributes)
     {
-        temporary.list->pElements = temporary.originalElements;
-        temporary.list->nSize = temporary.originalSize;
+        if (!SafeNativeWrite(&temporary.list->pElements, temporary.originalElements) ||
+            !SafeNativeWrite(&temporary.list->nSize, temporary.originalSize))
+            EspLog("[skin] attribute-list restore failed list=%p", temporary.list);
     }
 
     if (regenerated)
@@ -3447,7 +3762,7 @@ void ApplyNativeSkin(CGameEntitySystem* entities, CCSPlayerController* localCont
             if (attachmentDirty != 0)
             {
                 auto* base = reinterpret_cast<std::uint8_t*>(state->weapon);
-                *reinterpret_cast<bool*>(base + attachmentDirty) = state->original.attachmentDirty;
+                SafeNativeWrite(base + attachmentDirty, state->original.attachmentDirty);
             }
             *state = {};
         }
@@ -3499,8 +3814,11 @@ void DrawNativeGrenadeTrajectory(CGameEntitySystem* entities, C_CSPlayerPawn* lo
         return;
     }
 
-    CGameSceneNode* scene = localPawn->GetGameSceneNode();
-    if (scene == nullptr)
+    CGameSceneNode* scene = nullptr;
+    Vector_t origin{};
+    Vector_t viewOffset{};
+    if (!SafeGetSceneNode(localPawn, scene) || !SafeGetSceneOrigin(scene, origin) ||
+        !SafeGetViewOffset(localPawn, viewOffset))
         return;
     QAngle_t view{};
     static const std::uint32_t viewAngleOffset =
@@ -3549,7 +3867,7 @@ void DrawNativeGrenadeTrajectory(CGameEntitySystem* entities, C_CSPlayerPawn* lo
     const float yaw = view.y * radians;
     const Vector_t forward(std::cos(pitch) * std::cos(yaw),
         std::cos(pitch) * std::sin(yaw), -std::sin(pitch));
-    Vector_t position = scene->GetAbsOrigin() + localPawn->m_vecViewOffset() + forward * 16.f;
+    Vector_t position = origin + viewOffset + forward * 16.f;
     Vector_t velocity = forward * (throwVelocity * 0.9f * (0.3f + 0.7f * strength)) +
         localPawn->GetAbsVelocity() * 1.25f;
     if (!position.IsValid() || !velocity.IsValid())
@@ -3712,39 +4030,46 @@ void DrawNativeWorldEntities(CGameEntitySystem* entities, C_CSPlayerPawn* localP
     // patch-sensitive highest-index field.
     for (int index = 1; index < 4096; ++index)
     {
-        C_BaseEntity* entity = entities->Get<C_BaseEntity>(index);
-        if (entity == nullptr || entity == localPawn)
+        void* rawEntity = nullptr;
+        if (!SafeResolveEntityPointer(entities, static_cast<std::uint32_t>(index),
+                rawEntity))
+            continue;
+        auto* entity = static_cast<C_BaseEntity*>(rawEntity);
+        if (entity == localPawn)
             continue;
         CEntityIdentity* identity = nullptr;
         const char* rawDesignerName = nullptr;
-        char designerName[96]{};
+        std::array<char, 96> designerName{};
         if (!SafeNativeRead(reinterpret_cast<const std::uint8_t*>(entity) + identityOffset, identity) ||
             identity == nullptr || !SafeNativeRead(
                 reinterpret_cast<const std::uint8_t*>(identity) + designerNameOffset, rawDesignerName) ||
             rawDesignerName == nullptr)
             continue;
-        for (std::size_t character = 0; character + 1 < sizeof(designerName); ++character)
-        {
-            if (!SafeNativeRead(rawDesignerName + character, designerName[character]))
-            {
-                designerName[0] = '\0';
-                break;
-            }
-            if (designerName[character] == '\0')
-                break;
-            if (!std::isprint(static_cast<unsigned char>(designerName[character])))
-            {
-                designerName[0] = '\0';
-                break;
-            }
-        }
-        if (designerName[0] == '\0')
+        if (!SafeReadPrintableCString(rawDesignerName, designerName))
             continue;
 
-        const std::string_view name(designerName);
+        const std::string_view name(designerName.data());
         if (trackBombChams) {
             if (name.find("planted_c4") != std::string_view::npos)
-                trackedBomb = entity;
+            {
+                std::uint8_t ticking = 0;
+                std::uint8_t defused = 0;
+                float blowTime = 0.f;
+                const bool activePlantedBomb =
+                    IsSaneSchemaOffset(bombTickingOffset, 0x10000) &&
+                    IsSaneSchemaOffset(bombBlowOffset, 0x10000) &&
+                    SafeNativeRead(reinterpret_cast<const std::uint8_t*>(entity) +
+                        bombTickingOffset, ticking) &&
+                    SafeNativeRead(reinterpret_cast<const std::uint8_t*>(entity) +
+                        bombBlowOffset, blowTime) &&
+                    (bombDefusedOffset == 0 || SafeNativeRead(
+                        reinterpret_cast<const std::uint8_t*>(entity) +
+                            bombDefusedOffset, defused)) &&
+                    ticking == 1 && defused == 0 && std::isfinite(blowTime) &&
+                    blowTime > currentTime;
+                if (activePlantedBomb)
+                    trackedBomb = entity;
+            }
             else if (trackedBomb == nullptr && name == "weapon_c4")
                 trackedBomb = entity;
         }
@@ -3930,6 +4255,8 @@ void LinuxNativeEsp::RequestSkinRefresh()
 
 void LinuxNativeEsp::Render()
 {
+    entity_snapshot_generation = entity_snapshot_counter.fetch_add(
+        1, std::memory_order_relaxed) + 1;
     // Every present is a new entity generation. Clear last frame's raw target
     // identities before any early return (menu/loading/disconnect) can leave
     // chams matching recycled entity addresses.
@@ -3966,11 +4293,13 @@ void LinuxNativeEsp::Render()
     if (native_view_matrix == nullptr || native_local_controller == nullptr)
         return;
 
-    CGameEntitySystem* entities = I::GameResourceService->pGameEntitySystem;
-    if (entities == nullptr)
+    CGameEntitySystem* entities = nullptr;
+    if (!SafeNativeRead(&I::GameResourceService->pGameEntitySystem, entities) ||
+        entities == nullptr)
         return;
 
-    SDK::ViewMatrix = *native_view_matrix;
+    if (!SafeNativeRead(native_view_matrix, SDK::ViewMatrix))
+        return;
 
     static std::uint64_t nextInputHookRetry = 0;
     if (!IsNativeInputHookInstalled() && SDL_GetTicks() >= nextInputHookRetry)
@@ -3980,8 +4309,8 @@ void LinuxNativeEsp::Render()
         InstallNativeInputHook();
     }
 
-    CCSPlayerController* local_controller = native_local_controller != nullptr ? *native_local_controller : nullptr;
-    if (local_controller == nullptr)
+    CCSPlayerController* local_controller = nullptr;
+    if (!SafeNativeRead(native_local_controller, local_controller) || local_controller == nullptr)
     {
         static bool logged_local = false;
         if (!logged_local)
@@ -3991,8 +4320,8 @@ void LinuxNativeEsp::Render()
         }
         return;
     }
-    C_CSPlayerPawn* local_pawn = entities->Get<C_CSPlayerPawn>(local_controller->GetPawnHandle());
-    if (local_pawn == nullptr)
+    C_CSPlayerPawn* local_pawn = nullptr;
+    if (!SafeGetPlayerPawn(entities, local_controller, local_pawn))
         return;
 
     ApplyThirdPerson(local_pawn);
@@ -4018,8 +4347,10 @@ void LinuxNativeEsp::Render()
     DrawNativeGrenadeTrajectory(entities, local_pawn, draw);
     DrawNativeWorldEntities(entities, local_pawn, draw);
 
-    CGameSceneNode* localScene = local_pawn->GetGameSceneNode();
-    const Vector_t localOrigin = localScene != nullptr ? localScene->GetAbsOrigin() : Vector_t{};
+    CGameSceneNode* localScene = nullptr;
+    Vector_t localOrigin{};
+    SafeGetSceneNode(local_pawn, localScene);
+    SafeGetSceneOrigin(localScene, localOrigin);
     float localYaw = native_view_angles != nullptr ? native_view_angles->y : 0.f;
     static const std::uint32_t localViewAngleOffset = SCHEMA::GetOffset("C_BasePlayerPawn->v_angle");
     if (localViewAngleOffset != 0)
@@ -4042,14 +4373,15 @@ void LinuxNativeEsp::Render()
     std::size_t chamsTargetCount = 0;
     for (int index = 1; index <= 128; ++index)
     {
-        CCSPlayerController* controller = entities->Get<CCSPlayerController>(index);
-        if (controller == nullptr || controller == local_controller)
+        CCSPlayerController* controller = nullptr;
+        if (!SafeGetEntity(entities, static_cast<std::uint32_t>(index), controller) ||
+            controller == local_controller)
             continue;
 
         ++found_entities;
 
-        C_CSPlayerPawn* pawn = entities->Get<C_CSPlayerPawn>(controller->GetPawnHandle());
-        if (pawn == nullptr || pawn == local_pawn)
+        C_CSPlayerPawn* pawn = nullptr;
+        if (!SafeGetPlayerPawn(entities, controller, pawn) || pawn == local_pawn)
             continue;
         ++found_pawns;
 
@@ -4065,11 +4397,14 @@ void LinuxNativeEsp::Render()
             chamsTargets[chamsTargetCount++] = pawn;
         ++enemy_pawns;
 
-        CGameSceneNode* scene = pawn->GetGameSceneNode();
-        if (scene == nullptr || scene->IsDormant())
+        CGameSceneNode* scene = nullptr;
+        bool dormant = true;
+        if (!SafeGetSceneNode(pawn, scene) || !SafeIsSceneDormant(scene, dormant) || dormant)
             continue;
 
-        const Vector_t feet = scene->GetAbsOrigin();
+        Vector_t feet{};
+        if (!SafeGetSceneOrigin(scene, feet))
+            continue;
         Vector_t head{};
         if (!GetLiveBonePosition(scene, 6, head))
             head = Vector_t(feet.x, feet.y, feet.z + 72.f);
@@ -4246,10 +4581,12 @@ void LinuxNativeEsp::Render()
         {
             static const std::uint32_t eyeAnglesOffset = SCHEMA::GetOffset("C_CSPlayerPawn->m_angEyeAngles");
             Vector_t eye{};
-            if (eyeAnglesOffset != 0 && GetLiveBonePosition(scene, 5, eye))
+            QAngle_t angles{};
+            if (IsSaneSchemaOffset(eyeAnglesOffset, 0x10000) &&
+                GetLiveBonePosition(scene, 5, eye) &&
+                SafeNativeRead(reinterpret_cast<const std::uint8_t*>(pawn) +
+                    eyeAnglesOffset, angles) && angles.IsValid())
             {
-                const QAngle_t angles = *reinterpret_cast<const QAngle_t*>(
-                    reinterpret_cast<const std::uint8_t*>(pawn) + eyeAnglesOffset);
                 constexpr float radians = 3.14159265358979323846f / 180.f;
                 const float pitch = angles.x * radians;
                 const float yaw = angles.y * radians;

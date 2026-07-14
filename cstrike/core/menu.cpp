@@ -307,7 +307,8 @@ void MENU::RenderMainWindow()
 						#endif
 
 						edited::Checkbox("Hitchance", "Allows you to hit players with more accuracy", &C_GET_ARRAY(bool, 7, Vars.rage_hitchance, current_weapon));
-						if (C_GET_ARRAY(bool, 7, Vars.rage_hitchance, current_weapon))
+						if (C_GET_ARRAY(bool, 7, Vars.rage_hitchance, current_weapon) ||
+							C_GET_ARRAY(bool, 7, Vars.rage_delay_accurate, current_weapon))
 						{
 							ImGui::SliderInt(CS_XOR("chance"), &C_GET_ARRAY(int, 7, Vars.rage_minimum_hitchance, current_weapon), 0, 100);
 						}
