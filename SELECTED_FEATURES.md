@@ -221,7 +221,11 @@ self-test, crash-hardened weapon ESP, bounded one-shot overshoot/recovery,
 full eye-to-target active-smoke intersection, repaired ESP/chams/config paths, world
 entities/timers, swept-hull grenade prediction, swapchain-recreation handling,
 generation-checked entity/skin reads, planted-C4 terminal-state tracking and
-independent knife chams. Restart and inject
+independent knife chams. Per-weapon Legit profiles now include the complete
+response, targeting, prediction, recoil and auto-fire settings; Rage exposes
+all runtime hitboxes. Smoke removal has a smoke-grenade-only material route in
+addition to typed CVar and local-overlay handling, and chams colors/intensity no
+longer rebuild engine resources during UI edits. Restart and inject
 the new library before promoting any `live verification` row to `user verified`
 or `done`. The current-build native ballistics path reads live weapon damage,
 armor, spread/inaccuracy and damage-scale CVars; consumes gated trace hitgroups

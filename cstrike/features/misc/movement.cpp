@@ -377,8 +377,10 @@ void F::MISC::MOVEMENT::AutoStrafe(CUserCmd* pCmd, CBaseUserCmdPB* pUserCmd, C_C
 	last_buttons = current_buttons;
 
 	const auto velocity = pLocalPawn->GetAbsVelocity();
-	bool wasdstrafe = C_GET(unsigned int, Vars.bAutostrafeMode) == 0;
-	bool viewanglestrafe = C_GET(unsigned int, Vars.bAutostrafeMode) == 1;
+	// Keep the persisted mode indices consistent with the menu and native path:
+	// 0 follows the current view angle, 1 applies held-WASD direction offsets.
+	bool viewanglestrafe = C_GET(unsigned int, Vars.bAutostrafeMode) == 0;
+	bool wasdstrafe = C_GET(unsigned int, Vars.bAutostrafeMode) == 1;
 	float smoothing = C_GET(float, Vars.autostrafe_smooth);
 
 	/*const auto weapon = pLocalPawn->get_weapon_services_ptr()->get_h_active_weapon().get();

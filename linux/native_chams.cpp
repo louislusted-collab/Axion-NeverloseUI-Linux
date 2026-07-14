@@ -3,6 +3,7 @@
 #include "native_chams.h"
 
 #include "../cstrike/core/interfaces.h"
+#include "../cstrike/core/schema.h"
 #include "../cstrike/core/variables.h"
 #include "../cstrike/sdk/entity.h"
 #include "../cstrike/sdk/datatypes/K3V.h"
@@ -24,6 +25,9 @@
 #include <dlfcn.h>
 #include <string>
 #include <string_view>
+#include <sys/uio.h>
+#include <unordered_map>
+#include <unistd.h>
 #include <vector>
 
 namespace NativeChams
@@ -40,6 +44,7 @@ constexpr std::size_t kColorOffset = 0x40;
 std::array<std::atomic<C_CSPlayerPawn*>, 128> targets{};
 std::atomic<C_CSPlayerPawn*> localTarget{};
 std::atomic<C_BaseEntity*> bombTarget{};
+std::atomic<std::uint64_t> targetGeneration{1};
 std::atomic<std::uint64_t> enemyMeshMatches{0};
 std::atomic<std::uint64_t> knifeMeshMatches{0};
 std::atomic<std::uint64_t> bombMeshMatches{0};
@@ -63,6 +68,7 @@ enum class MaterialStyle : std::size_t
 
 std::array<MaterialPair, static_cast<std::size_t>(MaterialStyle::Count)> materials{};
 std::array<material2_t*, static_cast<std::size_t>(MaterialStyle::Count)> localMaterials{};
+material2_t* smokeInvisibleMaterial = nullptr;
 bool materialLoadAttempted = false;
 bool colorsInitialized = false;
 Color_t activeVisibleColor{255, 255, 255, 255};
@@ -71,7 +77,6 @@ Color_t pendingVisibleColor{255, 255, 255, 255};
 Color_t pendingHiddenColor{255, 255, 255, 255};
 float activeGlowIntensity = -1.f;
 float pendingGlowIntensity = -1.f;
-std::chrono::steady_clock::time_point pendingColorSince{};
 unsigned int materialGeneration = 0;
 
 void Log(const char* message, ...)
@@ -291,6 +296,7 @@ bool RebuildMaterials(const Color_t& visibleColor, const Color_t& hiddenColor,
     std::array<MaterialPair, static_cast<std::size_t>(MaterialStyle::Count)> replacement{};
     std::array<material2_t*, static_cast<std::size_t>(MaterialStyle::Count)> localReplacement{};
     static constexpr const char* styleNames[]{"flat", "metallic", "glow", "glass", "wireframe"};
+    const Color_t materialTint(255, 255, 255, 255);
     for (std::size_t index = 0; index < replacement.size(); ++index)
     {
         char visibleName[112], hiddenName[112];
@@ -300,8 +306,8 @@ bool RebuildMaterials(const Color_t& visibleColor, const Color_t& hiddenColor,
             "materials/axion/player_%s_hidden_%u.vmat", styleNames[index], generation);
         const MaterialStyle style = static_cast<MaterialStyle>(index);
         replacement[index] = {
-            CreateMaterial(visibleName, style, false, visibleColor, glowIntensity),
-            CreateMaterial(hiddenName, style, true, hiddenColor, glowIntensity)};
+            CreateMaterial(visibleName, style, false, materialTint, glowIntensity),
+            CreateMaterial(hiddenName, style, true, materialTint, glowIntensity)};
         if (index == static_cast<std::size_t>(MaterialStyle::Flat) &&
             (replacement[index].visible == nullptr || replacement[index].hidden == nullptr))
             return false;
@@ -347,7 +353,14 @@ void LoadMaterials()
     const Color_t visible = C_GET(ColorPickerVar_t, Vars.colVisualChams).colValue;
     const Color_t hidden = C_GET(ColorPickerVar_t, Vars.colVisualChamsIgnoreZ).colValue;
     const float glowIntensity = std::clamp(C_GET(float, Vars.chams_glow_intensity), 0.f, 100.f);
-    RebuildMaterials(visible, hidden, glowIntensity);
+    // Build one conservative maximum glow material. The live intensity is
+    // applied through mesh tint, avoiding resource creation and pointer swaps
+    // while the scene-render thread is active.
+    RebuildMaterials(visible, hidden, 100.f);
+    smokeInvisibleMaterial = CreateMaterial(
+        "materials/axion/smoke_invisible.vmat", MaterialStyle::Glass, false,
+        Color_t(0, 0, 0, 0), 0.f);
+    activeGlowIntensity = glowIntensity;
     pendingVisibleColor = visible;
     pendingHiddenColor = hidden;
     pendingGlowIntensity = glowIntensity;
@@ -363,6 +376,61 @@ bool IsTrackedTarget(const C_BaseEntity* entity)
     return false;
 }
 
+template <typename T>
+bool SafeRead(const void* address, T& value)
+{
+    if (address == nullptr)
+        return false;
+    iovec local{&value, sizeof(T)};
+    iovec remote{const_cast<void*>(address), sizeof(T)};
+    return process_vm_readv(getpid(), &local, 1, &remote, 1, 0) ==
+        static_cast<ssize_t>(sizeof(T));
+}
+
+bool SafeGetEntity(CGameEntitySystem* entitySystem, CBaseHandle handle,
+                   C_BaseEntity*& entity)
+{
+    entity = nullptr;
+    if (entitySystem == nullptr || !handle.IsValid())
+        return false;
+    const int index = handle.GetEntryIndex();
+    if (index < 0 || index >= MAX_TOTAL_ENTITIES)
+        return false;
+    static thread_local std::uint64_t cachedGeneration = 0;
+    static thread_local std::array<std::uintptr_t, MAX_ENTITY_LISTS> bucketCache{};
+    static thread_local std::array<bool, MAX_ENTITY_LISTS> bucketResolved{};
+    static thread_local std::unordered_map<int, C_BaseEntity*> entityCache;
+    const std::uint64_t generation = targetGeneration.load(std::memory_order_acquire);
+    if (cachedGeneration != generation)
+    {
+        cachedGeneration = generation;
+        bucketCache.fill(0);
+        bucketResolved.fill(false);
+        entityCache.clear();
+        if (entityCache.bucket_count() < 256)
+            entityCache.reserve(256);
+    }
+    if (const auto cached = entityCache.find(index); cached != entityCache.end())
+    {
+        entity = cached->second;
+        return entity != nullptr;
+    }
+    const int bucketIndex = index >> 9;
+    const auto base = reinterpret_cast<const std::uint8_t*>(entitySystem);
+    if (!bucketResolved[static_cast<std::size_t>(bucketIndex)])
+    {
+        bucketResolved[static_cast<std::size_t>(bucketIndex)] = true;
+        SafeRead(base + 0x10 + sizeof(std::uintptr_t) * bucketIndex,
+            bucketCache[static_cast<std::size_t>(bucketIndex)]);
+    }
+    const std::uintptr_t bucket = bucketCache[static_cast<std::size_t>(bucketIndex)];
+    if (bucket == 0)
+        return false;
+    SafeRead(reinterpret_cast<const void*>(bucket + 0x70ULL * (index & 0x1FF)), entity);
+    entityCache.emplace(index, entity);
+    return entity != nullptr;
+}
+
 enum class TargetKind
 {
     None,
@@ -373,7 +441,14 @@ enum class TargetKind
 
 TargetKind ResolvesToTarget(C_BaseEntity* entity)
 {
-    auto* entitySystem = I::GameResourceService->pGameEntitySystem;
+    if (I::GameResourceService == nullptr)
+        return TargetKind::None;
+    CGameEntitySystem* entitySystem = nullptr;
+    if (!SafeRead(&I::GameResourceService->pGameEntitySystem, entitySystem) ||
+        entitySystem == nullptr)
+        return TargetKind::None;
+    static const std::uint32_t ownerOffset =
+        SCHEMA::GetOffset("C_BaseEntity->m_hOwnerEntity");
     for (int depth = 0; entity != nullptr && depth < 4; ++depth)
     {
         if (IsTrackedTarget(entity))
@@ -382,8 +457,15 @@ TargetKind ResolvesToTarget(C_BaseEntity* entity)
             return TargetKind::Local;
         if (bombTarget.load(std::memory_order_relaxed) == entity)
             return TargetKind::Bomb;
-        const CBaseHandle ownerHandle = entity->GetOwnerHandle();
-        C_BaseEntity* owner = entitySystem->Get<C_BaseEntity>(ownerHandle);
+        if (ownerOffset == 0 || ownerOffset > 0x10000U)
+            break;
+        CBaseHandle ownerHandle{};
+        if (!SafeRead(reinterpret_cast<const std::uint8_t*>(entity) + ownerOffset,
+                ownerHandle))
+            break;
+        C_BaseEntity* owner = nullptr;
+        if (!SafeGetEntity(entitySystem, ownerHandle, owner))
+            break;
         if (owner == entity)
             break;
         entity = owner;
@@ -454,8 +536,14 @@ Color_t GetLocalMaterialColor(LocalMaterialKind kind)
         return C_GET(ColorPickerVar_t, Vars.chams_arms_color).colValue;
     if (kind == LocalMaterialKind::Sleeves)
         return C_GET(ColorPickerVar_t, Vars.chams_sleeves_color).colValue;
+    if (kind == LocalMaterialKind::Weapon)
+        return C_GET(ColorPickerVar_t, Vars.chams_held_weapon_color).colValue;
     if (kind == LocalMaterialKind::Knife)
         return C_GET(ColorPickerVar_t, Vars.chams_knife_color).colValue;
+    if (kind == LocalMaterialKind::Grenade)
+        return C_GET(ColorPickerVar_t, Vars.chams_grenade_color).colValue;
+    if (kind == LocalMaterialKind::Bomb)
+        return C_GET(ColorPickerVar_t, Vars.chams_bomb_color).colValue;
     return C_GET(ColorPickerVar_t, Vars.colVisualChams).colValue;
 }
 
@@ -491,22 +579,46 @@ SceneMaterialKind ClassifySceneMaterial(material2_t* material)
     return SceneMaterialKind::None;
 }
 
+bool IsSmokeGrenadeMaterial(material2_t* material)
+{
+    if (material == nullptr)
+        return false;
+    const char* rawName = material->get_name();
+    if (rawName == nullptr || *rawName == '\0')
+        return false;
+    const std::string_view name(rawName);
+    // Restrict suppression to the live smoke-grenade volume/overlay assets.
+    // Broad "smoke" matching would also erase muzzle, fire, map and C4 FX.
+    return name.find("dev/smoke_volume") != std::string_view::npos ||
+        name.find("particle/particle_smokegrenade") != std::string_view::npos ||
+        name.find("effects/overlaysmoke") != std::string_view::npos ||
+        name.find("dev/overlay_smoke") != std::string_view::npos;
+}
+
 TargetKind GetTargetKind(void* mesh)
 {
-    if (mesh == nullptr || I::GameResourceService == nullptr ||
-        I::GameResourceService->pGameEntitySystem == nullptr)
+    if (mesh == nullptr || I::GameResourceService == nullptr)
         return TargetKind::None;
-    auto* sceneAnimatable = *reinterpret_cast<std::uint8_t**>(
-        reinterpret_cast<std::uint8_t*>(mesh) + kSceneAnimatableOffset);
-    if (sceneAnimatable == nullptr)
+    std::uint8_t* sceneAnimatable = nullptr;
+    if (!SafeRead(reinterpret_cast<std::uint8_t*>(mesh) + kSceneAnimatableOffset,
+            sceneAnimatable) || sceneAnimatable == nullptr)
         return TargetKind::None;
     // Player LODs and attachment meshes do not all use the same owner slot.
     // Only accept handles that resolve back to a tracked live enemy, so this
     // broader layout probe cannot turn unrelated world meshes into targets.
-    for (std::size_t ownerOffset = 0x98U; ownerOffset <= 0xE0U; ownerOffset += 8U)
+    std::array<std::byte, 0x50> ownerStorage{};
+    if (!SafeRead(sceneAnimatable + 0x98U, ownerStorage))
+        return TargetKind::None;
+    for (std::size_t ownerOffset = 0; ownerOffset <= 0x48U; ownerOffset += 8U)
     {
-        const auto handle = *reinterpret_cast<const CBaseHandle*>(sceneAnimatable + ownerOffset);
-        C_BaseEntity* owner = I::GameResourceService->pGameEntitySystem->Get<C_BaseEntity>(handle);
+        CBaseHandle handle{};
+        std::memcpy(&handle, ownerStorage.data() + ownerOffset, sizeof(handle));
+        CGameEntitySystem* entitySystem = nullptr;
+        if (!SafeRead(&I::GameResourceService->pGameEntitySystem, entitySystem))
+            return TargetKind::None;
+        C_BaseEntity* owner = nullptr;
+        if (!SafeGetEntity(entitySystem, handle, owner))
+            continue;
         const TargetKind kind = ResolvesToTarget(owner);
         if (kind != TargetKind::None)
             return kind;
@@ -519,6 +631,22 @@ void SetMeshColor(void* mesh, const Color_t& color)
     std::memcpy(reinterpret_cast<std::uint8_t*>(mesh) + kColorOffset, &color, sizeof(color));
 }
 
+Color_t ApplyStyleIntensity(const Color_t& color, int selectedStyle)
+{
+    if (selectedStyle != static_cast<int>(MaterialStyle::Glow))
+        return color;
+    const float intensity = std::clamp(
+        C_GET(float, Vars.chams_glow_intensity), 0.f, 100.f) / 100.f;
+    // Preserve hue and transparency while allowing a genuinely dark/subtle
+    // lower range. The glow VMAT itself stays fixed, so this is race-free.
+    const float scale = 0.03f + 0.97f * intensity;
+    return Color_t(
+        static_cast<int>(std::lround(static_cast<float>(color.r) * scale)),
+        static_cast<int>(std::lround(static_cast<float>(color.g) * scale)),
+        static_cast<int>(std::lround(static_cast<float>(color.b) * scale)),
+        static_cast<int>(color.a));
+}
+
 void DrawArray(void* descriptor, void* renderContext, void* meshArray, int count,
                void* sceneView, void* sceneLayer, void* drawContext, void* frameStats)
 {
@@ -528,8 +656,11 @@ void DrawArray(void* descriptor, void* renderContext, void* meshArray, int count
         C_GET(bool, Vars.chams_bomb);
     const bool sceneModulation = C_GET(bool, Vars.world_color_enable) ||
         C_GET(bool, Vars.sky_color_enable);
+    const bool smokeRemoval = C_GET(bool, Vars.bRemoveSmoke) &&
+        smokeInvisibleMaterial != nullptr;
     if (original == nullptr || meshArray == nullptr || count <= 0 ||
-        (!C_GET(bool, Vars.bVisualChams) && !localChams && !sceneModulation))
+        (!C_GET(bool, Vars.bVisualChams) && !localChams && !sceneModulation &&
+            !smokeRemoval))
     {
         if (original != nullptr)
             original(descriptor, renderContext, meshArray, count, sceneView, sceneLayer, drawContext, frameStats);
@@ -550,16 +681,31 @@ void DrawArray(void* descriptor, void* renderContext, void* meshArray, int count
     const int safeCount = std::min(count, 4096);
     static thread_local std::vector<Backup> changed;
     static thread_local std::vector<Backup> modulated;
+    static thread_local std::vector<Backup> suppressedSmoke;
     changed.clear();
     modulated.clear();
+    suppressedSmoke.clear();
     if (changed.capacity() < static_cast<std::size_t>(safeCount))
         changed.reserve(static_cast<std::size_t>(safeCount));
     if (sceneModulation && modulated.capacity() < static_cast<std::size_t>(safeCount))
         modulated.reserve(static_cast<std::size_t>(safeCount));
+    if (smokeRemoval && suppressedSmoke.capacity() < static_cast<std::size_t>(safeCount))
+        suppressedSmoke.reserve(static_cast<std::size_t>(safeCount));
     for (int index = 0; index < safeCount; ++index)
     {
         auto* mesh = reinterpret_cast<std::uint8_t*>(meshArray) + index * kMeshStride;
         material2_t* originalMaterial = *reinterpret_cast<material2_t**>(mesh + kMaterialOffset);
+        if (smokeRemoval && IsSmokeGrenadeMaterial(originalMaterial))
+        {
+            auto& backup = suppressedSmoke.emplace_back();
+            backup.mesh = mesh;
+            backup.material = originalMaterial;
+            std::memcpy(&backup.color, mesh + kColorOffset, sizeof(backup.color));
+            *reinterpret_cast<material2_t**>(mesh + kMaterialOffset) =
+                smokeInvisibleMaterial;
+            SetMeshColor(mesh, Color_t(0, 0, 0, 0));
+            continue;
+        }
         if (sceneModulation)
         {
             const SceneMaterialKind sceneKind = ClassifySceneMaterial(originalMaterial);
@@ -602,6 +748,12 @@ void DrawArray(void* descriptor, void* renderContext, void* meshArray, int count
         original(descriptor, renderContext, meshArray, count, sceneView, sceneLayer, drawContext, frameStats);
         for (const Backup& backup : modulated)
             SetMeshColor(backup.mesh, backup.color);
+        for (const Backup& backup : suppressedSmoke)
+        {
+            auto* mesh = static_cast<std::uint8_t*>(backup.mesh);
+            *reinterpret_cast<material2_t**>(mesh + kMaterialOffset) = backup.material;
+            SetMeshColor(mesh, backup.color);
+        }
         return;
     }
 
@@ -648,7 +800,9 @@ void DrawArray(void* descriptor, void* renderContext, void* meshArray, int count
                 continue;
             auto* mesh = static_cast<std::uint8_t*>(changed[index].mesh);
             *reinterpret_cast<material2_t**>(mesh + kMaterialOffset) = selectedMaterials.hidden;
-            SetMeshColor(mesh, Color_t(255, 255, 255, 255));
+            SetMeshColor(mesh, ApplyStyleIntensity(
+                C_GET(ColorPickerVar_t, Vars.colVisualChamsIgnoreZ).colValue,
+                selectedStyle));
         }
         // DrawArray's descriptor describes the entire submitted mesh batch.
         // Replaying individual records produces only a thin partial shell, so
@@ -666,9 +820,10 @@ void DrawArray(void* descriptor, void* renderContext, void* meshArray, int count
             : selectedMaterials.visible;
         if (visibleMaterial != nullptr)
             *reinterpret_cast<material2_t**>(mesh + kMaterialOffset) = visibleMaterial;
-        SetMeshColor(mesh, localMaterial
+        SetMeshColor(mesh, ApplyStyleIntensity(localMaterial
             ? GetLocalMaterialColor(changed[index].localKind)
-            : Color_t(255, 255, 255, 255));
+            : C_GET(ColorPickerVar_t, Vars.colVisualChams).colValue,
+            selectedStyle));
     }
     original(descriptor, renderContext, meshArray, count, sceneView, sceneLayer, drawContext, frameStats);
 
@@ -680,6 +835,12 @@ void DrawArray(void* descriptor, void* renderContext, void* meshArray, int count
     }
     for (const Backup& backup : modulated)
         SetMeshColor(backup.mesh, backup.color);
+    for (const Backup& backup : suppressedSmoke)
+    {
+        auto* mesh = static_cast<std::uint8_t*>(backup.mesh);
+        *reinterpret_cast<material2_t**>(mesh + kMaterialOffset) = backup.material;
+        SetMeshColor(mesh, backup.color);
+    }
 }
 }
 
@@ -726,6 +887,7 @@ void Destroy()
     original = nullptr;
     materials = {};
     localMaterials = {};
+    smokeInvisibleMaterial = nullptr;
     materialLoadAttempted = false;
     colorsInitialized = false;
     materialGeneration = 0;
@@ -741,11 +903,13 @@ void UpdateTargets(C_CSPlayerPawn* const* newTargets, std::size_t count, C_CSPla
     for (std::size_t index = 0; index < targets.size(); ++index)
         targets[index].store(index < safeCount ? newTargets[index] : nullptr, std::memory_order_relaxed);
     localTarget.store(newLocalTarget, std::memory_order_relaxed);
+    targetGeneration.fetch_add(1, std::memory_order_release);
 }
 
 void UpdateBombTarget(C_BaseEntity* newBombTarget)
 {
     bombTarget.store(newBombTarget, std::memory_order_relaxed);
+    targetGeneration.fetch_add(1, std::memory_order_release);
 }
 
 void UpdateColors(const Color_t& visible, const Color_t& hidden)
@@ -753,29 +917,14 @@ void UpdateColors(const Color_t& visible, const Color_t& hidden)
     if (!materialLoadAttempted || !colorsInitialized)
         return;
     const float glowIntensity = std::clamp(C_GET(float, Vars.chams_glow_intensity), 0.f, 100.f);
-    if (visible == activeVisibleColor && hidden == activeHiddenColor &&
-        std::fabs(glowIntensity - activeGlowIntensity) < 0.01f)
-        return;
-
-    const auto now = std::chrono::steady_clock::now();
-    if (visible != pendingVisibleColor || hidden != pendingHiddenColor ||
-        std::fabs(glowIntensity - pendingGlowIntensity) >= 0.01f)
-    {
-        pendingVisibleColor = visible;
-        pendingHiddenColor = hidden;
-        pendingGlowIntensity = glowIntensity;
-        pendingColorSince = now;
-        return;
-    }
-    // Avoid compiling four materials for every intermediate mouse movement in
-    // the color picker. Rebuild once the selected color has settled briefly.
-    if (now - pendingColorSince < std::chrono::milliseconds(150))
-        return;
-    if (!RebuildMaterials(pendingVisibleColor, pendingHiddenColor, pendingGlowIntensity))
-    {
-        pendingColorSince = now;
-        Log("material color rebuild failed; retaining previous generation");
-    }
+    // All selected materials paint through the current mesh color, including
+    // live glow scaling. Never rebuild engine resources from a UI edit.
+    activeVisibleColor = visible;
+    activeHiddenColor = hidden;
+    pendingVisibleColor = visible;
+    pendingHiddenColor = hidden;
+    activeGlowIntensity = glowIntensity;
+    pendingGlowIntensity = glowIntensity;
 }
 
 bool IsInstalled()

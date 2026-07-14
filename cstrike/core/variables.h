@@ -157,7 +157,10 @@ struct Variables_t
 	C_ADD_VARIABLE(bool, chams_bomb, false);
 	C_ADD_VARIABLE(ColorPickerVar_t, chams_arms_color, ColorPickerVar_t(105, 170, 255));
 	C_ADD_VARIABLE(ColorPickerVar_t, chams_sleeves_color, ColorPickerVar_t(185, 105, 255));
+	C_ADD_VARIABLE(ColorPickerVar_t, chams_held_weapon_color, ColorPickerVar_t(105, 220, 155));
 	C_ADD_VARIABLE(ColorPickerVar_t, chams_knife_color, ColorPickerVar_t(255, 120, 70));
+	C_ADD_VARIABLE(ColorPickerVar_t, chams_grenade_color, ColorPickerVar_t(255, 190, 70));
+	C_ADD_VARIABLE(ColorPickerVar_t, chams_bomb_color, ColorPickerVar_t(255, 80, 80));
 	C_ADD_VARIABLE(float, chams_glow_intensity, 10.f);
 	C_ADD_VARIABLE(bool, bNoShadow, false);
 
@@ -222,6 +225,19 @@ struct Variables_t
 	C_ADD_VARIABLE_ARRAY(bool, 7, legit_profile_flash_check, true);
 	C_ADD_VARIABLE_ARRAY(int, 7, legit_profile_hitbox_mode, 0);
 	C_ADD_VARIABLE_ARRAY(float, 7, legit_profile_reaction_ms, 0.f);
+	C_ADD_VARIABLE_ARRAY(float, 7, legit_profile_acceleration_ms, 80.f);
+	C_ADD_VARIABLE_ARRAY(float, 7, legit_profile_deceleration_degrees, 1.5f);
+	C_ADD_VARIABLE_ARRAY(bool, 7, legit_profile_artificial_overshoot, false);
+	C_ADD_VARIABLE_ARRAY(float, 7, legit_profile_overshoot_degrees, 0.20f);
+	C_ADD_VARIABLE_ARRAY(float, 7, legit_profile_recovery_ms, 45.f);
+	C_ADD_VARIABLE_ARRAY(bool, 7, legit_profile_bone_head, true);
+	C_ADD_VARIABLE_ARRAY(bool, 7, legit_profile_bone_torso, false);
+	C_ADD_VARIABLE_ARRAY(bool, 7, legit_profile_bone_arms, false);
+	C_ADD_VARIABLE_ARRAY(bool, 7, legit_profile_bone_legs, false);
+	C_ADD_VARIABLE_ARRAY(bool, 7, legit_profile_prediction, false);
+	C_ADD_VARIABLE_ARRAY(float, 7, legit_profile_prediction_ms, 0.f);
+	C_ADD_VARIABLE_ARRAY(bool, 7, legit_profile_auto_shoot, false);
+	C_ADD_VARIABLE_ARRAY(bool, 7, legit_profile_recoil, false);
 
 	C_ADD_VARIABLE(bool, trigger_ui_enable, false);
 	C_ADD_VARIABLE(int, trigger_ui_key, VK_LBUTTON);

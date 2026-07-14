@@ -36,6 +36,11 @@ generated dependency files also force rebuilds after header changes.
   reads live throw strength/velocity and `sv_gravity`, integrates at the game
   tick interval, reflects velocity on collision normals and records bounce and
   landing points.
+- Legit profiles now cover the complete target-response surface rather than a
+  partial subset: smoothing, FoV, ranking, hitbox mode, gates, reaction,
+  acceleration/deceleration, overshoot/recovery, bone groups, prediction,
+  recoil correction and auto-fire all follow the active weapon group. The FoV
+  preview uses that same active profile.
 - Smoke gates retain the local pawn's validated smoke-overlay state and also
   scan live `smokegrenade_projectile` entities through checked identity, effect
   tick and scene-origin reads. A cached active-volume test rejects every aim or
@@ -63,6 +68,11 @@ generated dependency files also force rebuilds after header changes.
 - Bomb chams track the live planted-C4 entity instead of the planter or carrier,
   so planter death cannot remove the effect. Knife models are classified before
   generic held weapons and use an independent toggle and color.
+- Held weapons, knives, grenades and bombs each expose independent live mesh
+  colors. Enemy visible/occluded colors and glow intensity are also applied as
+  live mesh tint, so dragging a color or intensity control never compiles or
+  swaps engine materials from the render thread. The full Rage editor exposes
+  every runtime hitbox, including neck and both chest groups.
 - Rage target selection also exposes per-weapon head/neck, torso and limb
   priority groups. Its decision overlay/log includes target index, bone,
   visibility/penetration state, damage, hitchance and the fire/hold reason.
@@ -76,6 +86,13 @@ generated dependency files also force rebuilds after header changes.
   controller/view-matrix reads now fail closed through checked process reads or
   writes instead of directly dereferencing a stale schema address. Printable
   entity names are copied in one bounded read rather than one syscall per byte.
+- Player health/team/flags/velocity/armor/flash, recoil counters, controller
+  equipment flags, chams owner chains and camera-service pointers now use
+  checked reads. CVar-backed smoke, scope, blur, FOV, viewmodel and third-person
+  paths retry failed captures, mutate only captured values and restore the true
+  originals on disable. Smoke-grenade volume/overlay materials use a narrow
+  transparent replacement based on assets present in the installed VPK; other
+  particle smoke, fire, map ambience and weapon models are not suppressed.
 - The ordinary-gun skin path validates every required econ offset, weapon and
   viewmodel handle, entity-generation token, attribute vector and write. It
   preserves the true original state while a skinned weapon is dropped, rejects

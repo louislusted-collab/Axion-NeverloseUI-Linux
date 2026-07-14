@@ -553,6 +553,103 @@ bool SafeGetViewOffset(const C_CSPlayerPawn* pawn, Vector_t& viewOffset)
             viewOffset) && viewOffset.IsValid();
 }
 
+bool SafeGetCameraServices(const C_CSPlayerPawn* pawn,
+    CPlayer_CameraServices*& cameraServices)
+{
+    cameraServices = nullptr;
+    static const std::uint32_t cameraServicesOffset =
+        SCHEMA::GetOffset("C_BasePlayerPawn->m_pCameraServices");
+    return pawn != nullptr && IsSaneSchemaOffset(cameraServicesOffset, 0x10000) &&
+        SafeNativeRead(reinterpret_cast<const std::uint8_t*>(pawn) +
+            cameraServicesOffset, cameraServices) && cameraServices != nullptr;
+}
+
+bool SafeGetPawnHealth(const C_CSPlayerPawn* pawn, int& health)
+{
+    health = 0;
+    static const std::uint32_t offset =
+        SCHEMA::GetOffset("C_BaseEntity->m_iHealth");
+    return pawn != nullptr && IsSaneSchemaOffset(offset, 0x10000) &&
+        SafeNativeRead(reinterpret_cast<const std::uint8_t*>(pawn) + offset,
+            health) && health >= 0 && health <= 200;
+}
+
+bool SafeGetPawnTeam(const C_CSPlayerPawn* pawn, std::uint8_t& team)
+{
+    team = 0;
+    static const std::uint32_t offset =
+        SCHEMA::GetOffset("C_BaseEntity->m_iTeamNum");
+    return pawn != nullptr && IsSaneSchemaOffset(offset, 0x10000) &&
+        SafeNativeRead(reinterpret_cast<const std::uint8_t*>(pawn) + offset,
+            team) && team <= 3;
+}
+
+bool SafeGetPawnFlags(const C_CSPlayerPawn* pawn, std::uint32_t& flags)
+{
+    flags = 0;
+    static const std::uint32_t offset =
+        SCHEMA::GetOffset("C_BaseEntity->m_fFlags");
+    return pawn != nullptr && IsSaneSchemaOffset(offset, 0x10000) &&
+        SafeNativeRead(reinterpret_cast<const std::uint8_t*>(pawn) + offset,
+            flags);
+}
+
+bool SafeGetPawnVelocity(const C_CSPlayerPawn* pawn, Vector_t& velocity)
+{
+    velocity = Vector_t{};
+    static const std::uint32_t offset =
+        SCHEMA::GetOffset("C_BaseEntity->m_vecAbsVelocity");
+    return pawn != nullptr && IsSaneSchemaOffset(offset, 0x10000) &&
+        SafeNativeRead(reinterpret_cast<const std::uint8_t*>(pawn) + offset,
+            velocity) && velocity.IsValid();
+}
+
+bool SafeGetPawnArmor(const C_CSPlayerPawn* pawn, int& armor)
+{
+    armor = 0;
+    static const std::uint32_t offset =
+        SCHEMA::GetOffset("C_CSPlayerPawn->m_ArmorValue");
+    return pawn != nullptr && IsSaneSchemaOffset(offset, 0x10000) &&
+        SafeNativeRead(reinterpret_cast<const std::uint8_t*>(pawn) + offset,
+            armor) && armor >= 0 && armor <= 1000;
+}
+
+bool SafeGetFlashDuration(const C_CSPlayerPawn* pawn, float& duration)
+{
+    duration = 0.f;
+    static const std::uint32_t offset =
+        SCHEMA::GetOffset("C_CSPlayerPawnBase->m_flFlashDuration");
+    return pawn != nullptr && IsSaneSchemaOffset(offset, 0x10000) &&
+        SafeNativeRead(reinterpret_cast<const std::uint8_t*>(pawn) + offset,
+            duration) && std::isfinite(duration) && duration >= 0.f &&
+        duration <= 30.f;
+}
+
+bool SafeGetShotsFired(const C_CSPlayerPawn* pawn, int& shots)
+{
+    shots = 0;
+    static const std::uint32_t offset =
+        SCHEMA::GetOffset("C_CSPlayerPawnBase->m_iShotsFired");
+    return pawn != nullptr && IsSaneSchemaOffset(offset, 0x10000) &&
+        SafeNativeRead(reinterpret_cast<const std::uint8_t*>(pawn) + offset,
+            shots) && shots >= 0 && shots <= 1000;
+}
+
+bool SafeGetControllerState(const CCSPlayerController* controller,
+    std::uint32_t offset, bool& state)
+{
+    state = false;
+    if (controller == nullptr)
+        return false;
+    std::uint8_t raw = 0;
+    if (!IsSaneSchemaOffset(offset, 0x10000) ||
+        !SafeNativeRead(reinterpret_cast<const std::uint8_t*>(controller) + offset,
+            raw) || raw > 1)
+        return false;
+    state = raw != 0;
+    return true;
+}
+
 enum class SmokeSegmentResult
 {
     Clear,
@@ -1193,9 +1290,10 @@ int NativeHitGroupForBone(int bone)
 bool ScaleNativePlayerDamage(C_CSPlayerPawn* target,
     const NativeWeaponBallistics& weapon, int hitGroup, float& damage)
 {
-    if (target == nullptr)
+    std::uint8_t targetTeam = 0;
+    if (!SafeGetPawnTeam(target, targetTeam))
         return false;
-    const bool isCt = target->GetTeam() == 3;
+    const bool isCt = targetTeam == 3;
     const float headScale = isCt ? weapon.ctHeadDamageScale : weapon.tHeadDamageScale;
     const float bodyScale = isCt ? weapon.ctBodyDamageScale : weapon.tBodyDamageScale;
     if (hitGroup == HITGROUP_HEAD)
@@ -1388,13 +1486,25 @@ bool CalculateNativeHitchance(const Vector_t& eye, const Vector_t& point,
     return true;
 }
 
-void DrawLegitFov()
+void DrawLegitFov(CGameEntitySystem* entities, C_CSPlayerPawn* localPawn)
 {
     if (!C_GET(bool, Vars.legit_ui_enable) || !C_GET(bool, Vars.legit_ui_draw_fov))
         return;
     ImDrawList* draw = ImGui::GetBackgroundDrawList();
     const ImVec2 size = ImGui::GetIO().DisplaySize;
-    const float degrees = std::clamp(C_GET(float, Vars.legit_ui_fov_size), 5.f, 60.f);
+    float configuredDegrees = C_GET(float, Vars.legit_ui_fov_size);
+    if (C_GET(bool, Vars.legit_ui_per_weapon) && entities != nullptr && localPawn != nullptr)
+    {
+        std::string weaponName;
+        int ammo = 0;
+        int maximumAmmo = 0;
+        if (GetWeaponDisplay(entities, localPawn, weaponName, ammo, maximumAmmo))
+        {
+            const int profile = GetRageWeaponGroup(weaponName);
+            configuredDegrees = C_GET_ARRAY(float, 7, Vars.legit_profile_fov, profile);
+        }
+    }
+    const float degrees = std::clamp(configuredDegrees, 5.f, 60.f);
     constexpr float radians = 3.14159265358979323846f / 180.f;
     const float radius = std::tan(degrees * 0.5f * radians) * (size.x * 0.5f);
     draw->AddCircle(size * 0.5f, radius, IM_COL32(255, 255, 255, 210), 96, 1.f);
@@ -1402,7 +1512,10 @@ void DrawLegitFov()
 
 void ApplyNativeMovement(C_CSPlayerPawn* localPawn)
 {
-    if (localPawn == nullptr || localPawn->GetHealth() <= 0 || MENU::bMainWindowOpened)
+    int localHealth = 0;
+    std::uint32_t localFlags = 0;
+    if (!SafeGetPawnHealth(localPawn, localHealth) || localHealth <= 0 ||
+        !SafeGetPawnFlags(localPawn, localFlags) || MENU::bMainWindowOpened)
     {
         SetNativeBhopInput(false, false, false);
         SetNativeStrafeInput(false, 0.f, 0.f);
@@ -1411,7 +1524,7 @@ void ApplyNativeMovement(C_CSPlayerPawn* localPawn)
 
     const bool* keys = SDL_GetKeyboardState(nullptr);
     const bool spaceHeld = keys != nullptr && keys[SDL_SCANCODE_SPACE];
-    const bool onGround = (localPawn->GetFlags() & FL_ONGROUND) != 0;
+    const bool onGround = (localFlags & FL_ONGROUND) != 0;
     const bool bhopEnabled = C_GET(bool, Vars.bAutoBHop);
     static bool previousSpace = false;
     static bool previousGround = true;
@@ -1436,7 +1549,12 @@ void ApplyNativeMovement(C_CSPlayerPawn* localPawn)
         return;
     }
 
-    const Vector_t velocity = localPawn->GetAbsVelocity();
+    Vector_t velocity{};
+    if (!SafeGetPawnVelocity(localPawn, velocity))
+    {
+        SetNativeStrafeInput(false, 0.f, 0.f);
+        return;
+    }
     const float speed = std::hypot(velocity.x, velocity.y);
     if (!std::isfinite(speed) || speed < 10.f)
     {
@@ -1454,6 +1572,17 @@ void ApplyNativeMovement(C_CSPlayerPawn* localPawn)
             viewYaw = view.y;
     }
     constexpr float degrees = 180.f / 3.14159265358979323846f;
+    const unsigned int strafeMode = std::min(
+        C_GET(unsigned int, Vars.bAutostrafeMode), 1U);
+    if (strafeMode == 1U && keys != nullptr)
+    {
+        const float forwardInput = static_cast<float>(keys[SDL_SCANCODE_W]) -
+            static_cast<float>(keys[SDL_SCANCODE_S]);
+        const float leftInput = static_cast<float>(keys[SDL_SCANCODE_A]) -
+            static_cast<float>(keys[SDL_SCANCODE_D]);
+        if (forwardInput != 0.f || leftInput != 0.f)
+            viewYaw += std::atan2(leftInput, forwardInput) * degrees;
+    }
     const float velocityYaw = std::atan2(velocity.y, velocity.x) * degrees;
     const float delta = std::remainder(viewYaw - velocityYaw, 360.f);
     const float correction = std::atan2(15.f, speed) * degrees * 1.8f;
@@ -1478,27 +1607,27 @@ void ApplySmokeRemoval(CGameEntitySystem* entities, C_CSPlayerPawn* localPawn)
     static CConVar* smokeFullResolution = CONVAR::Find("r_csgo_smoke_fullres_pass");
     static CConVar* smokeEnhance = CONVAR::Find("r_csgo_smoke_fullres_enhance");
     static CConVar* smokeShadow = CONVAR::Find("r_csgo_smoke_shadow");
-    static CConVar* drawParticles = CONVAR::Find("r_drawparticles");
     static bool previousEnabled = false;
     static bool originalVolume = true;
     static bool originalFullResolution = true;
     static bool originalEnhance = true;
     static bool originalShadow = true;
-    static bool originalDrawParticles = true;
     static bool capturedVolume = false;
     static bool capturedFullResolution = false;
     static bool capturedEnhance = false;
     static bool capturedShadow = false;
-    static bool capturedDrawParticles = false;
 
     const bool enabled = C_GET(bool, Vars.bRemoveSmoke);
-    if (enabled && !previousEnabled)
+    if (enabled)
     {
-        capturedVolume = CONVAR::ReadBool(smokeVolume, originalVolume);
-        capturedFullResolution = CONVAR::ReadBool(smokeFullResolution, originalFullResolution);
-        capturedEnhance = CONVAR::ReadBool(smokeEnhance, originalEnhance);
-        capturedShadow = CONVAR::ReadBool(smokeShadow, originalShadow);
-        capturedDrawParticles = CONVAR::ReadBool(drawParticles, originalDrawParticles);
+        if (!capturedVolume)
+            capturedVolume = CONVAR::ReadBool(smokeVolume, originalVolume);
+        if (!capturedFullResolution)
+            capturedFullResolution = CONVAR::ReadBool(smokeFullResolution, originalFullResolution);
+        if (!capturedEnhance)
+            capturedEnhance = CONVAR::ReadBool(smokeEnhance, originalEnhance);
+        if (!capturedShadow)
+            capturedShadow = CONVAR::ReadBool(smokeShadow, originalShadow);
     }
     else if (!enabled && previousEnabled)
     {
@@ -1506,7 +1635,10 @@ void ApplySmokeRemoval(CGameEntitySystem* entities, C_CSPlayerPawn* localPawn)
         if (capturedFullResolution) CONVAR::WriteBool(smokeFullResolution, originalFullResolution);
         if (capturedEnhance) CONVAR::WriteBool(smokeEnhance, originalEnhance);
         if (capturedShadow) CONVAR::WriteBool(smokeShadow, originalShadow);
-        if (capturedDrawParticles) CONVAR::WriteBool(drawParticles, originalDrawParticles);
+        capturedVolume = false;
+        capturedFullResolution = false;
+        capturedEnhance = false;
+        capturedShadow = false;
     }
     previousEnabled = enabled;
     if (!enabled || localPawn == nullptr)
@@ -1520,12 +1652,14 @@ void ApplySmokeRemoval(CGameEntitySystem* entities, C_CSPlayerPawn* localPawn)
     bool fullResolutionReadback = true;
     bool enhanceReadback = true;
     bool shadowReadback = true;
-    bool particlesReadback = true;
-    const bool wroteVolume = CONVAR::WriteBool(smokeVolume, false, &volumeReadback);
-    const bool wroteFullResolution = CONVAR::WriteBool(smokeFullResolution, false, &fullResolutionReadback);
-    const bool wroteEnhance = CONVAR::WriteBool(smokeEnhance, false, &enhanceReadback);
-    const bool wroteShadow = CONVAR::WriteBool(smokeShadow, false, &shadowReadback);
-    const bool wroteParticles = CONVAR::WriteBool(drawParticles, false, &particlesReadback);
+    const bool wroteVolume = capturedVolume &&
+        CONVAR::WriteBool(smokeVolume, false, &volumeReadback);
+    const bool wroteFullResolution = capturedFullResolution &&
+        CONVAR::WriteBool(smokeFullResolution, false, &fullResolutionReadback);
+    const bool wroteEnhance = capturedEnhance &&
+        CONVAR::WriteBool(smokeEnhance, false, &enhanceReadback);
+    const bool wroteShadow = capturedShadow &&
+        CONVAR::WriteBool(smokeShadow, false, &shadowReadback);
 
     auto* pawnBytes = reinterpret_cast<std::uint8_t*>(localPawn);
     const float clearedOverlay = 0.f;
@@ -1540,10 +1674,10 @@ void ApplySmokeRemoval(CGameEntitySystem* entities, C_CSPlayerPawn* localPawn)
     if (now >= nextLog)
     {
         nextLog = now + 2000;
-        EspLog("[removals] smoke active=1 overlay=0x%x/%d age=0x%x/%d write/readback volume=%d/%d fullres=%d/%d enhance=%d/%d shadow=%d/%d particles=%d/%d",
+        EspLog("[removals] smoke active=1 overlay=0x%x/%d age=0x%x/%d write/readback volume=%d/%d fullres=%d/%d enhance=%d/%d shadow=%d/%d",
             overlayAlpha, wroteOverlay, smokeAge, wroteSmokeAge, wroteVolume, !volumeReadback,
             wroteFullResolution, !fullResolutionReadback, wroteEnhance, !enhanceReadback,
-            wroteShadow, !shadowReadback, wroteParticles, !particlesReadback);
+            wroteShadow, !shadowReadback);
     }
 }
 
@@ -1589,41 +1723,54 @@ void ApplyCameraAndRemovals(C_CSPlayerPawn* localPawn)
     float dofNearBlurReadback = originalDofNearBlur;
 
     const bool cameraFovEnabled = C_GET(bool, Vars.bFOV);
-    if (cameraFovEnabled && !previousCameraFov)
+    if (cameraFovEnabled && !capturedCameraFov)
         capturedCameraFov = CONVAR::ReadFloat(cameraFov, originalCameraFov);
     if (!cameraFovEnabled && previousCameraFov && capturedCameraFov)
+    {
         CONVAR::WriteFloat(cameraFov, originalCameraFov);
-    if (cameraFovEnabled)
+        capturedCameraFov = false;
+    }
+    if (cameraFovEnabled && capturedCameraFov)
         cameraFovWrite = CONVAR::WriteFloat(cameraFov,
             std::clamp(C_GET(float, Vars.fFOVAmount), 30.f, 150.f), &cameraFovReadback);
     previousCameraFov = cameraFovEnabled;
 
     const bool viewmodelFovEnabled = C_GET(bool, Vars.bSetViewModelFOV);
-    if (viewmodelFovEnabled && !previousViewmodelFov)
+    if (viewmodelFovEnabled && !capturedViewmodelFov)
         capturedViewmodelFov = CONVAR::ReadFloat(viewmodelFov, originalViewmodelFov);
     if (!viewmodelFovEnabled && previousViewmodelFov && capturedViewmodelFov)
+    {
         CONVAR::WriteFloat(viewmodelFov, originalViewmodelFov);
-    if (viewmodelFovEnabled)
+        capturedViewmodelFov = false;
+    }
+    if (viewmodelFovEnabled && capturedViewmodelFov)
         viewmodelFovWrite = CONVAR::WriteFloat(viewmodelFov,
             std::clamp(C_GET(float, Vars.flSetViewModelFOV), 40.f, 150.f), &viewmodelFovReadback);
     previousViewmodelFov = viewmodelFovEnabled;
 
     const bool removeScope = C_GET(bool, Vars.bRemoveScopeOverlay);
-    if (removeScope && !previousScope)
+    if (removeScope && !capturedScope)
         capturedScope = CONVAR::ReadBool(sniperStencil, originalScope);
     if (!removeScope && previousScope && capturedScope)
+    {
         CONVAR::WriteBool(sniperStencil, originalScope);
-    if (removeScope)
+        capturedScope = false;
+    }
+    if (removeScope && capturedScope)
         scopeWrite = CONVAR::WriteBool(sniperStencil, false, &scopeReadback);
     previousScope = removeScope;
 
     const bool removeBlur = C_GET(bool, Vars.bRemoveMotionBlur);
-    if (removeBlur && !previousBlur)
+    if (removeBlur)
     {
-        capturedDofOverride = CONVAR::ReadBool(dofOverride, originalDofOverride);
-        capturedDofMaxBlur = CONVAR::ReadFloat(dofMaxBlur, originalDofMaxBlur);
-        capturedDofFarBlur = CONVAR::ReadFloat(dofFarBlur, originalDofFarBlur);
-        capturedDofNearBlur = CONVAR::ReadFloat(dofNearBlur, originalDofNearBlur);
+        if (!capturedDofOverride)
+            capturedDofOverride = CONVAR::ReadBool(dofOverride, originalDofOverride);
+        if (!capturedDofMaxBlur)
+            capturedDofMaxBlur = CONVAR::ReadFloat(dofMaxBlur, originalDofMaxBlur);
+        if (!capturedDofFarBlur)
+            capturedDofFarBlur = CONVAR::ReadFloat(dofFarBlur, originalDofFarBlur);
+        if (!capturedDofNearBlur)
+            capturedDofNearBlur = CONVAR::ReadFloat(dofNearBlur, originalDofNearBlur);
     }
     if (!removeBlur && previousBlur)
     {
@@ -1631,40 +1778,65 @@ void ApplyCameraAndRemovals(C_CSPlayerPawn* localPawn)
         if (capturedDofMaxBlur) CONVAR::WriteFloat(dofMaxBlur, originalDofMaxBlur);
         if (capturedDofFarBlur) CONVAR::WriteFloat(dofFarBlur, originalDofFarBlur);
         if (capturedDofNearBlur) CONVAR::WriteFloat(dofNearBlur, originalDofNearBlur);
+        capturedDofOverride = false;
+        capturedDofMaxBlur = false;
+        capturedDofFarBlur = false;
+        capturedDofNearBlur = false;
     }
     if (removeBlur)
     {
-        blurWrite = CONVAR::WriteBool(dofOverride, true, &dofOverrideReadback);
-        blurWrite &= CONVAR::WriteFloat(dofMaxBlur, 0.f, &dofMaxBlurReadback);
-        blurWrite &= CONVAR::WriteFloat(dofFarBlur, 0.f, &dofFarBlurReadback);
-        blurWrite &= CONVAR::WriteFloat(dofNearBlur, 0.f, &dofNearBlurReadback);
+        blurWrite = capturedDofOverride &&
+            CONVAR::WriteBool(dofOverride, true, &dofOverrideReadback);
+        blurWrite &= capturedDofMaxBlur &&
+            CONVAR::WriteFloat(dofMaxBlur, 0.f, &dofMaxBlurReadback);
+        blurWrite &= capturedDofFarBlur &&
+            CONVAR::WriteFloat(dofFarBlur, 0.f, &dofFarBlurReadback);
+        blurWrite &= capturedDofNearBlur &&
+            CONVAR::WriteFloat(dofNearBlur, 0.f, &dofNearBlurReadback);
     }
     previousBlur = removeBlur;
 
     static C_CSPlayerPawn* flashPawn = nullptr;
     static float originalFlashAlpha = 255.f;
     static bool previousFlash = false;
+    static bool capturedFlashAlpha = false;
+    static const std::uint32_t flashAlphaOffset =
+        SCHEMA::GetOffset("C_CSPlayerPawnBase->m_flFlashMaxAlpha");
     const bool removeFlash = C_GET(bool, Vars.bRemoveFlash);
     if (localPawn != flashPawn)
     {
         flashPawn = localPawn;
         previousFlash = false;
+        capturedFlashAlpha = false;
     }
-    if (localPawn != nullptr)
+    if (localPawn != nullptr && IsSaneSchemaOffset(flashAlphaOffset, 0x10000))
     {
         if (removeFlash && !previousFlash)
-            originalFlashAlpha = localPawn->GetFlashMaxAlpha();
-        if (!removeFlash && previousFlash)
-            localPawn->GetFlashMaxAlpha() = originalFlashAlpha;
-        if (removeFlash)
-            localPawn->GetFlashMaxAlpha() = std::clamp(C_GET(float, Vars.flFlashOpacity), 0.f, 255.f);
+            capturedFlashAlpha = SafeNativeRead(
+                reinterpret_cast<const std::uint8_t*>(localPawn) + flashAlphaOffset,
+                originalFlashAlpha) && std::isfinite(originalFlashAlpha) &&
+                originalFlashAlpha >= 0.f && originalFlashAlpha <= 255.f;
+        if (!removeFlash && previousFlash && capturedFlashAlpha)
+        {
+            SafeNativeWrite(reinterpret_cast<std::uint8_t*>(localPawn) +
+                flashAlphaOffset, originalFlashAlpha);
+            capturedFlashAlpha = false;
+        }
+        if (removeFlash && capturedFlashAlpha)
+        {
+            const float targetFlashAlpha = std::clamp(
+                C_GET(float, Vars.flFlashOpacity), 0.f, 255.f);
+            SafeNativeWrite(reinterpret_cast<std::uint8_t*>(localPawn) +
+                flashAlphaOffset, targetFlashAlpha);
+        }
 
         if (C_GET(bool, Vars.bRemoveAimPunch))
         {
             static const std::uint32_t viewPunchOffset =
                 SCHEMA::GetOffset("CPlayer_CameraServices->m_vecCsViewPunchAngle");
-            CPlayer_CameraServices* cameraServices = localPawn->GetCameraServices();
-            if (cameraServices != nullptr && IsSaneSchemaOffset(viewPunchOffset, 0x10000))
+            CPlayer_CameraServices* cameraServices = nullptr;
+            if (SafeGetCameraServices(localPawn, cameraServices) &&
+                IsSaneSchemaOffset(viewPunchOffset, 0x10000))
             {
                 const QAngle_t clearedPunch{};
                 SafeNativeWrite(reinterpret_cast<std::uint8_t*>(cameraServices) +
@@ -1672,7 +1844,10 @@ void ApplyCameraAndRemovals(C_CSPlayerPawn* localPawn)
             }
         }
     }
-    previousFlash = removeFlash;
+    // A failed read is transient (the pawn can be changing during respawn). Keep
+    // retrying until the original value has actually been captured; otherwise a
+    // later disable could restore an invented value.
+    previousFlash = removeFlash && capturedFlashAlpha;
 
     static std::uint64_t nextLog = 0;
     if (SDL_GetTicks() >= nextLog &&
@@ -1713,17 +1888,26 @@ void ApplyThirdPerson(C_CSPlayerPawn* localPawn)
     static float originalShoulderHeight = 0.f;
     static float originalShoulderOffset = 0.f;
 
-    if (featureEnabled && !wasEnabled)
+    if (featureEnabled)
     {
-        capturedClThirdPerson = CONVAR::ReadBool(CONVAR::cl_thirdperson, originalClThirdPerson);
-        capturedIdealDistance = CONVAR::ReadFloat(CONVAR::cam_idealdist, originalIdealDistance);
-        capturedCollision = CONVAR::ReadInt32(CONVAR::cam_collision, originalCollision);
-        capturedSnap = CONVAR::ReadBool(CONVAR::cam_snapto, originalSnap);
-        capturedShoulder = CONVAR::ReadBool(CONVAR::c_thirdpersonshoulder, originalShoulder);
-        capturedShoulderAimDistance = CONVAR::ReadFloat(CONVAR::c_thirdpersonshoulderaimdist, originalShoulderAimDistance);
-        capturedShoulderDistance = CONVAR::ReadFloat(CONVAR::c_thirdpersonshoulderdist, originalShoulderDistance);
-        capturedShoulderHeight = CONVAR::ReadFloat(CONVAR::c_thirdpersonshoulderheight, originalShoulderHeight);
-        capturedShoulderOffset = CONVAR::ReadFloat(CONVAR::c_thirdpersonshoulderoffset, originalShoulderOffset);
+        if (!capturedClThirdPerson && CONVAR::cl_thirdperson != nullptr)
+            capturedClThirdPerson = CONVAR::ReadBool(CONVAR::cl_thirdperson, originalClThirdPerson);
+        if (!capturedIdealDistance)
+            capturedIdealDistance = CONVAR::ReadFloat(CONVAR::cam_idealdist, originalIdealDistance);
+        if (!capturedCollision)
+            capturedCollision = CONVAR::ReadInt32(CONVAR::cam_collision, originalCollision);
+        if (!capturedSnap)
+            capturedSnap = CONVAR::ReadBool(CONVAR::cam_snapto, originalSnap);
+        if (!capturedShoulder)
+            capturedShoulder = CONVAR::ReadBool(CONVAR::c_thirdpersonshoulder, originalShoulder);
+        if (!capturedShoulderAimDistance)
+            capturedShoulderAimDistance = CONVAR::ReadFloat(CONVAR::c_thirdpersonshoulderaimdist, originalShoulderAimDistance);
+        if (!capturedShoulderDistance)
+            capturedShoulderDistance = CONVAR::ReadFloat(CONVAR::c_thirdpersonshoulderdist, originalShoulderDistance);
+        if (!capturedShoulderHeight)
+            capturedShoulderHeight = CONVAR::ReadFloat(CONVAR::c_thirdpersonshoulderheight, originalShoulderHeight);
+        if (!capturedShoulderOffset)
+            capturedShoulderOffset = CONVAR::ReadFloat(CONVAR::c_thirdpersonshoulderoffset, originalShoulderOffset);
     }
     else if (!featureEnabled && wasEnabled)
     {
@@ -1736,6 +1920,15 @@ void ApplyThirdPerson(C_CSPlayerPawn* localPawn)
         if (capturedShoulderDistance) CONVAR::WriteFloat(CONVAR::c_thirdpersonshoulderdist, originalShoulderDistance);
         if (capturedShoulderHeight) CONVAR::WriteFloat(CONVAR::c_thirdpersonshoulderheight, originalShoulderHeight);
         if (capturedShoulderOffset) CONVAR::WriteFloat(CONVAR::c_thirdpersonshoulderoffset, originalShoulderOffset);
+        capturedClThirdPerson = false;
+        capturedIdealDistance = false;
+        capturedCollision = false;
+        capturedSnap = false;
+        capturedShoulder = false;
+        capturedShoulderAimDistance = false;
+        capturedShoulderDistance = false;
+        capturedShoulderHeight = false;
+        capturedShoulderOffset = false;
     }
     if (!featureEnabled)
     {
@@ -1772,19 +1965,26 @@ void ApplyThirdPerson(C_CSPlayerPawn* localPawn)
     {
         // cl_thirdperson is absent in some current native builds, so the
         // shoulder and input paths remain independently validated.
-        if (CONVAR::cl_thirdperson != nullptr)
+        if (capturedClThirdPerson)
             cvarWrites &= CONVAR::WriteBool(CONVAR::cl_thirdperson, enabled, &clThirdPersonReadback);
-        cvarWrites &= CONVAR::WriteFloat(CONVAR::cam_idealdist, distance, &distanceReadback);
-        cvarWrites &= CONVAR::WriteInt32(CONVAR::cam_collision,
+        cvarWrites &= capturedIdealDistance &&
+            CONVAR::WriteFloat(CONVAR::cam_idealdist, distance, &distanceReadback);
+        cvarWrites &= capturedCollision && CONVAR::WriteInt32(CONVAR::cam_collision,
             C_GET(bool, Vars.thirdperson_collision) ? 1 : 0, &collisionReadback);
-        cvarWrites &= CONVAR::WriteBool(CONVAR::cam_snapto, true, &snapReadback);
-        cvarWrites &= CONVAR::WriteBool(CONVAR::c_thirdpersonshoulder, enabled, &shoulderReadback);
+        cvarWrites &= capturedSnap &&
+            CONVAR::WriteBool(CONVAR::cam_snapto, true, &snapReadback);
+        cvarWrites &= capturedShoulder &&
+            CONVAR::WriteBool(CONVAR::c_thirdpersonshoulder, enabled, &shoulderReadback);
         if (enabled)
         {
-            cvarWrites &= CONVAR::WriteFloat(CONVAR::c_thirdpersonshoulderaimdist, 0.f);
-            cvarWrites &= CONVAR::WriteFloat(CONVAR::c_thirdpersonshoulderdist, 0.f);
-            cvarWrites &= CONVAR::WriteFloat(CONVAR::c_thirdpersonshoulderheight, 0.f);
-            cvarWrites &= CONVAR::WriteFloat(CONVAR::c_thirdpersonshoulderoffset, 0.f);
+            cvarWrites &= capturedShoulderAimDistance &&
+                CONVAR::WriteFloat(CONVAR::c_thirdpersonshoulderaimdist, 0.f);
+            cvarWrites &= capturedShoulderDistance &&
+                CONVAR::WriteFloat(CONVAR::c_thirdpersonshoulderdist, 0.f);
+            cvarWrites &= capturedShoulderHeight &&
+                CONVAR::WriteFloat(CONVAR::c_thirdpersonshoulderheight, 0.f);
+            cvarWrites &= capturedShoulderOffset &&
+                CONVAR::WriteFloat(CONVAR::c_thirdpersonshoulderoffset, 0.f);
         }
     }
 
@@ -1800,8 +2000,28 @@ void ApplyThirdPerson(C_CSPlayerPawn* localPawn)
         }
         return 0U;
     }();
-    if (localPawn != nullptr && IsSaneSchemaOffset(thirdPersonOffset, 0x10000))
-        SafeNativeWrite(reinterpret_cast<std::uint8_t*>(localPawn) + thirdPersonOffset, enabled);
+    static C_CSPlayerPawn* thirdPersonPawn = nullptr;
+    static bool capturedPawnPerspective = false;
+    static bool originalPawnPerspective = false;
+    if (thirdPersonPawn != localPawn)
+    {
+        thirdPersonPawn = localPawn;
+        capturedPawnPerspective = false;
+    }
+    if (featureEnabled && !capturedPawnPerspective && localPawn != nullptr &&
+        IsSaneSchemaOffset(thirdPersonOffset, 0x10000))
+        capturedPawnPerspective = SafeNativeRead(
+            reinterpret_cast<const std::uint8_t*>(localPawn) + thirdPersonOffset,
+            originalPawnPerspective);
+    if (featureEnabled && capturedPawnPerspective)
+        SafeNativeWrite(reinterpret_cast<std::uint8_t*>(localPawn) +
+            thirdPersonOffset, enabled);
+    else if (!featureEnabled && capturedPawnPerspective)
+    {
+        SafeNativeWrite(reinterpret_cast<std::uint8_t*>(localPawn) +
+            thirdPersonOffset, originalPawnPerspective);
+        capturedPawnPerspective = false;
+    }
 
     static std::uint64_t lastConfirmation = 0;
     if (enabled && SDL_GetTicks() - lastConfirmation > 2000)
@@ -1883,17 +2103,21 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
     const int keyCode = C_GET(int, Vars.legit_ui_key);
     const bool keyDown = IsNativeButtonDown(keyCode);
     const std::uint64_t currentSequence = ++sequence;
+    int localHealth = 0;
+    std::uint8_t localTeam = 0;
+    const bool localStateReady = SafeGetPawnHealth(localPawn, localHealth) &&
+        SafeGetPawnTeam(localPawn, localTeam);
     if (diagnose)
         LegitLog("[%llu] state time=%llu enabled=1 aim=1 key=%d down=%d toggle_mode=%d toggle_active=%d menu=%d thirdperson_requested=%d pawn=%p health=%d create_move=%llu applied=%llu",
             static_cast<unsigned long long>(currentSequence), static_cast<unsigned long long>(now),
             keyCode, keyDown, toggleMode, toggled, MENU::bMainWindowOpened,
-            native_thirdperson_active, localPawn, localPawn != nullptr ? localPawn->GetHealth() : 0,
+            native_thirdperson_active, localPawn, localHealth,
             GetNativeCreateMoveCalls(), GetNativeAimAngleApplications());
 
     // Third person is a camera presentation choice and must never suppress
     // aim command generation. The old check made legitbot permanently inert
     // whenever the (previously broken) camera toggle was enabled.
-    if (MENU::bMainWindowOpened || localPawn == nullptr || localPawn->GetHealth() <= 0)
+    if (MENU::bMainWindowOpened || !localStateReady || localHealth <= 0)
     {
         stopAim(true);
         // Never resume a toggled lock merely because the menu closed or the
@@ -1905,7 +2129,7 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
         if (diagnose)
             LegitLog("[%llu] BLOCKED menu=%d pawn=%p health=%d",
                 static_cast<unsigned long long>(currentSequence), MENU::bMainWindowOpened, localPawn,
-                localPawn != nullptr ? localPawn->GetHealth() : 0);
+                localHealth);
         return;
     }
 
@@ -1972,12 +2196,54 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
     const float reactionMs = std::clamp(C_GET(bool, Vars.legit_ui_per_weapon)
         ? C_GET_ARRAY(float, 7, Vars.legit_profile_reaction_ms, profile)
         : C_GET(float, Vars.legit_ui_reaction_ms), 0.f, 500.f);
+    const bool perWeaponProfile = C_GET(bool, Vars.legit_ui_per_weapon);
+    const float configuredAccelerationMs = std::clamp(perWeaponProfile
+        ? C_GET_ARRAY(float, 7, Vars.legit_profile_acceleration_ms, profile)
+        : C_GET(float, Vars.legit_ui_acceleration_ms), 0.f, 500.f);
+    const float configuredDecelerationDegrees = std::clamp(perWeaponProfile
+        ? C_GET_ARRAY(float, 7, Vars.legit_profile_deceleration_degrees, profile)
+        : C_GET(float, Vars.legit_ui_deceleration_degrees), 0.f, 10.f);
+    const bool configuredArtificialOvershoot = perWeaponProfile
+        ? C_GET_ARRAY(bool, 7, Vars.legit_profile_artificial_overshoot, profile)
+        : C_GET(bool, Vars.legit_ui_artificial_overshoot);
+    const float configuredOvershootDegrees = std::clamp(perWeaponProfile
+        ? C_GET_ARRAY(float, 7, Vars.legit_profile_overshoot_degrees, profile)
+        : C_GET(float, Vars.legit_ui_overshoot_degrees), 0.05f, 1.50f);
+    const float configuredRecoveryMs = std::clamp(perWeaponProfile
+        ? C_GET_ARRAY(float, 7, Vars.legit_profile_recovery_ms, profile)
+        : C_GET(float, Vars.legit_ui_recovery_ms), 5.f, 250.f);
+    const bool configuredBoneHead = perWeaponProfile
+        ? C_GET_ARRAY(bool, 7, Vars.legit_profile_bone_head, profile)
+        : C_GET(bool, Vars.legit_ui_bone_head);
+    const bool configuredBoneTorso = perWeaponProfile
+        ? C_GET_ARRAY(bool, 7, Vars.legit_profile_bone_torso, profile)
+        : C_GET(bool, Vars.legit_ui_bone_torso);
+    const bool configuredBoneArms = perWeaponProfile
+        ? C_GET_ARRAY(bool, 7, Vars.legit_profile_bone_arms, profile)
+        : C_GET(bool, Vars.legit_ui_bone_arms);
+    const bool configuredBoneLegs = perWeaponProfile
+        ? C_GET_ARRAY(bool, 7, Vars.legit_profile_bone_legs, profile)
+        : C_GET(bool, Vars.legit_ui_bone_legs);
+    const bool configuredPrediction = perWeaponProfile
+        ? C_GET_ARRAY(bool, 7, Vars.legit_profile_prediction, profile)
+        : C_GET(bool, Vars.legit_ui_prediction);
+    const float configuredPredictionMs = std::clamp(perWeaponProfile
+        ? C_GET_ARRAY(float, 7, Vars.legit_profile_prediction_ms, profile)
+        : C_GET(float, Vars.legit_ui_prediction_ms), 0.f, 250.f);
+    const bool configuredAutoShoot = perWeaponProfile
+        ? C_GET_ARRAY(bool, 7, Vars.legit_profile_auto_shoot, profile)
+        : C_GET(bool, Vars.legit_ui_auto_shoot);
+    const bool configuredRecoil = perWeaponProfile
+        ? C_GET_ARRAY(bool, 7, Vars.legit_profile_recoil, profile)
+        : C_GET(bool, Vars.legit_ui_recoil);
 
-    if (flashCheck && localPawn->GetFlashDuration() > 0.05f)
+    float localFlashDuration = 0.f;
+    if (flashCheck && (!SafeGetFlashDuration(localPawn, localFlashDuration) ||
+        localFlashDuration > 0.05f))
     {
         stopAim(true);
         if (diagnose) LegitLog("[%llu] BLOCKED flash duration=%.3f",
-            static_cast<unsigned long long>(currentSequence), localPawn->GetFlashDuration());
+            static_cast<unsigned long long>(currentSequence), localFlashDuration);
         return;
     }
     if (smokeCheck)
@@ -2067,12 +2333,13 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
     constexpr float degrees = 180.f / 3.14159265358979323846f;
 
     QAngle_t recoilCorrection{};
-    if (C_GET(bool, Vars.legit_ui_recoil))
+    if (configuredRecoil)
     {
         static const std::uint32_t cameraPunchOffset =
             SCHEMA::GetOffset("CPlayer_CameraServices->m_vecCsViewPunchAngle");
-        CPlayer_CameraServices* camera = localPawn->GetCameraServices();
-        if (camera != nullptr && IsSaneSchemaOffset(cameraPunchOffset, 0x10000) &&
+        CPlayer_CameraServices* camera = nullptr;
+        if (SafeGetCameraServices(localPawn, camera) &&
+            IsSaneSchemaOffset(cameraPunchOffset, 0x10000) &&
             SafeNativeRead(reinterpret_cast<std::uint8_t*>(camera) +
                 cameraPunchOffset, recoilCorrection))
         {
@@ -2083,9 +2350,13 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
 
     const auto considerTarget = [&](C_CSPlayerPawn* pawn, int bone, int bonePriority, Vector_t target) {
         ++bonesTested;
-        if (C_GET(bool, Vars.legit_ui_prediction))
-            target += pawn->GetAbsVelocity() *
-                (std::clamp(C_GET(float, Vars.legit_ui_prediction_ms), 0.f, 250.f) / 1000.f);
+        if (configuredPrediction)
+        {
+            Vector_t targetVelocity{};
+            if (!SafeGetPawnVelocity(pawn, targetVelocity))
+                return;
+            target += targetVelocity * (configuredPredictionMs / 1000.f);
+        }
 
         if (smokeCheck)
         {
@@ -2133,7 +2404,12 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
         if (targetSelection == 1)
             targetScore = distance;
         else if (targetSelection == 2)
-            targetScore = static_cast<float>(pawn->GetHealth());
+        {
+            int targetHealth = 0;
+            if (!SafeGetPawnHealth(pawn, targetHealth))
+                return;
+            targetScore = static_cast<float>(targetHealth);
+        }
         // Priority mode makes the enabled hitbox order decisive; nearest mode
         // lets angular proximity choose the point on the selected target.
         const float score = hitboxMode == 0
@@ -2167,8 +2443,11 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
             continue;
         ++controllersScanned;
         C_CSPlayerPawn* pawn = nullptr;
+        int targetHealth = 0;
+        std::uint8_t targetTeam = 0;
         if (!SafeGetPlayerPawn(entities, controller, pawn) || pawn == localPawn ||
-            pawn->GetHealth() <= 0 || pawn->GetTeam() == localPawn->GetTeam())
+            !SafeGetPawnHealth(pawn, targetHealth) || targetHealth <= 0 ||
+            !SafeGetPawnTeam(pawn, targetTeam) || targetTeam == localTeam)
             continue;
         ++enemiesScanned;
         CGameSceneNode* scene = nullptr;
@@ -2177,12 +2456,12 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
             continue;
 
         const int candidates[] = {
-            C_GET(bool, Vars.legit_ui_bone_head) ? 5 : -1,
-            C_GET(bool, Vars.legit_ui_bone_torso) ? 3 : -1,
-            C_GET(bool, Vars.legit_ui_bone_arms) ? 9 : -1,
-            C_GET(bool, Vars.legit_ui_bone_arms) ? 14 : -1,
-            C_GET(bool, Vars.legit_ui_bone_legs) ? 23 : -1,
-            C_GET(bool, Vars.legit_ui_bone_legs) ? 26 : -1,
+            configuredBoneHead ? 5 : -1,
+            configuredBoneTorso ? 3 : -1,
+            configuredBoneArms ? 9 : -1,
+            configuredBoneArms ? 14 : -1,
+            configuredBoneLegs ? 23 : -1,
+            configuredBoneLegs ? 26 : -1,
         };
         bool foundBone = false;
         for (int candidateIndex = 0; candidateIndex < static_cast<int>(std::size(candidates)); ++candidateIndex)
@@ -2237,9 +2516,7 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
             std::fabs(previousDelta.y) > angularDeadZone * 2.f;
         if (crossedPitch || crossedYaw)
         {
-            const float recoveryMs = std::clamp(
-                C_GET(float, Vars.legit_ui_recovery_ms), 5.f, 250.f);
-            recoveryUntil = now + static_cast<std::uint64_t>(recoveryMs * 2.f);
+            recoveryUntil = now + static_cast<std::uint64_t>(configuredRecoveryMs * 2.f);
         }
     }
     lockedPawn = chosen.pawn;
@@ -2264,10 +2541,8 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
     // crossed, hold for one short input interval, remove the offset and let the
     // normal bounded recovery response return to the target. This cannot loop
     // because overshootConsumed resets only when the lock changes or releases.
-    const bool artificialOvershootEnabled =
-        C_GET(bool, Vars.legit_ui_artificial_overshoot);
-    const float configuredOvershoot = std::clamp(
-        C_GET(float, Vars.legit_ui_overshoot_degrees), 0.05f, 1.50f);
+    const bool artificialOvershootEnabled = configuredArtificialOvershoot;
+    const float configuredOvershoot = configuredOvershootDegrees;
     const float overshootActivationFov = std::max(0.35f, configuredOvershoot * 2.5f);
     if (artificialOvershootEnabled && !overshootConsumed &&
         chosen.fov > angularDeadZone && chosen.fov <= overshootActivationFov)
@@ -2301,12 +2576,10 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
         {
             overshootActive = false;
             overshootOffset = {};
-            const float recoveryMs = std::clamp(
-                C_GET(float, Vars.legit_ui_recovery_ms), 5.f, 250.f);
-            recoveryUntil = now + static_cast<std::uint64_t>(recoveryMs * 2.f);
+            recoveryUntil = now + static_cast<std::uint64_t>(configuredRecoveryMs * 2.f);
             LegitLog("[%llu] OVERSHOOT_RECOVER target=%p bone=%d recovery_ms=%.0f",
                 static_cast<unsigned long long>(currentSequence),
-                reinterpret_cast<void*>(chosen.pawn), chosen.bone, recoveryMs);
+                reinterpret_cast<void*>(chosen.pawn), chosen.bone, configuredRecoveryMs);
         }
     }
 
@@ -2315,7 +2588,7 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
         chosen.delta.y + (overshootActive ? overshootOffset.y : 0.f), 0.f);
     const float aimFov = std::hypot(aimDelta.x, aimDelta.y);
 
-    AddNativeCombatInput(C_GET(bool, Vars.legit_ui_auto_shoot) &&
+    AddNativeCombatInput(configuredAutoShoot &&
         !overshootActive && chosen.fov < 2.f,
         false, false, false);
 
@@ -2338,8 +2611,7 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
     const float baseResponse = 1.f - std::exp(-frameSeconds / smoothnessSeconds);
 
     float accelerationFactor = 1.f;
-    const float accelerationMs = std::clamp(
-        C_GET(float, Vars.legit_ui_acceleration_ms), 0.f, 500.f);
+    const float accelerationMs = configuredAccelerationMs;
     if (accelerationMs > 0.f && lockStartedAt != 0)
     {
         const float elapsed = static_cast<float>(now - lockStartedAt);
@@ -2349,8 +2621,7 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
     }
 
     float decelerationFactor = 1.f;
-    const float decelerationZone = std::clamp(
-        C_GET(float, Vars.legit_ui_deceleration_degrees), 0.f, 10.f);
+    const float decelerationZone = configuredDecelerationDegrees;
     if (decelerationZone > angularDeadZone && chosen.fov < decelerationZone)
     {
         const float normalized = std::clamp(
@@ -2364,7 +2635,7 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
     if (recovering)
     {
         const float recoverySeconds = std::max(0.005f,
-            C_GET(float, Vars.legit_ui_recovery_ms) / 1000.f);
+            configuredRecoveryMs / 1000.f);
         response = std::max(response,
             1.f - std::exp(-frameSeconds / recoverySeconds));
     }
@@ -2418,8 +2689,11 @@ void ApplyNativeTriggerAndRecoil(CGameEntitySystem* entities,
     static std::uint64_t triggerAcquiredAt = 0;
     static QAngle_t previousPunch{};
 
-    if (entities == nullptr || localController == nullptr || localPawn == nullptr ||
-        localPawn->GetHealth() <= 0 || MENU::bMainWindowOpened)
+    int localHealth = 0;
+    std::uint8_t localTeam = 0;
+    if (entities == nullptr || localController == nullptr ||
+        !SafeGetPawnHealth(localPawn, localHealth) || localHealth <= 0 ||
+        !SafeGetPawnTeam(localPawn, localTeam) || MENU::bMainWindowOpened)
     {
         triggerTarget = nullptr;
         triggerBone = -1;
@@ -2496,8 +2770,11 @@ void ApplyNativeTriggerAndRecoil(CGameEntitySystem* entities,
                     controller == localController)
                     continue;
                 C_CSPlayerPawn* pawn = nullptr;
+                int targetHealth = 0;
+                std::uint8_t targetTeam = 0;
                 if (!SafeGetPlayerPawn(entities, controller, pawn) ||
-                    pawn->GetHealth() <= 0 || pawn->GetTeam() == localPawn->GetTeam())
+                    !SafeGetPawnHealth(pawn, targetHealth) || targetHealth <= 0 ||
+                    !SafeGetPawnTeam(pawn, targetTeam) || targetTeam == localTeam)
                     continue;
                 CGameSceneNode* scene = nullptr;
                 bool dormant = true;
@@ -2582,7 +2859,9 @@ void ApplyNativeTriggerAndRecoil(CGameEntitySystem* entities,
         triggerAcquiredAt = 0;
     }
 
-    if (!C_GET(bool, Vars.recoil_ui_enable) || localPawn->GetShotsFired() <= 1 ||
+    int shotsFired = 0;
+    if (!C_GET(bool, Vars.recoil_ui_enable) ||
+        !SafeGetShotsFired(localPawn, shotsFired) || shotsFired <= 1 ||
         native_aim_command_queued || !IsNativeInputHookInstalled())
     {
         previousPunch = {};
@@ -2591,9 +2870,9 @@ void ApplyNativeTriggerAndRecoil(CGameEntitySystem* entities,
 
     static const std::uint32_t punchOffset =
         SCHEMA::GetOffset("CPlayer_CameraServices->m_vecCsViewPunchAngle");
-    CPlayer_CameraServices* camera = localPawn->GetCameraServices();
+    CPlayer_CameraServices* camera = nullptr;
     QAngle_t punch{};
-    if (camera == nullptr || punchOffset == 0 || !SafeNativeRead(
+    if (!SafeGetCameraServices(localPawn, camera) || punchOffset == 0 || !SafeNativeRead(
             reinterpret_cast<const std::uint8_t*>(camera) + punchOffset, punch) ||
         !punch.IsValid())
         return;
@@ -2613,8 +2892,10 @@ void ApplyNativeTriggerAndRecoil(CGameEntitySystem* entities,
 
 void ApplyNativeAntiAim(CGameEntitySystem* entities, C_CSPlayerPawn* localPawn)
 {
+    int localHealth = 0;
     if (!C_GET(bool, Vars.bAntiAim) || native_aim_command_queued ||
-        MENU::bMainWindowOpened || localPawn == nullptr || localPawn->GetHealth() <= 0 ||
+        MENU::bMainWindowOpened || !SafeGetPawnHealth(localPawn, localHealth) ||
+        localHealth <= 0 ||
         IsNativeCombatAttackRequested() || IsNativeButtonDown(VK_LBUTTON) ||
         IsNativeButtonDown(VK_RBUTTON))
         return;
@@ -2685,10 +2966,14 @@ void ApplyNativeAntiAim(CGameEntitySystem* entities, C_CSPlayerPawn* localPawn)
             std::clamp(C_GET(float, Vars.antiaim_custom_yaw), -180.f, 180.f), 360.f);
     // Forward yaw intentionally preserves the current yaw.
 
-    const Vector_t velocity = localPawn->GetAbsVelocity();
+    Vector_t velocity{};
+    std::uint32_t flags = 0;
+    if (!SafeGetPawnVelocity(localPawn, velocity) ||
+        !SafeGetPawnFlags(localPawn, flags))
+        return;
     const float speed = std::hypot(velocity.x, velocity.y);
-    const bool onGround = (localPawn->GetFlags() & FL_ONGROUND) != 0;
-    const bool crouching = (localPawn->GetFlags() & FL_DUCKING) != 0;
+    const bool onGround = (flags & FL_ONGROUND) != 0;
+    const bool crouching = (flags & FL_DUCKING) != 0;
     int profile = 0; // standing
     if (!onGround)
         profile = 2;
@@ -2750,9 +3035,12 @@ void ApplyNativeAntiAim(CGameEntitySystem* entities, C_CSPlayerPawn* localPawn)
 void ApplyNativeRage(CGameEntitySystem* entities, CCSPlayerController* localController,
                      C_CSPlayerPawn* localPawn)
 {
+    int localHealth = 0;
+    std::uint8_t localTeam = 0;
     if (!C_GET(bool, Vars.rage_enable) || MENU::bMainWindowOpened ||
         entities == nullptr || localController == nullptr || localPawn == nullptr ||
-        localPawn->GetHealth() <= 0)
+        !SafeGetPawnHealth(localPawn, localHealth) || localHealth <= 0 ||
+        !SafeGetPawnTeam(localPawn, localTeam))
     {
         ClearNativeAimDelta();
         return;
@@ -2805,8 +3093,11 @@ void ApplyNativeRage(CGameEntitySystem* entities, CCSPlayerController* localCont
     const bool ballisticsAvailable = TRACE::NativeReady() &&
         ReadNativeWeaponBallistics(localPawn, activeWeaponEntity, weaponBallistics);
 
-    const bool forceBody = IsNativeButtonDown(C_GET(int, Vars.rage_force_body_key));
     const bool forceHead = IsNativeButtonDown(C_GET(int, Vars.rage_force_head_key));
+    // Head wins if both override keys are held. Previously both booleans stayed
+    // true and every hitbox expression rejected itself, yielding no target.
+    const bool forceBody = !forceHead &&
+        IsNativeButtonDown(C_GET(int, Vars.rage_force_body_key));
     const bool preferExposed = C_GET_ARRAY(bool, 7, Vars.rage_prefer_exposed, weaponGroup);
     const bool requireVisible = C_GET_ARRAY(bool, 7, Vars.rage_delay_visible, weaponGroup);
     if ((preferExposed || requireVisible) && !TRACE::NativeReady())
@@ -2847,9 +3138,11 @@ void ApplyNativeRage(CGameEntitySystem* entities, CCSPlayerController* localCont
             controller == localController)
             continue;
         C_CSPlayerPawn* pawn = nullptr;
+        int targetHealth = 0;
+        std::uint8_t targetTeam = 0;
         if (!SafeGetPlayerPawn(entities, controller, pawn) || pawn == localPawn ||
-            pawn->GetHealth() <= 0 ||
-            pawn->GetTeam() == localPawn->GetTeam())
+            !SafeGetPawnHealth(pawn, targetHealth) || targetHealth <= 0 ||
+            !SafeGetPawnTeam(pawn, targetTeam) || targetTeam == localTeam)
             continue;
         CGameSceneNode* scene = nullptr;
         bool dormant = true;
@@ -2934,12 +3227,12 @@ void ApplyNativeRage(CGameEntitySystem* entities, CCSPlayerController* localCont
                 if (!priorityMatch)
                     score += 50000.f;
                 if (C_GET_ARRAY(bool, 7, Vars.rage_prefer_low_health, weaponGroup))
-                    score += static_cast<float>(pawn->GetHealth()) * 4.f;
+                    score += static_cast<float>(targetHealth) * 4.f;
                 if (preferExposed && !exposed)
                     score += 100000.f;
                 if (std::isfinite(score))
                     candidates.push_back({ pawn, index, bone, delta, points[pointIndex],
-                        distance, fov, score, pawn->GetHealth() });
+                        distance, fov, score, targetHealth });
             }
             if (!hitscan)
                 break;
@@ -3868,8 +4161,11 @@ void DrawNativeGrenadeTrajectory(CGameEntitySystem* entities, C_CSPlayerPawn* lo
     const Vector_t forward(std::cos(pitch) * std::cos(yaw),
         std::cos(pitch) * std::sin(yaw), -std::sin(pitch));
     Vector_t position = origin + viewOffset + forward * 16.f;
+    Vector_t localVelocity{};
+    if (!SafeGetPawnVelocity(localPawn, localVelocity))
+        return;
     Vector_t velocity = forward * (throwVelocity * 0.9f * (0.3f + 0.7f * strength)) +
-        localPawn->GetAbsVelocity() * 1.25f;
+        localVelocity * 1.25f;
     if (!position.IsValid() || !velocity.IsValid())
         return;
 
@@ -4323,12 +4619,17 @@ void LinuxNativeEsp::Render()
     C_CSPlayerPawn* local_pawn = nullptr;
     if (!SafeGetPlayerPawn(entities, local_controller, local_pawn))
         return;
+    int localHealth = 0;
+    std::uint8_t localTeam = 0;
+    if (!SafeGetPawnHealth(local_pawn, localHealth) ||
+        !SafeGetPawnTeam(local_pawn, localTeam))
+        return;
 
     ApplyThirdPerson(local_pawn);
     ApplySmokeRemoval(entities, local_pawn);
     ApplyCameraAndRemovals(local_pawn);
     ApplyNativeMovement(local_pawn);
-    DrawLegitFov();
+    DrawLegitFov(entities, local_pawn);
     if (C_GET(bool, Vars.rage_enable))
         ApplyNativeRage(entities, local_controller, local_pawn);
     else
@@ -4385,12 +4686,16 @@ void LinuxNativeEsp::Render()
             continue;
         ++found_pawns;
 
-        const int health_value = pawn->GetHealth();
-        if (health_value <= 0 || health_value > 200)
+        int health_value = 0;
+        std::uint8_t pawnTeam = 0;
+        int pawnArmor = 0;
+        if (!SafeGetPawnHealth(pawn, health_value) || health_value <= 0 ||
+            !SafeGetPawnTeam(pawn, pawnTeam))
             continue;
+        SafeGetPawnArmor(pawn, pawnArmor);
         ++alive_pawns;
 
-        const bool isEnemy = pawn->GetTeam() != local_pawn->GetTeam();
+        const bool isEnemy = pawnTeam != localTeam;
         if (!isEnemy)
             continue;
         if (chamsTargetCount < chamsTargets.size())
@@ -4498,9 +4803,9 @@ void LinuxNativeEsp::Render()
         }
 
         float bottomOffset = 3.f;
-        if (C_GET(bool, Vars.esp_armor_bar) && pawn->GetArmorValue() > 0)
+        if (C_GET(bool, Vars.esp_armor_bar) && pawnArmor > 0)
         {
-            const float factor = std::clamp(static_cast<float>(pawn->GetArmorValue()) / 100.f, 0.f, 1.f);
+            const float factor = std::clamp(static_cast<float>(pawnArmor) / 100.f, 0.f, 1.f);
             draw->AddRectFilled(ImVec2(min.x, max.y + bottomOffset),
                 ImVec2(max.x, max.y + bottomOffset + 4.f), IM_COL32(0, 0, 0, 220));
             draw->AddRectFilled(ImVec2(min.x + 1.f, max.y + bottomOffset + 1.f),
@@ -4614,14 +4919,24 @@ void LinuxNativeEsp::Render()
                 color, IM_COL32(0, 0, 0, 230));
             flagOffset += ImGui::GetTextLineHeight();
         };
-        if ((flags & FLAGS_ARMOR) != 0 && pawn->GetArmorValue() > 0)
+        bool hasHelmet = false;
+        bool hasDefuser = false;
+        static const std::uint32_t helmetOffset =
+            SCHEMA::GetOffset("CCSPlayerController->m_bPawnHasHelmet");
+        static const std::uint32_t defuserOffset =
+            SCHEMA::GetOffset("CCSPlayerController->m_bPawnHasDefuser");
+        const bool helmetResolved = SafeGetControllerState(controller,
+            helmetOffset, hasHelmet);
+        const bool defuserResolved = SafeGetControllerState(controller,
+            defuserOffset, hasDefuser);
+        if ((flags & FLAGS_ARMOR) != 0 && pawnArmor > 0)
         {
-            const char* armor = controller->m_bPawnHasHelmet() ? "HK" : "K";
+            const char* armor = helmetResolved && hasHelmet ? "HK" : "K";
             const auto& config = C_GET(TextOverlayVar_t, Vars.HKFlag);
             drawFlag(armor, config.colPrimary.GetU32());
             ++armorFlagsDrawn;
         }
-        if ((flags & FLAGS_DEFUSER) != 0 && controller->m_bPawnHasDefuser())
+        if ((flags & FLAGS_DEFUSER) != 0 && defuserResolved && hasDefuser)
         {
             const auto& config = C_GET(TextOverlayVar_t, Vars.KitFlag);
             drawFlag("KIT", config.colPrimary.GetU32());
@@ -4651,7 +4966,9 @@ void LinuxNativeEsp::Render()
         }
         if ((flags & FLAGS_SCOPED) != 0 && scopedResolved && scopedRaw == 1)
             drawFlag("SCOPED", IM_COL32(100, 170, 255, 255));
-        if ((flags & FLAGS_FLASHED) != 0 && pawn->GetFlashDuration() > 0.05f)
+        float flashDuration = 0.f;
+        if ((flags & FLAGS_FLASHED) != 0 &&
+            SafeGetFlashDuration(pawn, flashDuration) && flashDuration > 0.05f)
             drawFlag("FLASHED", IM_COL32(255, 220, 80, 255));
         if ((flags & FLAGS_DEFUSING) != 0 && defusingResolved && defusingRaw == 1)
             drawFlag("DEFUSING", IM_COL32(70, 150, 255, 255));

@@ -86,8 +86,8 @@ static constexpr const char* arrTriggerHitboxes[] = {
 	"Legs"
 };
 static constexpr const char* arrMovementStrafer[] = {
-	"Adjust mouse",
-	"Directional"
+	"View angle",
+	"Directional WASD"
 };
 
 enum TAB : int {
@@ -301,6 +301,15 @@ void MENU::RenderMainWindow()
 							if (C_GET_ARRAY(bool, 7, Vars.rage_multipoint, current_weapon))
 								edited::SliderFloat("Multipoint scale", "Percentage of the approximate hitbox radius", &C_GET_ARRAY(float, 7, Vars.rage_multipoint_scale, current_weapon), 10.f, 100.f, "%.0f%%");
 
+						ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "Selected hitboxes");
+						edited::Checkbox("Hitbox: head", "Include the head in this weapon profile", &C_GET_ARRAY(bool, 7, Vars.hitbox_head, current_weapon));
+						edited::Checkbox("Hitbox: neck", "Include the neck in this weapon profile", &C_GET_ARRAY(bool, 7, Vars.hitbox_neck, current_weapon));
+						edited::Checkbox("Hitbox: upper chest", "Include the upper chest in this weapon profile", &C_GET_ARRAY(bool, 7, Vars.hitbox_uppeer_chest, current_weapon));
+						edited::Checkbox("Hitbox: chest", "Include the center chest in this weapon profile", &C_GET_ARRAY(bool, 7, Vars.hitbox_chest, current_weapon));
+						edited::Checkbox("Hitbox: stomach", "Include the stomach/pelvis in this weapon profile", &C_GET_ARRAY(bool, 7, Vars.hitbox_stomach, current_weapon));
+						edited::Checkbox("Hitbox: legs", "Include both legs in this weapon profile", &C_GET_ARRAY(bool, 7, Vars.hitbox_legs, current_weapon));
+						edited::Checkbox("Hitbox: feet", "Include both feet in this weapon profile", &C_GET_ARRAY(bool, 7, Vars.hitbox_feet, current_weapon));
+
 						ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "Accuracy");
 						#ifdef __linux__
 						ImGui::TextWrapped("Native ballistics uses live weapon, armor, surface and trace data. A client-build or schema mismatch holds the shot and reports the unavailable condition.");
@@ -426,26 +435,66 @@ void MENU::RenderMainWindow()
 							edited::SliderFloat("Smoothness (ms)", "Time used to settle onto the target", &C_GET_ARRAY(float, 7, Vars.legit_profile_smoothness, legitProfile), 1.f, 500.f, "%.0f ms");
 						else
 							edited::SliderFloat("Smoothness (ms)", "Time used to settle onto the target", &C_GET(float, Vars.legit_ui_smoothness), 1.f, 500.f, "%.0f ms");
-					edited::SliderFloat("Acceleration (ms)", "Time to ramp from a gentle start to full aim speed; 0 disables the ramp", &C_GET(float, Vars.legit_ui_acceleration_ms), 0.f, 500.f, "%.0f ms");
-					edited::SliderFloat("Deceleration zone", "Start slowing this many degrees before the target; 0 disables it", &C_GET(float, Vars.legit_ui_deceleration_degrees), 0.f, 10.f, "%.1f deg");
-					edited::Checkbox("Artificial overshoot", "Once per target lock, continue a small bounded distance past the target before recovering", &C_GET(bool, Vars.legit_ui_artificial_overshoot));
-					if (C_GET(bool, Vars.legit_ui_artificial_overshoot))
-						edited::SliderFloat("Overshoot amount", "Maximum angular distance past the target", &C_GET(float, Vars.legit_ui_overshoot_degrees), 0.05f, 1.50f, "%.2f deg");
-					edited::SliderFloat("Recovery (ms)", "Correction time after crossing the target naturally or through artificial overshoot", &C_GET(float, Vars.legit_ui_recovery_ms), 5.f, 250.f, "%.0f ms");
+					const bool perWeaponLegit = C_GET(bool, Vars.legit_ui_per_weapon);
+					float& legitAcceleration = perWeaponLegit
+						? C_GET_ARRAY(float, 7, Vars.legit_profile_acceleration_ms, legitProfile)
+						: C_GET(float, Vars.legit_ui_acceleration_ms);
+					float& legitDeceleration = perWeaponLegit
+						? C_GET_ARRAY(float, 7, Vars.legit_profile_deceleration_degrees, legitProfile)
+						: C_GET(float, Vars.legit_ui_deceleration_degrees);
+					bool& legitArtificialOvershoot = perWeaponLegit
+						? C_GET_ARRAY(bool, 7, Vars.legit_profile_artificial_overshoot, legitProfile)
+						: C_GET(bool, Vars.legit_ui_artificial_overshoot);
+					float& legitOvershootDegrees = perWeaponLegit
+						? C_GET_ARRAY(float, 7, Vars.legit_profile_overshoot_degrees, legitProfile)
+						: C_GET(float, Vars.legit_ui_overshoot_degrees);
+					float& legitRecovery = perWeaponLegit
+						? C_GET_ARRAY(float, 7, Vars.legit_profile_recovery_ms, legitProfile)
+						: C_GET(float, Vars.legit_ui_recovery_ms);
+					edited::SliderFloat("Acceleration (ms)", "Time to ramp from a gentle start to full aim speed; 0 disables the ramp", &legitAcceleration, 0.f, 500.f, "%.0f ms");
+					edited::SliderFloat("Deceleration zone", "Start slowing this many degrees before the target; 0 disables it", &legitDeceleration, 0.f, 10.f, "%.1f deg");
+					edited::Checkbox("Artificial overshoot", "Once per target lock, continue a small bounded distance past the target before recovering", &legitArtificialOvershoot);
+					if (legitArtificialOvershoot)
+						edited::SliderFloat("Overshoot amount", "Maximum angular distance past the target", &legitOvershootDegrees, 0.05f, 1.50f, "%.2f deg");
+					edited::SliderFloat("Recovery (ms)", "Correction time after crossing the target naturally or through artificial overshoot", &legitRecovery, 5.f, 250.f, "%.0f ms");
 					edited::Checkbox("Draw FoV", "Draw the active aim field of view", &C_GET(bool, Vars.legit_ui_draw_fov));
 						if (C_GET(bool, Vars.legit_ui_per_weapon))
 							edited::SliderFloat("FoV Size", "Field of view size", &C_GET_ARRAY(float, 7, Vars.legit_profile_fov, legitProfile), 5.f, 60.f, "%.0f°");
 						else
 							edited::SliderFloat("FoV Size", "Field of view size", &C_GET(float, Vars.legit_ui_fov_size), 5.f, 60.f, "%.0f°");
-					edited::Checkbox("Recoil compensation", "Compensate the current camera punch", &C_GET(bool, Vars.legit_ui_recoil));
-					edited::Checkbox("Velocity prediction", "Lead moving targets", &C_GET(bool, Vars.legit_ui_prediction));
-					if (C_GET(bool, Vars.legit_ui_prediction))
-						edited::SliderFloat("Prediction (ms)", "Target lead time", &C_GET(float, Vars.legit_ui_prediction_ms), 0.f, 250.f, "%.0f ms");
-					edited::Checkbox("Auto shoot", "Fire when the selected bone is centered", &C_GET(bool, Vars.legit_ui_auto_shoot));
-					edited::Checkbox("Target head", "Highest target priority", &C_GET(bool, Vars.legit_ui_bone_head));
-					edited::Checkbox("Target torso", "Fallback to upper spine", &C_GET(bool, Vars.legit_ui_bone_torso));
-						edited::Checkbox("Target arms", "Fallback to elbows", &C_GET(bool, Vars.legit_ui_bone_arms));
-						edited::Checkbox("Target legs", "Fallback to knees", &C_GET(bool, Vars.legit_ui_bone_legs));
+						bool& legitRecoil = perWeaponLegit
+							? C_GET_ARRAY(bool, 7, Vars.legit_profile_recoil, legitProfile)
+							: C_GET(bool, Vars.legit_ui_recoil);
+						bool& legitPrediction = perWeaponLegit
+							? C_GET_ARRAY(bool, 7, Vars.legit_profile_prediction, legitProfile)
+							: C_GET(bool, Vars.legit_ui_prediction);
+						float& legitPredictionMs = perWeaponLegit
+							? C_GET_ARRAY(float, 7, Vars.legit_profile_prediction_ms, legitProfile)
+							: C_GET(float, Vars.legit_ui_prediction_ms);
+						bool& legitAutoShoot = perWeaponLegit
+							? C_GET_ARRAY(bool, 7, Vars.legit_profile_auto_shoot, legitProfile)
+							: C_GET(bool, Vars.legit_ui_auto_shoot);
+						edited::Checkbox("Recoil compensation", "Compensate the current camera punch", &legitRecoil);
+						edited::Checkbox("Velocity prediction", "Lead moving targets", &legitPrediction);
+						if (legitPrediction)
+							edited::SliderFloat("Prediction (ms)", "Target lead time", &legitPredictionMs, 0.f, 250.f, "%.0f ms");
+						edited::Checkbox("Auto shoot", "Fire when the selected bone is centered", &legitAutoShoot);
+					bool& legitBoneHead = perWeaponLegit
+						? C_GET_ARRAY(bool, 7, Vars.legit_profile_bone_head, legitProfile)
+						: C_GET(bool, Vars.legit_ui_bone_head);
+					bool& legitBoneTorso = perWeaponLegit
+						? C_GET_ARRAY(bool, 7, Vars.legit_profile_bone_torso, legitProfile)
+						: C_GET(bool, Vars.legit_ui_bone_torso);
+					bool& legitBoneArms = perWeaponLegit
+						? C_GET_ARRAY(bool, 7, Vars.legit_profile_bone_arms, legitProfile)
+						: C_GET(bool, Vars.legit_ui_bone_arms);
+					bool& legitBoneLegs = perWeaponLegit
+						? C_GET_ARRAY(bool, 7, Vars.legit_profile_bone_legs, legitProfile)
+						: C_GET(bool, Vars.legit_ui_bone_legs);
+					edited::Checkbox("Target head", "Highest target priority", &legitBoneHead);
+					edited::Checkbox("Target torso", "Fallback to upper spine", &legitBoneTorso);
+						edited::Checkbox("Target arms", "Fallback to elbows", &legitBoneArms);
+						edited::Checkbox("Target legs", "Fallback to knees", &legitBoneLegs);
 						const char* legitTargets[3]{ "Closest to crosshair", "Closest distance", "Lowest health" };
 						const char* legitHitboxModes[2]{ "Priority order", "Nearest hitbox" };
 						if (C_GET(bool, Vars.legit_ui_per_weapon))
@@ -530,7 +579,7 @@ void MENU::RenderMainWindow()
 				edited::BeginChild("##RemovalsContainer", ImVec2(c::background::size.x - 200, c::background::size.y), 0);
 				{
 					ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "Removals");
-					edited::Checkbox("Remove Smoke", "Uses the safe particle-render path; other particle effects may also be hidden", &C_GET(bool, Vars.bRemoveSmoke));
+					edited::Checkbox("Remove Smoke", "Disables smoke-specific volume, pass, enhancement, shadow, and local overlay state", &C_GET(bool, Vars.bRemoveSmoke));
 					edited::Checkbox("Reduce Flash", "Limits the local flash overlay without touching grenade entities", &C_GET(bool, Vars.bRemoveFlash));
 					if (C_GET(bool, Vars.bRemoveFlash))
 						edited::SliderFloat("Flash opacity", "Maximum flash overlay alpha", &C_GET(float, Vars.flFlashOpacity), 0.f, 255.f, "%.0f / 255");
@@ -582,6 +631,9 @@ void MENU::RenderMainWindow()
 						edited::Checkbox(CS_XOR("Health gradient"), CS_XOR("Green at high health, red at low health"), &C_GET(BarOverlayVar_t, Vars.overlayHealthBar).bUseFactorColor);
 					}
 					edited::Checkbox(CS_XOR("Armor bar"), CS_XOR("Shows current armor below the player"), &C_GET(bool, Vars.esp_armor_bar));
+					if (C_GET(bool, Vars.esp_armor_bar))
+						edited::Color(CS_XOR("##armorbarcolor"), CS_XOR("Armor bar color"), &C_GET(ColorPickerVar_t, Vars.esp_armor_color).colValue,
+							ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
 					edited::Checkbox(CS_XOR("Ammo bar"), CS_XOR("Shows player weapon ammo"), &C_GET(BarOverlayVar_t, Vars.AmmoBar).bEnable);
 					edited::Checkbox(CS_XOR("Weapon"), CS_XOR("Shows the player's equipped weapon"), &C_GET(TextOverlayVar_t, Vars.Weaponesp).bEnable);
 					if (C_GET(TextOverlayVar_t, Vars.Weaponesp).bEnable)
@@ -598,6 +650,8 @@ void MENU::RenderMainWindow()
 					edited::Checkbox(CS_XOR("View direction"), CS_XOR("Shows where each player is looking"), &C_GET(bool, Vars.esp_view_direction));
 					edited::Checkbox(CS_XOR("Snaplines"), CS_XOR("Connects enemies to the bottom of the screen"), &C_GET(bool, Vars.esp_snaplines));
 					edited::Checkbox(CS_XOR("Offscreen arrows"), CS_XOR("Points toward enemies outside the screen"), &C_GET(bool, Vars.esp_offscreen_arrows));
+					edited::Color(CS_XOR("##espdetailcolor"), CS_XOR("Distance, head, direction, snapline, and arrow color"), &C_GET(ColorPickerVar_t, Vars.esp_detail_color).colValue,
+						ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
 
 					edited::MultiCombo(CS_XOR("Flags"), &C_GET(unsigned int, Vars.pEspFlags), arrEspFlags, CS_ARRAYSIZE(arrEspFlags));
 				
@@ -618,12 +672,21 @@ void MENU::RenderMainWindow()
 						edited::Color(CS_XOR("##sleevechamscolor"), CS_XOR("Independent sleeve color"), &C_GET(ColorPickerVar_t, Vars.chams_sleeves_color).colValue,
 							ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
 					edited::Checkbox(CS_XOR("Held weapon chams"), CS_XOR("Overrides the local first-person weapon"), &C_GET(bool, Vars.chams_held_weapon));
+					if (C_GET(bool, Vars.chams_held_weapon))
+						edited::Color(CS_XOR("##heldweaponchamscolor"), CS_XOR("Independent held-weapon color"), &C_GET(ColorPickerVar_t, Vars.chams_held_weapon_color).colValue,
+							ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
 					edited::Checkbox(CS_XOR("Knife chams"), CS_XOR("Overrides knives independently from held-weapon chams"), &C_GET(bool, Vars.chams_knife));
 					if (C_GET(bool, Vars.chams_knife))
 						edited::Color(CS_XOR("##knifechamscolor"), CS_XOR("Independent knife color"), &C_GET(ColorPickerVar_t, Vars.chams_knife_color).colValue,
 							ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
 					edited::Checkbox(CS_XOR("Grenade chams"), CS_XOR("Overrides locally owned grenade models"), &C_GET(bool, Vars.chams_grenades));
+					if (C_GET(bool, Vars.chams_grenades))
+						edited::Color(CS_XOR("##grenadechamscolor"), CS_XOR("Independent grenade color"), &C_GET(ColorPickerVar_t, Vars.chams_grenade_color).colValue,
+							ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
 					edited::Checkbox(CS_XOR("Bomb chams"), CS_XOR("Overrides carried, dropped, and planted C4 even after the planter dies"), &C_GET(bool, Vars.chams_bomb));
+					if (C_GET(bool, Vars.chams_bomb))
+						edited::Color(CS_XOR("##bombchamscolor"), CS_XOR("Independent carried, dropped, and planted-bomb color"), &C_GET(ColorPickerVar_t, Vars.chams_bomb_color).colValue,
+							ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_NoLabel | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf);
 
 				#ifdef _WIN32
 					const char* chams[3]{ CS_XOR("Flat"), CS_XOR("Default"),CS_XOR("Illumin") };
@@ -793,7 +856,11 @@ void MENU::RenderMainWindow()
 				if (C_GET(bool, Vars.bAutostrafe))
 				{
 					edited::SliderFloat(CS_XOR("Strafe strength"), CS_XOR("Side-movement strength"), &C_GET(float, Vars.autostrafe_smooth), 1.f, 100.f, "%.0f%%");
-					edited::MultiCombo(CS_XOR("Strafe modes"), &C_GET(unsigned int, Vars.bAutostrafeMode), arrMovementStrafer, CS_ARRAYSIZE(arrMovementStrafer));
+					int strafeMode = std::clamp(static_cast<int>(
+						C_GET(unsigned int, Vars.bAutostrafeMode)), 0, 1);
+					edited::Combo(CS_XOR("Strafe mode"), CS_XOR("Follow view angle or offset the air path with held WASD keys"),
+						&strafeMode, arrMovementStrafer, IM_ARRAYSIZE(arrMovementStrafer), 2);
+					C_GET(unsigned int, Vars.bAutostrafeMode) = static_cast<unsigned int>(strafeMode);
 				}
 					#ifdef _WIN32
 					edited::Checkbox(CS_XOR("Edge bug"), CS_XOR("Edge bug"), &C_GET(bool, Vars.edge_bug));
