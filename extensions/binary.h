@@ -293,6 +293,11 @@ namespace C::BIN
 		}
 
 		std::uint8_t* pBuffer = static_cast<std::uint8_t*>(MEM::HeapAlloc(dwFileSize));
+		if (pBuffer == nullptr)
+		{
+			::CloseHandle(hFileInOut);
+			return false;
+		}
 		if (!::ReadFile(hFileInOut, pBuffer, dwFileSize, nullptr, nullptr))
 		{
 			::CloseHandle(hFileInOut);
@@ -345,6 +350,11 @@ namespace C::BIN
 		}
 
 		std::uint8_t* pBuffer = static_cast<std::uint8_t*>(MEM::HeapAlloc(dwFileSize));
+		if (pBuffer == nullptr)
+		{
+			::CloseHandle(hFileInOut);
+			return false;
+		}
 		if (!::ReadFile(hFileInOut, pBuffer, dwFileSize, nullptr, nullptr))
 		{
 			::CloseHandle(hFileInOut);
@@ -405,6 +415,11 @@ namespace C::BIN
 		}
 
 		std::uint8_t* pBuffer = static_cast<std::uint8_t*>(MEM::HeapAlloc(dwFileSize));
+		if (pBuffer == nullptr)
+		{
+			::CloseHandle(hFileInOut);
+			return false;
+		}
 		if (!::ReadFile(hFileInOut, pBuffer, dwFileSize, nullptr, nullptr))
 		{
 			::CloseHandle(hFileInOut);

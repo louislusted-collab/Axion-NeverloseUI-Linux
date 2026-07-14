@@ -83,6 +83,7 @@ struct Variables_t
 
 #pragma region ragebot 
 	C_ADD_VARIABLE_ARRAY(int, 7, rage_target_select, 0);
+	C_ADD_VARIABLE_ARRAY(int, 7, rage_hitbox_priority, 0);
 	C_ADD_VARIABLE_ARRAY(int, 7, rage_minimum_damage, 0);
 	C_ADD_VARIABLE_ARRAY(int, 7, rage_minimum_hitchance, 0);
 
@@ -192,6 +193,8 @@ struct Variables_t
 	C_ADD_VARIABLE(float, legit_ui_smoothness, 120.f);
 	C_ADD_VARIABLE(float, legit_ui_acceleration_ms, 80.f);
 	C_ADD_VARIABLE(float, legit_ui_deceleration_degrees, 1.5f);
+	C_ADD_VARIABLE(bool, legit_ui_artificial_overshoot, false);
+	C_ADD_VARIABLE(float, legit_ui_overshoot_degrees, 0.20f);
 	C_ADD_VARIABLE(float, legit_ui_recovery_ms, 45.f);
 	C_ADD_VARIABLE(bool, legit_ui_draw_fov, false);
 	C_ADD_VARIABLE(float, legit_ui_fov_size, 5.f);

@@ -34,6 +34,7 @@
 #include <dlfcn.h>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -397,6 +398,156 @@ bool IsSaneSchemaOffset(std::uint32_t offset, std::uint32_t maximum)
     return offset != 0 && offset <= maximum;
 }
 
+enum class SmokeSegmentResult
+{
+    Clear,
+    Obscured,
+    Unavailable,
+};
+
+SmokeSegmentResult CheckActiveSmokeSegment(CGameEntitySystem* entities,
+    const Vector_t& start, const Vector_t& end)
+{
+    struct SmokeVolume
+    {
+        Vector_t center{};
+        float radius = 0.f;
+    };
+    static CGameEntitySystem* cachedSystem = nullptr;
+    static std::uint64_t nextRefresh = 0;
+    static bool cacheValid = false;
+    static std::vector<SmokeVolume> volumes;
+
+    if (entities == nullptr || !start.IsValid() || !end.IsValid())
+        return SmokeSegmentResult::Unavailable;
+
+    const std::uint64_t now = SDL_GetTicks();
+    if (entities != cachedSystem || now >= nextRefresh)
+    {
+        cachedSystem = entities;
+        nextRefresh = now + 50;
+        cacheValid = false;
+        volumes.clear();
+        if (volumes.capacity() < 32)
+            volumes.reserve(32);
+
+        static const std::uint32_t identityOffset =
+            SCHEMA::GetOffset("CEntityInstance->m_pEntity");
+        static const std::uint32_t designerNameOffset =
+            SCHEMA::GetOffset("CEntityIdentity->m_designerName");
+        static const std::uint32_t sceneNodeOffset =
+            SCHEMA::GetOffset("C_BaseEntity->m_pGameSceneNode");
+        static const std::uint32_t sceneOriginOffset =
+            SCHEMA::GetOffset("CGameSceneNode->m_vecAbsOrigin");
+        static const std::uint32_t smokeBeginOffset =
+            SCHEMA::GetOffset("C_SmokeGrenadeProjectile->m_nSmokeEffectTickBegin");
+        static const std::uint32_t didSmokeOffset =
+            SCHEMA::GetOffset("C_SmokeGrenadeProjectile->m_bDidSmokeEffect");
+        const float currentTime = I::GlobalVars != nullptr &&
+            std::isfinite(I::GlobalVars->flCurtime) ? I::GlobalVars->flCurtime : -1.f;
+        const float tickInterval = I::GlobalVars != nullptr &&
+            I::GlobalVars->flIntervalPerTick > 0.001f && I::GlobalVars->flIntervalPerTick < 0.1f
+            ? I::GlobalVars->flIntervalPerTick : 0.f;
+        if (identityOffset == 0 || designerNameOffset == 0 || sceneNodeOffset == 0 ||
+            sceneOriginOffset == 0 || smokeBeginOffset == 0 || currentTime < 0.f ||
+            tickInterval == 0.f)
+            return SmokeSegmentResult::Unavailable;
+
+        bool unreadableActiveSmoke = false;
+        for (int index = 1; index < 4096; ++index)
+        {
+            C_BaseEntity* entity = entities->Get<C_BaseEntity>(index);
+            if (entity == nullptr)
+                continue;
+            CEntityIdentity* identity = nullptr;
+            const char* rawName = nullptr;
+            if (!SafeNativeRead(reinterpret_cast<const std::uint8_t*>(entity) + identityOffset, identity) ||
+                identity == nullptr || !SafeNativeRead(
+                    reinterpret_cast<const std::uint8_t*>(identity) + designerNameOffset, rawName) ||
+                rawName == nullptr)
+                continue;
+            char name[64]{};
+            bool validName = false;
+            for (std::size_t character = 0; character + 1 < sizeof(name); ++character)
+            {
+                if (!SafeNativeRead(rawName + character, name[character]) ||
+                    (!std::isprint(static_cast<unsigned char>(name[character])) && name[character] != '\0'))
+                {
+                    name[0] = '\0';
+                    break;
+                }
+                if (name[character] == '\0')
+                {
+                    validName = character != 0;
+                    break;
+                }
+            }
+            if (!validName || std::string_view(name).find("smokegrenade_projectile") == std::string_view::npos)
+                continue;
+
+            int beginTick = 0;
+            if (!SafeNativeRead(reinterpret_cast<const std::uint8_t*>(entity) + smokeBeginOffset,
+                    beginTick))
+            {
+                unreadableActiveSmoke = true;
+                continue;
+            }
+            if (beginTick <= 0)
+                continue;
+            if (didSmokeOffset != 0)
+            {
+                std::uint8_t didSmoke = 0;
+                if (!SafeNativeRead(reinterpret_cast<const std::uint8_t*>(entity) + didSmokeOffset,
+                        didSmoke))
+                {
+                    unreadableActiveSmoke = true;
+                    continue;
+                }
+                if (didSmoke != 1)
+                    continue;
+            }
+            const float age = currentTime - static_cast<float>(beginTick) * tickInterval;
+            if (!std::isfinite(age) || age < 0.f || age >= 20.f)
+                continue;
+
+            CGameSceneNode* scene = nullptr;
+            Vector_t origin{};
+            if (!SafeNativeRead(reinterpret_cast<const std::uint8_t*>(entity) + sceneNodeOffset, scene) ||
+                scene == nullptr || !SafeNativeRead(
+                    reinterpret_cast<const std::uint8_t*>(scene) + sceneOriginOffset, origin) ||
+                !origin.IsValid())
+            {
+                unreadableActiveSmoke = true;
+                continue;
+            }
+            // The projectile origin sits near the floor while the active smoke
+            // volume fills upward. Grow during the initial bloom rather than
+            // treating a just-detonated projectile as a full cloud.
+            const float bloom = std::clamp(age / 1.f, 0.20f, 1.f);
+            volumes.push_back({origin + Vector_t(0.f, 0.f, 55.f), 155.f * bloom});
+            if (volumes.size() == 64)
+                break;
+        }
+        cacheValid = !unreadableActiveSmoke;
+    }
+
+    if (!cacheValid)
+        return SmokeSegmentResult::Unavailable;
+    const Vector_t segment = end - start;
+    const float segmentLengthSquared = segment.Dot(segment);
+    if (!std::isfinite(segmentLengthSquared) || segmentLengthSquared < 0.0001f)
+        return SmokeSegmentResult::Unavailable;
+    for (const SmokeVolume& volume : volumes)
+    {
+        const float parameter = std::clamp(
+            (volume.center - start).Dot(segment) / segmentLengthSquared, 0.f, 1.f);
+        const Vector_t closest = start + segment * parameter;
+        if (closest.DistToSqr(volume.center) <= volume.radius * volume.radius)
+            return SmokeSegmentResult::Obscured;
+    }
+    return SmokeSegmentResult::Clear;
+}
+
 struct WeaponDisplayOffsets
 {
     std::uint32_t weaponServices = 0;
@@ -466,6 +617,37 @@ bool SafeReadWeaponName(const char* rawName, std::string& name)
     if (name.starts_with(prefix))
         name.erase(0, prefix.size());
     return !name.empty();
+}
+
+bool SafeReadPlayerName(CCSPlayerController* controller, std::string& name)
+{
+    name.clear();
+    static const std::uint32_t nameOffset =
+        SCHEMA::GetOffset("CCSPlayerController->m_sSanitizedPlayerName");
+    if (controller == nullptr || !IsSaneSchemaOffset(nameOffset, 0x10000))
+        return false;
+    const char* rawName = nullptr;
+    if (!SafeNativeRead(reinterpret_cast<const std::uint8_t*>(controller) +
+            nameOffset, rawName) || rawName == nullptr)
+        return false;
+    std::array<char, 96> buffer{};
+    iovec local{buffer.data(), buffer.size()};
+    iovec remote{const_cast<char*>(rawName), buffer.size()};
+    const long read = ::syscall(SYS_process_vm_readv, ::getpid(), &local, 1UL,
+        &remote, 1UL, 0UL);
+    if (read <= 0)
+        return false;
+    const auto end = std::find(buffer.begin(), buffer.begin() + read, '\0');
+    if (end == buffer.begin() || end == buffer.begin() + read)
+        return false;
+    for (auto iterator = buffer.begin(); iterator != end; ++iterator)
+    {
+        const unsigned char character = static_cast<unsigned char>(*iterator);
+        if (character < 0x20 || character == 0x7F)
+            *iterator = '?';
+    }
+    name.assign(buffer.begin(), end);
+    return true;
 }
 
 bool SafeGetEntity(CGameEntitySystem* entities, std::uint32_t handle, C_CSWeaponBase*& weapon)
@@ -652,6 +834,406 @@ int GetRageWeaponGroup(std::string_view name)
     if (name == "awp")
         return 6;
     return 0;
+}
+
+struct NativeWeaponBallistics
+{
+    C_CSWeaponBase* weapon = nullptr;
+    float damage = 0.f;
+    float headshotMultiplier = 0.f;
+    float armorRatio = 0.f;
+    float penetration = 0.f;
+    float range = 0.f;
+    float rangeModifier = 0.f;
+    float spread = 0.f;
+    float inaccuracy = 0.f;
+    float ctHeadDamageScale = 0.f;
+    float tHeadDamageScale = 0.f;
+    float ctBodyDamageScale = 0.f;
+    float tBodyDamageScale = 0.f;
+};
+
+struct NativeShotResult
+{
+    float damage = 0.f;
+    int hitGroup = HITGROUP_INVALID;
+    int penetrations = 0;
+    bool exposed = false;
+};
+
+struct NativeBallisticsOffsets
+{
+    std::uint32_t subclassId = 0;
+    std::uint32_t damage = 0;
+    std::uint32_t headshotMultiplier = 0;
+    std::uint32_t armorRatio = 0;
+    std::uint32_t penetration = 0;
+    std::uint32_t range = 0;
+    std::uint32_t rangeModifier = 0;
+    std::uint32_t spread = 0;
+    std::uint32_t inaccuracyCrouch = 0;
+    std::uint32_t inaccuracyStand = 0;
+    std::uint32_t inaccuracyJump = 0;
+    std::uint32_t inaccuracyMove = 0;
+    std::uint32_t accuracyPenalty = 0;
+    std::uint32_t weaponMode = 0;
+    std::uint32_t flags = 0;
+    std::uint32_t velocity = 0;
+    std::uint32_t armorValue = 0;
+    std::uint32_t itemServices = 0;
+    std::uint32_t helmet = 0;
+    std::uint32_t heavyArmor = 0;
+    bool valid = false;
+};
+
+const NativeBallisticsOffsets& GetNativeBallisticsOffsets()
+{
+    static const NativeBallisticsOffsets offsets = [] {
+        NativeBallisticsOffsets result{};
+        result.subclassId = SCHEMA::GetOffset("C_BaseEntity->m_nSubclassID");
+        result.damage = SCHEMA::GetOffset("CCSWeaponBaseVData->m_nDamage");
+        result.headshotMultiplier = SCHEMA::GetOffset("CCSWeaponBaseVData->m_flHeadshotMultiplier");
+        result.armorRatio = SCHEMA::GetOffset("CCSWeaponBaseVData->m_flArmorRatio");
+        result.penetration = SCHEMA::GetOffset("CCSWeaponBaseVData->m_flPenetration");
+        result.range = SCHEMA::GetOffset("CCSWeaponBaseVData->m_flRange");
+        result.rangeModifier = SCHEMA::GetOffset("CCSWeaponBaseVData->m_flRangeModifier");
+        result.spread = SCHEMA::GetOffset("CCSWeaponBaseVData->m_flSpread");
+        result.inaccuracyCrouch = SCHEMA::GetOffset("CCSWeaponBaseVData->m_flInaccuracyCrouch");
+        result.inaccuracyStand = SCHEMA::GetOffset("CCSWeaponBaseVData->m_flInaccuracyStand");
+        result.inaccuracyJump = SCHEMA::GetOffset("CCSWeaponBaseVData->m_flInaccuracyJump");
+        result.inaccuracyMove = SCHEMA::GetOffset("CCSWeaponBaseVData->m_flInaccuracyMove");
+        result.accuracyPenalty = SCHEMA::GetOffset("C_CSWeaponBase->m_fAccuracyPenalty");
+        result.weaponMode = SCHEMA::GetOffset("C_CSWeaponBase->m_weaponMode");
+        result.flags = SCHEMA::GetOffset("C_BaseEntity->m_fFlags");
+        result.velocity = SCHEMA::GetOffset("C_BaseEntity->m_vecVelocity");
+        result.armorValue = SCHEMA::GetOffset("C_CSPlayerPawn->m_ArmorValue");
+        result.itemServices = SCHEMA::GetOffset("C_BasePlayerPawn->m_pItemServices");
+        result.helmet = SCHEMA::GetOffset("CCSPlayer_ItemServices->m_bHasHelmet");
+        result.heavyArmor = SCHEMA::GetOffset("CCSPlayer_ItemServices->m_bHasHeavyArmor");
+        const std::uint32_t dataOffsets[] = {
+            result.damage, result.headshotMultiplier, result.armorRatio,
+            result.penetration, result.range, result.rangeModifier, result.spread,
+            result.inaccuracyCrouch, result.inaccuracyStand,
+            result.inaccuracyJump, result.inaccuracyMove,
+        };
+        result.valid = IsSaneSchemaOffset(result.subclassId, 0x10000 - sizeof(void*)) &&
+            IsSaneSchemaOffset(result.accuracyPenalty, 0x10000) &&
+            IsSaneSchemaOffset(result.weaponMode, 0x10000) &&
+            IsSaneSchemaOffset(result.flags, 0x10000) &&
+            IsSaneSchemaOffset(result.velocity, 0x10000) &&
+            IsSaneSchemaOffset(result.armorValue, 0x10000) &&
+            IsSaneSchemaOffset(result.itemServices, 0x10000) &&
+            IsSaneSchemaOffset(result.helmet, 0x1000) &&
+            IsSaneSchemaOffset(result.heavyArmor, 0x1000) &&
+            std::all_of(std::begin(dataOffsets), std::end(dataOffsets),
+                [](std::uint32_t offset) { return IsSaneSchemaOffset(offset, 0x10000); });
+        EspLog("[BALLISTICS] schema valid=%d damage=0x%x head=0x%x armor=0x%x pen=0x%x range=0x%x modifier=0x%x spread=0x%x penalty=0x%x mode=0x%x",
+            result.valid ? 1 : 0, result.damage, result.headshotMultiplier,
+            result.armorRatio, result.penetration, result.range,
+            result.rangeModifier, result.spread, result.accuracyPenalty,
+            result.weaponMode);
+        return result;
+    }();
+    return offsets;
+}
+
+bool ReadNativeFiringModeValue(const std::uint8_t* data, std::uint32_t offset,
+    int mode, float& value)
+{
+    CFiringModeFloat values{};
+    if (!SafeNativeRead(data + offset, values))
+        return false;
+    value = values.flValue[mode];
+    return std::isfinite(value) && value >= 0.f && value <= 2.f;
+}
+
+bool ReadNativeWeaponBallistics(C_CSPlayerPawn* localPawn,
+    C_CSWeaponBase* weapon, NativeWeaponBallistics& result)
+{
+    result = {};
+    const NativeBallisticsOffsets& offsets = GetNativeBallisticsOffsets();
+    if (!offsets.valid || localPawn == nullptr || weapon == nullptr)
+        return false;
+    void* rawData = nullptr;
+    if (!SafeNativeRead(reinterpret_cast<const std::uint8_t*>(weapon) +
+            offsets.subclassId + sizeof(void*), rawData) || rawData == nullptr)
+        return false;
+    const auto* data = static_cast<const std::uint8_t*>(rawData);
+    int rawDamage = 0;
+    int mode = 0;
+    float crouch = 0.f, stand = 0.f, jump = 0.f, move = 0.f;
+    float penalty = 0.f;
+    if (!SafeNativeRead(data + offsets.damage, rawDamage) ||
+        !SafeNativeRead(data + offsets.headshotMultiplier, result.headshotMultiplier) ||
+        !SafeNativeRead(data + offsets.armorRatio, result.armorRatio) ||
+        !SafeNativeRead(data + offsets.penetration, result.penetration) ||
+        !SafeNativeRead(data + offsets.range, result.range) ||
+        !SafeNativeRead(data + offsets.rangeModifier, result.rangeModifier) ||
+        !SafeNativeRead(reinterpret_cast<const std::uint8_t*>(weapon) + offsets.weaponMode, mode) ||
+        !SafeNativeRead(reinterpret_cast<const std::uint8_t*>(weapon) + offsets.accuracyPenalty, penalty) ||
+        mode < 0 || mode > 1 || !ReadNativeFiringModeValue(data, offsets.spread, mode, result.spread) ||
+        !ReadNativeFiringModeValue(data, offsets.inaccuracyCrouch, mode, crouch) ||
+        !ReadNativeFiringModeValue(data, offsets.inaccuracyStand, mode, stand) ||
+        !ReadNativeFiringModeValue(data, offsets.inaccuracyJump, mode, jump) ||
+        !ReadNativeFiringModeValue(data, offsets.inaccuracyMove, mode, move))
+        return false;
+    result.damage = static_cast<float>(rawDamage);
+    if (rawDamage <= 0 || rawDamage > 500 ||
+        !std::isfinite(result.headshotMultiplier) || result.headshotMultiplier < 1.f || result.headshotMultiplier > 10.f ||
+        !std::isfinite(result.armorRatio) || result.armorRatio <= 0.f || result.armorRatio > 5.f ||
+        !std::isfinite(result.penetration) || result.penetration <= 0.f || result.penetration > 10.f ||
+        !std::isfinite(result.range) || result.range < 100.f || result.range > 100000.f ||
+        !std::isfinite(result.rangeModifier) || result.rangeModifier <= 0.f || result.rangeModifier > 1.f ||
+        !std::isfinite(penalty) || penalty < 0.f || penalty > 2.f)
+        return false;
+
+    std::uint32_t flags = 0;
+    Vector_t velocity{};
+    if (!SafeNativeRead(reinterpret_cast<const std::uint8_t*>(localPawn) + offsets.flags, flags) ||
+        !SafeNativeRead(reinterpret_cast<const std::uint8_t*>(localPawn) + offsets.velocity, velocity) ||
+        !velocity.IsValid())
+        return false;
+    const bool crouched = (flags & FL_DUCKING) != 0;
+    result.inaccuracy = penalty + (crouched ? crouch : stand);
+    const float horizontalSpeed = std::hypot(velocity.x, velocity.y);
+    if (horizontalSpeed > 0.1f)
+        result.inaccuracy += move * std::clamp(horizontalSpeed / 250.f, 0.f, 1.f);
+    if ((flags & FL_ONGROUND) == 0)
+        result.inaccuracy += jump;
+    if (!std::isfinite(result.inaccuracy) || result.inaccuracy < 0.f || result.inaccuracy > 2.f)
+        return false;
+    static CConVar* ctHeadScale = nullptr;
+    static CConVar* tHeadScale = nullptr;
+    static CConVar* ctBodyScale = nullptr;
+    static CConVar* tBodyScale = nullptr;
+    if (ctHeadScale == nullptr) ctHeadScale = CONVAR::Find("mp_damage_scale_ct_head");
+    if (tHeadScale == nullptr) tHeadScale = CONVAR::Find("mp_damage_scale_t_head");
+    if (ctBodyScale == nullptr) ctBodyScale = CONVAR::Find("mp_damage_scale_ct_body");
+    if (tBodyScale == nullptr) tBodyScale = CONVAR::Find("mp_damage_scale_t_body");
+    if (!CONVAR::ReadFloat(ctHeadScale, result.ctHeadDamageScale) ||
+        !CONVAR::ReadFloat(tHeadScale, result.tHeadDamageScale) ||
+        !CONVAR::ReadFloat(ctBodyScale, result.ctBodyDamageScale) ||
+        !CONVAR::ReadFloat(tBodyScale, result.tBodyDamageScale))
+        return false;
+    const float damageScales[] = { result.ctHeadDamageScale,
+        result.tHeadDamageScale, result.ctBodyDamageScale,
+        result.tBodyDamageScale };
+    if (!std::all_of(std::begin(damageScales), std::end(damageScales),
+            [](float scale) { return std::isfinite(scale) && scale >= 0.f && scale <= 10.f; }))
+        return false;
+    result.weapon = weapon;
+    return true;
+}
+
+int NativeHitGroupForBone(int bone)
+{
+    if (bone == 5)
+        return HITGROUP_HEAD;
+    if (bone == 4)
+        return HITGROUP_NECK;
+    if (bone == 2)
+        return HITGROUP_STOMACH;
+    if (bone == 23 || bone == 26 || bone == 27 || bone == 30)
+        return bone == 23 || bone == 27 ? HITGROUP_LEFTLEG : HITGROUP_RIGHTLEG;
+    return HITGROUP_CHEST;
+}
+
+bool ScaleNativePlayerDamage(C_CSPlayerPawn* target,
+    const NativeWeaponBallistics& weapon, int hitGroup, float& damage)
+{
+    if (target == nullptr)
+        return false;
+    const bool isCt = target->GetTeam() == 3;
+    const float headScale = isCt ? weapon.ctHeadDamageScale : weapon.tHeadDamageScale;
+    const float bodyScale = isCt ? weapon.ctBodyDamageScale : weapon.tBodyDamageScale;
+    if (hitGroup == HITGROUP_HEAD)
+        damage *= weapon.headshotMultiplier * headScale;
+    else if (hitGroup == HITGROUP_STOMACH)
+        damage *= 1.25f * bodyScale;
+    else if (hitGroup == HITGROUP_LEFTLEG || hitGroup == HITGROUP_RIGHTLEG)
+        damage *= 0.75f * bodyScale;
+    else
+        damage *= bodyScale;
+
+    const NativeBallisticsOffsets& offsets = GetNativeBallisticsOffsets();
+    int armor = 0;
+    if (!SafeNativeRead(reinterpret_cast<const std::uint8_t*>(target) +
+            offsets.armorValue, armor) || armor < 0 || armor > 1000)
+        return false;
+    if (armor <= 0)
+        return std::isfinite(damage) && damage >= 0.f;
+    CPlayer_ItemServices* services = nullptr;
+    bool helmet = false;
+    bool heavy = false;
+    if (!SafeNativeRead(reinterpret_cast<const std::uint8_t*>(target) + offsets.itemServices, services) ||
+        services == nullptr)
+        return false;
+    std::uint8_t helmetRaw = 0, heavyRaw = 0;
+    if (!SafeNativeRead(reinterpret_cast<const std::uint8_t*>(services) + offsets.helmet, helmetRaw) ||
+        !SafeNativeRead(reinterpret_cast<const std::uint8_t*>(services) + offsets.heavyArmor, heavyRaw) ||
+        helmetRaw > 1 || heavyRaw > 1)
+        return false;
+    helmet = helmetRaw == 1;
+    heavy = heavyRaw == 1;
+    const bool armored = hitGroup == HITGROUP_HEAD ? (helmet || heavy) :
+        hitGroup == HITGROUP_CHEST || hitGroup == HITGROUP_STOMACH ||
+        hitGroup == HITGROUP_LEFTARM || hitGroup == HITGROUP_RIGHTARM ||
+        hitGroup == HITGROUP_NECK;
+    if (!armored)
+        return std::isfinite(damage) && damage >= 0.f;
+    if (heavy && hitGroup == HITGROUP_HEAD)
+        damage *= 0.5f;
+    float armorBonus = heavy ? 0.33f : 0.5f;
+    const float heavyBonus = heavy ? 0.25f : 1.f;
+    float armorRatio = weapon.armorRatio * 0.5f;
+    if (heavy)
+        armorRatio *= 0.20f;
+    float healthDamage = damage * armorRatio;
+    const float armorDamage = (damage - healthDamage) * heavyBonus * armorBonus;
+    if (armorDamage > static_cast<float>(armor))
+        healthDamage = damage - static_cast<float>(armor) / armorBonus;
+    damage = std::max(0.f, healthDamage);
+    return std::isfinite(damage);
+}
+
+bool FindNativeTraceExit(const TRACE::NativeResult& entry, const Vector_t& direction,
+    C_CSPlayerPawn* localPawn, TRACE::NativeResult& exit, float& thickness)
+{
+    if (!entry.hit || !entry.surfaceValid || !direction.IsValid())
+        return false;
+    for (float distance = 4.f; distance <= 96.f; distance += 4.f)
+    {
+        const Vector_t outside = entry.end + direction * distance;
+        TRACE::NativeResult reverse{};
+        if (!TRACE::NativeLine(outside, entry.end - direction * 4.f, localPawn, reverse))
+            return false;
+        if (!reverse.hit || reverse.allSolid || !reverse.surfaceValid)
+            continue;
+        thickness = reverse.end.DistTo(entry.end);
+        if (std::isfinite(thickness) && thickness > 0.01f && thickness <= 128.f)
+        {
+            exit = reverse;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool SimulateNativeShot(const Vector_t& eye, const Vector_t& point, int fallbackBone,
+    C_CSPlayerPawn* localPawn, C_CSPlayerPawn* target,
+    const NativeWeaponBallistics& weapon, bool allowPenetration,
+    NativeShotResult& result)
+{
+    result = {};
+    Vector_t direction = point - eye;
+    const float targetDistance = direction.NormalizeInPlace();
+    if (!TRACE::NativeReady() || !direction.IsValid() || targetDistance <= 0.01f ||
+        targetDistance > weapon.range)
+        return false;
+    Vector_t start = eye;
+    float damage = weapon.damage;
+    float travelled = 0.f;
+    for (int penetrationCount = 0; penetrationCount <= 4 && damage >= 1.f; ++penetrationCount)
+    {
+        TRACE::NativeResult trace{};
+        if (!TRACE::NativeLine(start, point + direction * 8.f, localPawn, trace))
+            return false;
+        const float segment = trace.hit ? start.DistTo(trace.end) : start.DistTo(point);
+        if (!std::isfinite(segment) || segment < 0.f)
+            return false;
+        travelled += segment;
+        damage *= std::pow(weapon.rangeModifier, segment / 500.f);
+        if (trace.entity == target)
+        {
+            const int hitGroup = trace.hitGroup >= HITGROUP_HEAD &&
+                trace.hitGroup <= HITGROUP_NECK
+                ? trace.hitGroup : NativeHitGroupForBone(fallbackBone);
+            if (!ScaleNativePlayerDamage(target, weapon, hitGroup, damage))
+                return false;
+            result.damage = std::max(0.f, damage);
+            result.hitGroup = hitGroup;
+            result.penetrations = penetrationCount;
+            result.exposed = penetrationCount == 0;
+            return std::isfinite(result.damage) && result.damage > 0.f;
+        }
+        if (!trace.hit || !allowPenetration || !trace.surfaceValid ||
+            penetrationCount == 4 || travelled >= weapon.range)
+            return false;
+        TRACE::NativeResult exit{};
+        float thickness = 0.f;
+        if (!FindNativeTraceExit(trace, direction, localPawn, exit, thickness))
+            return false;
+        const float combinedPenetration =
+            (trace.penetrationModifier + exit.penetrationModifier) * 0.5f;
+        const float surfaceDamage =
+            std::clamp((trace.damageModifier + exit.damageModifier) * 0.5f, 0.05f, 1.f);
+        if (!std::isfinite(combinedPenetration) || combinedPenetration <= 0.05f)
+            return false;
+        const float penetrationLoss = (3.f / std::max(0.1f, weapon.penetration)) *
+            1.25f / combinedPenetration;
+        const float thicknessLoss = thickness * thickness / (24.f * combinedPenetration);
+        const float lostDamage = std::max(0.f,
+            damage * surfaceDamage + penetrationLoss + thicknessLoss);
+        if (lostDamage >= damage)
+            return false;
+        damage -= lostDamage;
+        travelled += thickness;
+        damage *= std::pow(weapon.rangeModifier, thickness / 500.f);
+        start = exit.end + direction * 0.1f;
+    }
+    return false;
+}
+
+float NativeSampleUnit(std::uint32_t value)
+{
+    value ^= value >> 16;
+    value *= 0x7FEB352DU;
+    value ^= value >> 15;
+    value *= 0x846CA68BU;
+    value ^= value >> 16;
+    return static_cast<float>(value & 0x00FFFFFFU) / 16777216.f;
+}
+
+bool CalculateNativeHitchance(const Vector_t& eye, const Vector_t& point,
+    C_CSPlayerPawn* localPawn, C_CSPlayerPawn* target,
+    const NativeWeaponBallistics& weapon, int requiredPercent, float& hitchance)
+{
+    hitchance = 0.f;
+    Vector_t difference = point - eye;
+    const float horizontal = std::hypot(difference.x, difference.y);
+    if (horizontal <= 0.001f || !TRACE::NativeReady())
+        return false;
+    constexpr float degrees = 180.f / 3.14159265358979323846f;
+    QAngle_t angle(-std::atan2(difference.z, horizontal) * degrees,
+        std::atan2(difference.y, difference.x) * degrees, 0.f);
+    Vector_t forward{}, right{}, up{};
+    angle.ToDirections(&forward, &right, &up);
+    constexpr int samples = 128;
+    (void)requiredPercent;
+    int hits = 0;
+    for (int seed = 0; seed < samples; ++seed)
+    {
+        const float radiusInaccuracy = std::sqrt(NativeSampleUnit(seed * 4U + 1U));
+        const float angleInaccuracy = NativeSampleUnit(seed * 4U + 2U) * 6.28318530717958647692f;
+        const float radiusSpread = std::sqrt(NativeSampleUnit(seed * 4U + 3U));
+        const float angleSpread = NativeSampleUnit(seed * 4U + 4U) * 6.28318530717958647692f;
+        const float spreadX = std::cos(angleInaccuracy) * radiusInaccuracy * weapon.inaccuracy +
+            std::cos(angleSpread) * radiusSpread * weapon.spread;
+        const float spreadY = std::sin(angleInaccuracy) * radiusInaccuracy * weapon.inaccuracy +
+            std::sin(angleSpread) * radiusSpread * weapon.spread;
+        Vector_t shot = (forward + right * spreadX + up * spreadY).Normalized();
+        TRACE::NativeResult trace{};
+        constexpr std::uint64_t playerOnlyMask =
+            static_cast<std::uint64_t>(CONTENTS_HITBOX) |
+            static_cast<std::uint64_t>(CONTENTS_MONSTER);
+        if (!TRACE::NativeLine(eye, eye + shot * weapon.range, localPawn, trace,
+                playerOnlyMask))
+            return false;
+        if (trace.entity == target)
+            ++hits;
+    }
+    hitchance = static_cast<float>(hits) * 100.f / static_cast<float>(samples);
+    return true;
 }
 
 void DrawLegitFov()
@@ -1098,6 +1680,11 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
     static QAngle_t previousDelta{};
     static std::uintptr_t previousDeltaPawn = 0;
     static int previousDeltaBone = -2;
+    static bool overshootConsumed = false;
+    static bool overshootActive = false;
+    static bool overshootCrossed = false;
+    static std::uint64_t overshootReleaseAt = 0;
+    static QAngle_t overshootOffset{};
     const auto stopAim = [&](bool releaseTarget) {
         ClearNativeAimDelta();
         SetNativeCombatInput(false, false, false, false);
@@ -1110,6 +1697,11 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
             previousDelta = {};
             previousDeltaPawn = 0;
             previousDeltaBone = -2;
+            overshootConsumed = false;
+            overshootActive = false;
+            overshootCrossed = false;
+            overshootReleaseAt = 0;
+            overshootOffset = {};
         }
     };
 
@@ -1333,6 +1925,19 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
             target += pawn->GetAbsVelocity() *
                 (std::clamp(C_GET(float, Vars.legit_ui_prediction_ms), 0.f, 250.f) / 1000.f);
 
+        if (smokeCheck)
+        {
+            const SmokeSegmentResult smoke = CheckActiveSmokeSegment(entities, localEye, target);
+            if (smoke != SmokeSegmentResult::Clear)
+            {
+                if (diagnose)
+                    LegitLog("[%llu] candidate rejected smoke pawn=%p bone=%d result=%s",
+                        static_cast<unsigned long long>(currentSequence), pawn, bone,
+                        smoke == SmokeSegmentResult::Obscured ? "obscured" : "unavailable");
+                return;
+            }
+        }
+
         if (visibilityCheck)
         {
             TRACE::NativeResult trace{};
@@ -1446,6 +2051,11 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
     {
         lockStartedAt = now;
         recoveryUntil = 0;
+        overshootConsumed = false;
+        overshootActive = false;
+        overshootCrossed = false;
+        overshootReleaseAt = 0;
+        overshootOffset = {};
     }
     else if (previousDeltaPawn == chosen.pawn && previousDeltaBone == chosen.bone)
     {
@@ -1478,12 +2088,70 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
         return;
     }
 
-    AddNativeCombatInput(C_GET(bool, Vars.legit_ui_auto_shoot) && chosen.fov < 2.f,
+    // Artificial overshoot is an opt-in, one-shot phase for each target lock.
+    // The fixed target-relative offset makes the command cross the real target
+    // and settle a small distance beyond it. Once the real target has been
+    // crossed, hold for one short input interval, remove the offset and let the
+    // normal bounded recovery response return to the target. This cannot loop
+    // because overshootConsumed resets only when the lock changes or releases.
+    const bool artificialOvershootEnabled =
+        C_GET(bool, Vars.legit_ui_artificial_overshoot);
+    const float configuredOvershoot = std::clamp(
+        C_GET(float, Vars.legit_ui_overshoot_degrees), 0.05f, 1.50f);
+    const float overshootActivationFov = std::max(0.35f, configuredOvershoot * 2.5f);
+    if (artificialOvershootEnabled && !overshootConsumed &&
+        chosen.fov > angularDeadZone && chosen.fov <= overshootActivationFov)
+    {
+        const float inverseFov = 1.f / chosen.fov;
+        overshootOffset = QAngle_t(
+            chosen.delta.x * inverseFov * configuredOvershoot,
+            chosen.delta.y * inverseFov * configuredOvershoot, 0.f);
+        overshootConsumed = true;
+        overshootActive = true;
+        overshootCrossed = false;
+        overshootReleaseAt = 0;
+        LegitLog("[%llu] OVERSHOOT_BEGIN target=%p bone=%d amount=%.3f offset=(%.3f,%.3f) fov=%.3f",
+            static_cast<unsigned long long>(currentSequence),
+            reinterpret_cast<void*>(chosen.pawn), chosen.bone,
+            configuredOvershoot, overshootOffset.x, overshootOffset.y, chosen.fov);
+    }
+    if (overshootActive)
+    {
+        const float targetSide = chosen.delta.x * overshootOffset.x +
+            chosen.delta.y * overshootOffset.y;
+        if (!overshootCrossed && targetSide <= 0.f)
+        {
+            overshootCrossed = true;
+            overshootReleaseAt = now + 20;
+            LegitLog("[%llu] OVERSHOOT_CROSSED target=%p bone=%d",
+                static_cast<unsigned long long>(currentSequence),
+                reinterpret_cast<void*>(chosen.pawn), chosen.bone);
+        }
+        if (overshootCrossed && now >= overshootReleaseAt)
+        {
+            overshootActive = false;
+            overshootOffset = {};
+            const float recoveryMs = std::clamp(
+                C_GET(float, Vars.legit_ui_recovery_ms), 5.f, 250.f);
+            recoveryUntil = now + static_cast<std::uint64_t>(recoveryMs * 2.f);
+            LegitLog("[%llu] OVERSHOOT_RECOVER target=%p bone=%d recovery_ms=%.0f",
+                static_cast<unsigned long long>(currentSequence),
+                reinterpret_cast<void*>(chosen.pawn), chosen.bone, recoveryMs);
+        }
+    }
+
+    const QAngle_t aimDelta(
+        chosen.delta.x + (overshootActive ? overshootOffset.x : 0.f),
+        chosen.delta.y + (overshootActive ? overshootOffset.y : 0.f), 0.f);
+    const float aimFov = std::hypot(aimDelta.x, aimDelta.y);
+
+    AddNativeCombatInput(C_GET(bool, Vars.legit_ui_auto_shoot) &&
+        !overshootActive && chosen.fov < 2.f,
         false, false, false);
 
     // A sub-count dead zone prevents the bot from constantly correcting bone
     // animation/noise after it is already centered.
-    if (chosen.fov <= angularDeadZone)
+    if (aimFov <= angularDeadZone)
     {
         ClearNativeAimDelta();
         LegitLog("[%llu] CENTERED target=%p bone=%d fov=%.4f deadzone=%.4f no movement needed",
@@ -1531,9 +2199,9 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
             1.f - std::exp(-frameSeconds / recoverySeconds));
     }
     constexpr float maxDegreesPerSample = 3.f;
-    const float stepPitch = std::clamp(chosen.delta.x * response,
+    const float stepPitch = std::clamp(aimDelta.x * response,
         -maxDegreesPerSample, maxDegreesPerSample);
-    const float stepYaw = std::clamp(chosen.delta.y * response,
+    const float stepYaw = std::clamp(aimDelta.y * response,
         -maxDegreesPerSample, maxDegreesPerSample);
     QAngle_t result(current.x + stepPitch, current.y + stepYaw, 0.f);
     result.Clamp();
@@ -1558,11 +2226,12 @@ void ApplyLegitAim(CGameEntitySystem* entities, CCSPlayerController* localContro
         angleDestination, result.x, result.y, result.z);
     native_aim_command_queued = createMoveQueued;
 
-    LegitLog("[%llu] MOVE_ATTEMPT target=%p bone=%d scan controllers=%d enemies=%d bones=%d valid=%d fov=%.3f delta=(%.3f,%.3f) smooth_ms=%.1f frame_s=%.4f response=%.4f accel=%.3f decel=%.3f recovery=%d step=(%.3f,%.3f) result=(%.3f,%.3f) destination=%p hook_installed=%d present_fallback=%d readback=(%.3f,%.3f) verified=%d command_queued=%d create_move_calls=%llu applied=%llu source=%s",
+    LegitLog("[%llu] MOVE_ATTEMPT target=%p bone=%d scan controllers=%d enemies=%d bones=%d valid=%d fov=%.3f delta=(%.3f,%.3f) aim_delta=(%.3f,%.3f) overshoot=%d/%d smooth_ms=%.1f frame_s=%.4f response=%.4f accel=%.3f decel=%.3f recovery=%d step=(%.3f,%.3f) result=(%.3f,%.3f) destination=%p hook_installed=%d present_fallback=%d readback=(%.3f,%.3f) verified=%d command_queued=%d create_move_calls=%llu applied=%llu source=%s",
         static_cast<unsigned long long>(currentSequence),
         reinterpret_cast<void*>(chosen.pawn), chosen.bone,
         controllersScanned, enemiesScanned, bonesTested, validCandidates,
         chosen.fov, chosen.delta.x, chosen.delta.y,
+        aimDelta.x, aimDelta.y, overshootActive, overshootCrossed,
         configuredSmoothness, frameSeconds, response,
         accelerationFactor, decelerationFactor, recovering,
         stepPitch, stepYaw, result.x, result.y, angleDestination,
@@ -1606,6 +2275,8 @@ void ApplyNativeTriggerAndRecoil(CGameEntitySystem* entities,
         const bool traceBlocked = C_GET(bool, Vars.trigger_ui_visibility_check) &&
             !TRACE::NativeReady();
         bool smokeBlocked = false;
+        bool segmentSmokeBlocked = false;
+        bool smokeStateUnavailable = false;
         if (C_GET(bool, Vars.trigger_ui_smoke_check))
         {
             static const std::uint32_t smokeOverlayOffset =
@@ -1661,6 +2332,17 @@ void ApplyNativeTriggerAndRecoil(CGameEntitySystem* entities,
                     Vector_t point{};
                     if (!GetLiveBonePosition(scene, candidate.bone, point))
                         continue;
+                    if (C_GET(bool, Vars.trigger_ui_smoke_check))
+                    {
+                        const SmokeSegmentResult smoke =
+                            CheckActiveSmokeSegment(entities, eye, point);
+                        if (smoke != SmokeSegmentResult::Clear)
+                        {
+                            segmentSmokeBlocked |= smoke == SmokeSegmentResult::Obscured;
+                            smokeStateUnavailable |= smoke == SmokeSegmentResult::Unavailable;
+                            continue;
+                        }
+                    }
                     if (C_GET(bool, Vars.trigger_ui_visibility_check))
                     {
                         TRACE::NativeResult trace{};
@@ -1705,10 +2387,11 @@ void ApplyNativeTriggerAndRecoil(CGameEntitySystem* entities,
             if (now >= nextLog)
             {
                 nextLog = now + 250;
-                LegitLog("[trigger] target=%p bone=%d fov=%.3f elapsed=%llu delay=%.0f fire=%d blocked=trace:%d smoke:%d scope:%d hook=%d",
+                LegitLog("[trigger] target=%p bone=%d fov=%.3f elapsed=%llu delay=%.0f fire=%d blocked=trace:%d local_smoke:%d segment_smoke:%d smoke_unavailable:%d scope:%d hook=%d",
                     bestPawn, bestBone, bestFov,
                     static_cast<unsigned long long>(bestPawn ? now - triggerAcquiredAt : 0),
-                    delay, fire, traceBlocked, smokeBlocked, scopeBlocked,
+                    delay, fire, traceBlocked, smokeBlocked, segmentSmokeBlocked,
+                    smokeStateUnavailable, scopeBlocked,
                     IsNativeInputHookInstalled());
             }
         }
@@ -1749,7 +2432,7 @@ void ApplyNativeTriggerAndRecoil(CGameEntitySystem* entities,
         localPawn, result.x, result.y, result.z);
 }
 
-void ApplyNativeAntiAim(C_CSPlayerPawn* localPawn)
+void ApplyNativeAntiAim(CGameEntitySystem* entities, C_CSPlayerPawn* localPawn)
 {
     if (!C_GET(bool, Vars.bAntiAim) || native_aim_command_queued ||
         MENU::bMainWindowOpened || localPawn == nullptr || localPawn->GetHealth() <= 0 ||
@@ -1759,6 +2442,36 @@ void ApplyNativeAntiAim(C_CSPlayerPawn* localPawn)
     const bool* keys = SDL_GetKeyboardState(nullptr);
     if (C_GET(bool, Vars.antiaim_disable_use) && keys != nullptr && keys[SDL_SCANCODE_E])
         return;
+
+    // Releasing the attack button starts a short grenade-throw state where the
+    // input hook no longer reports attack. Keep anti-aim out of that transition
+    // as well so it cannot redirect a grenade after the pin is released.
+    std::string activeWeaponName;
+    int activeAmmo = 0, activeMaximumAmmo = 0;
+    C_CSWeaponBase* activeWeapon = nullptr;
+    if (GetWeaponDisplay(entities, localPawn, activeWeaponName, activeAmmo,
+            activeMaximumAmmo, &activeWeapon) && activeWeapon != nullptr)
+    {
+        const bool grenade = activeWeaponName == "flashbang" ||
+            activeWeaponName == "hegrenade" || activeWeaponName == "smokegrenade" ||
+            activeWeaponName == "molotov" || activeWeaponName == "incgrenade" ||
+            activeWeaponName == "decoy";
+        if (grenade)
+        {
+            static const std::uint32_t pinPulledOffset =
+                SCHEMA::GetOffset("C_BaseCSGrenade->m_bPinPulled");
+            static const std::uint32_t throwTimeOffset =
+                SCHEMA::GetOffset("C_BaseCSGrenade->m_fThrowTime");
+            bool pinPulled = false;
+            float throwTime = 0.f;
+            if (pinPulledOffset == 0 || throwTimeOffset == 0 ||
+                !SafeNativeRead(reinterpret_cast<const std::uint8_t*>(activeWeapon) +
+                    pinPulledOffset, pinPulled) ||
+                !SafeNativeRead(reinterpret_cast<const std::uint8_t*>(activeWeapon) +
+                    throwTimeOffset, throwTime) || pinPulled || throwTime > 0.f)
+                return;
+        }
+    }
 
     const int pitchType = std::clamp(C_GET(int, Vars.iPitchType), 0, 4);
     const int yawType = std::clamp(C_GET(int, Vars.iBaseYawType), 0, 4);
@@ -1881,38 +2594,32 @@ void ApplyNativeRage(CGameEntitySystem* entities, CCSPlayerController* localCont
     std::string activeWeapon;
     int ammo = 0;
     int maximumAmmo = 0;
-    GetWeaponDisplay(entities, localPawn, activeWeapon, ammo, maximumAmmo);
+    C_CSWeaponBase* activeWeaponEntity = nullptr;
+    GetWeaponDisplay(entities, localPawn, activeWeapon, ammo, maximumAmmo,
+        &activeWeaponEntity);
     const int weaponGroup = GetRageWeaponGroup(activeWeapon);
     const bool hitscan = C_GET(bool, Vars.rage_hitscan);
     const int selection = std::clamp(
         C_GET_ARRAY(int, 7, Vars.rage_target_select, weaponGroup), 0, 2);
-    const bool ballisticsRequested = selection == 1 ||
-        C_GET_ARRAY(int, 7, Vars.rage_minimum_damage, weaponGroup) > 0 ||
-        C_GET_ARRAY(bool, 7, Vars.rage_hitchance, weaponGroup) ||
-        C_GET_ARRAY(bool, 7, Vars.rage_penetration, weaponGroup) ||
-        C_GET_ARRAY(bool, 7, Vars.rage_lethal_body, weaponGroup) ||
-        C_GET_ARRAY(bool, 7, Vars.rage_prefer_high_damage, weaponGroup) ||
-        C_GET_ARRAY(bool, 7, Vars.rage_delay_accurate, weaponGroup);
-    if (ballisticsRequested && C_GET(bool, Vars.rage_shot_logging))
-    {
-        static std::uint64_t nextBallisticsLog = 0;
-        if (SDL_GetTicks() >= nextBallisticsLog)
-        {
-            nextBallisticsLog = SDL_GetTicks() + 500;
-            LegitLog("[rage] HOLD reason=native_ballistics_unavailable trace_ready=%d selection=%d mindamage=%d hitchance=%d penetration=%d",
-                TRACE::NativeReady(), selection,
-                C_GET_ARRAY(int, 7, Vars.rage_minimum_damage, weaponGroup),
-                C_GET_ARRAY(bool, 7, Vars.rage_hitchance, weaponGroup),
-                C_GET_ARRAY(bool, 7, Vars.rage_penetration, weaponGroup));
-        }
-    }
-
-    // Damage ranking needs a real damage/penetration simulation. Keep target
-    // acquisition and bounded aim assistance available for an old config that
-    // requests it, but rank by angular distance and hold every combat input.
-    // This makes the unsupported part fail closed without making Rage appear
-    // completely dead after loading such a profile.
-    const int selectionForScoring = selection == 1 ? 2 : selection;
+    const int hitboxPriority = std::clamp(
+        C_GET_ARRAY(int, 7, Vars.rage_hitbox_priority, weaponGroup), 0, 3);
+    const int configuredMinimumDamage = std::clamp(
+        C_GET_ARRAY(int, 7, Vars.rage_minimum_damage, weaponGroup), 0, 130);
+    const int configuredHitchance = std::clamp(
+        C_GET_ARRAY(int, 7, Vars.rage_minimum_hitchance, weaponGroup), 0, 100);
+    const bool hitchanceEnabled = C_GET_ARRAY(bool, 7, Vars.rage_hitchance, weaponGroup);
+    const bool penetrationEnabled = C_GET_ARRAY(bool, 7, Vars.rage_penetration, weaponGroup);
+    const bool lethalBody = C_GET_ARRAY(bool, 7, Vars.rage_lethal_body, weaponGroup);
+    const bool preferHighDamage = C_GET_ARRAY(bool, 7, Vars.rage_prefer_high_damage, weaponGroup);
+    const bool delayAccurate = C_GET_ARRAY(bool, 7, Vars.rage_delay_accurate, weaponGroup);
+    const bool damagePreview = C_GET_ARRAY(bool, 7, Vars.rage_damage_preview, weaponGroup);
+    const bool ballisticsRequired = selection == 1 || configuredMinimumDamage > 0 ||
+        hitchanceEnabled || penetrationEnabled || lethalBody || preferHighDamage || delayAccurate;
+    const bool evaluateDamage = ballisticsRequired || damagePreview ||
+        C_GET(bool, Vars.rage_decision_overlay);
+    NativeWeaponBallistics weaponBallistics{};
+    const bool ballisticsAvailable = TRACE::NativeReady() &&
+        ReadNativeWeaponBallistics(localPawn, activeWeaponEntity, weaponBallistics);
 
     const bool forceBody = IsNativeButtonDown(C_GET(int, Vars.rage_force_body_key));
     const bool forceHead = IsNativeButtonDown(C_GET(int, Vars.rage_force_head_key));
@@ -1930,13 +2637,21 @@ void ApplyNativeRage(CGameEntitySystem* entities, CCSPlayerController* localCont
     struct Candidate
     {
         C_CSPlayerPawn* pawn = nullptr;
+        int entityIndex = -1;
         int bone = -1;
         QAngle_t delta{};
         Vector_t point{};
+        float distance = 999999.f;
         float fov = 9999.f;
         float score = 9999999.f;
         int health = 0;
+        NativeShotResult shot{};
+        bool damageValid = false;
     } best;
+    static thread_local std::vector<Candidate> candidates;
+    candidates.clear();
+    if (candidates.capacity() < 384)
+        candidates.reserve(384);
     constexpr float degrees = 180.f / 3.14159265358979323846f;
     int pawnsScanned = 0;
     int pointsScanned = 0;
@@ -2020,24 +2735,221 @@ void ApplyNativeRage(CGameEntitySystem* entities, CCSPlayerController* localCont
                 const QAngle_t delta(std::remainder(wanted.x - current.x, 360.f),
                                      std::remainder(wanted.y - current.y, 360.f), 0.f);
                 const float fov = std::hypot(delta.x, delta.y);
-                float score = selectionForScoring == 0 ? difference.Length() : fov;
+                const float distance = difference.Length();
+                float score = selection == 0 ? distance : fov;
+                const bool headPoint = bone == 5 || bone == 4;
+                const bool torsoPoint = bone == 2 || bone == 3 || bone == 6;
+                const bool limbPoint = !headPoint && !torsoPoint;
+                const bool priorityMatch = hitboxPriority == 0 ||
+                    (hitboxPriority == 1 && headPoint) ||
+                    (hitboxPriority == 2 && torsoPoint) ||
+                    (hitboxPriority == 3 && limbPoint);
+                if (!priorityMatch)
+                    score += 50000.f;
                 if (C_GET_ARRAY(bool, 7, Vars.rage_prefer_low_health, weaponGroup))
                     score += static_cast<float>(pawn->GetHealth()) * 4.f;
                 if (preferExposed && !exposed)
                     score += 100000.f;
-                if (std::isfinite(score) && score < best.score)
-                    best = { pawn, bone, delta, points[pointIndex], fov, score, pawn->GetHealth() };
+                if (std::isfinite(score))
+                    candidates.push_back({ pawn, index, bone, delta, points[pointIndex],
+                        distance, fov, score, pawn->GetHealth() });
             }
             if (!hitscan)
                 break;
         }
     }
 
-    if (best.pawn == nullptr)
+    if (candidates.empty())
     {
         ClearNativeAimDelta();
         return;
     }
+
+    // A hard upper bound prevents pathological entity states from turning one
+    // render frame into thousands of native traces. Preserve points from every
+    // enemy before trimming so distance and damage selection still compare the
+    // whole live enemy set.
+    if (candidates.size() > 384)
+    {
+        std::stable_sort(candidates.begin(), candidates.end(),
+            [](const Candidate& left, const Candidate& right) {
+                if (left.pawn == right.pawn)
+                    return left.score < right.score;
+                return std::less<C_CSPlayerPawn*>{}(left.pawn, right.pawn);
+            });
+        std::vector<Candidate> bounded;
+        bounded.reserve(384);
+        std::vector<Candidate> extras;
+        extras.reserve(candidates.size());
+        C_CSPlayerPawn* lastPawn = nullptr;
+        for (const Candidate& candidate : candidates)
+        {
+            if (candidate.pawn != lastPawn)
+            {
+                lastPawn = candidate.pawn;
+                // Keep the best point for every enemy first. With at most 128
+                // player slots this always fits inside the global trace cap.
+                bounded.push_back(candidate);
+            }
+            else
+                extras.push_back(candidate);
+        }
+        std::stable_sort(extras.begin(), extras.end(),
+            [](const Candidate& left, const Candidate& right) {
+                return left.score < right.score;
+            });
+        const std::size_t remaining = 384 - bounded.size();
+        bounded.insert(bounded.end(), extras.begin(),
+            extras.begin() + std::min(remaining, extras.size()));
+        candidates.swap(bounded);
+    }
+
+    struct CachedNativeShot
+    {
+        C_CSPlayerPawn* pawn = nullptr;
+        C_CSWeaponBase* weapon = nullptr;
+        int bone = -1;
+        Vector_t eye{};
+        Vector_t point{};
+        bool penetration = false;
+        std::uint64_t expiresAt = 0;
+        NativeShotResult result{};
+        bool valid = false;
+    };
+    static std::vector<CachedNativeShot> shotCache;
+    if (shotCache.capacity() < 384)
+        shotCache.reserve(384);
+    const std::uint64_t ballisticNow = SDL_GetTicks();
+    shotCache.erase(std::remove_if(shotCache.begin(), shotCache.end(),
+        [ballisticNow](const CachedNativeShot& entry) {
+            return entry.expiresAt < ballisticNow;
+        }), shotCache.end());
+    const auto evaluateShot = [&](Candidate& candidate) {
+        const auto cached = std::find_if(shotCache.begin(), shotCache.end(),
+            [&](const CachedNativeShot& entry) {
+                return entry.pawn == candidate.pawn &&
+                    entry.weapon == activeWeaponEntity &&
+                    entry.bone == candidate.bone &&
+                    entry.penetration == penetrationEnabled &&
+                    entry.eye.DistToSqr(localEye) <= 0.0625f &&
+                    entry.point.DistToSqr(candidate.point) <= 0.0625f;
+            });
+        if (cached != shotCache.end())
+        {
+            candidate.shot = cached->result;
+            candidate.damageValid = cached->valid;
+            return;
+        }
+        candidate.damageValid = SimulateNativeShot(localEye, candidate.point,
+            candidate.bone, localPawn, candidate.pawn, weaponBallistics,
+            penetrationEnabled, candidate.shot);
+        shotCache.push_back({ candidate.pawn, activeWeaponEntity, candidate.bone,
+            localEye, candidate.point, penetrationEnabled, ballisticNow + 33,
+            candidate.shot, candidate.damageValid });
+    };
+
+    for (Candidate& candidate : candidates)
+    {
+        if (evaluateDamage && ballisticsAvailable)
+        {
+            evaluateShot(candidate);
+            if (!candidate.damageValid)
+                continue;
+            const int minimumDamage = configuredMinimumDamage > 100
+                ? candidate.health + configuredMinimumDamage - 100
+                : configuredMinimumDamage;
+            if (configuredMinimumDamage > 0 && candidate.shot.damage + 0.001f < minimumDamage)
+                continue;
+            if (requireVisible && !candidate.shot.exposed)
+                continue;
+            if (selection == 1 || preferHighDamage)
+            {
+                candidate.score = -candidate.shot.damage * 1000.f + candidate.fov;
+                const bool candidateHead = candidate.bone == 5 || candidate.bone == 4;
+                const bool candidateTorso = candidate.bone == 2 ||
+                    candidate.bone == 3 || candidate.bone == 6;
+                const bool candidatePriority = hitboxPriority == 0 ||
+                    (hitboxPriority == 1 && candidateHead) ||
+                    (hitboxPriority == 2 && candidateTorso) ||
+                    (hitboxPriority == 3 && !candidateHead && !candidateTorso);
+                if (!candidatePriority)
+                    candidate.score += 50000.f;
+            }
+            if (lethalBody && candidate.bone != 5 && candidate.bone != 4 &&
+                candidate.shot.damage + 0.001f >= static_cast<float>(candidate.health))
+                candidate.score -= 1000000.f;
+            if (preferExposed && !candidate.shot.exposed)
+                candidate.score += 100000.f;
+        }
+        else if (ballisticsRequired)
+        {
+            continue;
+        }
+        if (candidate.score < best.score)
+            best = candidate;
+    }
+
+    if (best.pawn == nullptr)
+    {
+        ClearNativeAimDelta();
+        AddNativeCombatInput(false, false, false, false);
+        if (ballisticsRequired && C_GET(bool, Vars.rage_shot_logging))
+        {
+            static std::uint64_t nextUnavailableLog = 0;
+            if (SDL_GetTicks() >= nextUnavailableLog)
+            {
+                nextUnavailableLog = SDL_GetTicks() + 500;
+                LegitLog("[rage] HOLD reason=%s trace_ready=%d weapon_data=%d candidates=%zu min_damage=%d penetration=%d",
+                    ballisticsAvailable ? "no_point_passed_ballistics" : "ballistics_unavailable",
+                    TRACE::NativeReady(), weaponBallistics.weapon != nullptr,
+                    candidates.size(), configuredMinimumDamage, penetrationEnabled);
+            }
+        }
+        return;
+    }
+
+    float hitchance = 0.f;
+    bool hitchanceAvailable = false;
+    const bool evaluateHitchance = hitchanceEnabled || delayAccurate ||
+        C_GET(bool, Vars.rage_decision_overlay);
+    const int requiredHitchance = (hitchanceEnabled || delayAccurate)
+        ? configuredHitchance : 0;
+    if (evaluateHitchance && ballisticsAvailable)
+    {
+        struct HitchanceCache
+        {
+            C_CSPlayerPawn* pawn = nullptr;
+            C_CSWeaponBase* weapon = nullptr;
+            Vector_t eye{};
+            Vector_t point{};
+            float spread = 0.f;
+            float inaccuracy = 0.f;
+            float value = 0.f;
+            std::uint64_t expiresAt = 0;
+            bool available = false;
+        };
+        static HitchanceCache cache{};
+        if (cache.pawn == best.pawn && cache.weapon == activeWeaponEntity &&
+            cache.eye.DistToSqr(localEye) <= 0.0625f &&
+            cache.point.DistToSqr(best.point) <= 0.0625f &&
+            std::fabs(cache.spread - weaponBallistics.spread) <= 0.00001f &&
+            std::fabs(cache.inaccuracy - weaponBallistics.inaccuracy) <= 0.00001f &&
+            cache.expiresAt >= ballisticNow)
+        {
+            hitchance = cache.value;
+            hitchanceAvailable = cache.available;
+        }
+        else
+        {
+            hitchanceAvailable = CalculateNativeHitchance(localEye, best.point,
+                localPawn, best.pawn, weaponBallistics, requiredHitchance, hitchance);
+            cache = { best.pawn, activeWeaponEntity, localEye, best.point,
+                weaponBallistics.spread, weaponBallistics.inaccuracy,
+                hitchance, ballisticNow + 33, hitchanceAvailable };
+        }
+    }
+    const bool hitchancePassed = !hitchanceEnabled && !delayAccurate ? true :
+        hitchanceAvailable && hitchance + 0.001f >= static_cast<float>(requiredHitchance);
 
     // Rage is deliberately faster than Legitbot, but still bounded per frame
     // so a stale bone or one long frame cannot spin the camera uncontrollably.
@@ -2053,14 +2965,15 @@ void ApplyNativeRage(CGameEntitySystem* entities, CCSPlayerController* localCont
     std::uint8_t scopedRaw = 0;
     scoped = scopedOffset != 0 && SafeNativeRead(
         reinterpret_cast<const std::uint8_t*>(localPawn) + scopedOffset, scopedRaw) && scopedRaw == 1;
-    const bool requestScope = !ballisticsRequested && weaponGroup >= 4 &&
+    const bool conditionsAvailable = !ballisticsRequired || ballisticsAvailable;
+    const bool requestScope = conditionsAvailable && weaponGroup >= 4 &&
         C_GET_ARRAY(bool, 7, Vars.rage_auto_scope, weaponGroup) && !scoped;
     const bool centered = best.fov <= 0.35f;
-    const bool requestAttack = !ballisticsRequested && centered &&
+    const bool requestAttack = conditionsAvailable && centered && hitchancePassed &&
         C_GET(bool, Vars.rage_auto_shoot) && !requestScope;
-    const bool requestCrouch = !ballisticsRequested &&
+    const bool requestCrouch = conditionsAvailable &&
         C_GET_ARRAY(bool, 7, Vars.rage_auto_crouch, weaponGroup);
-    const bool requestStop = !ballisticsRequested &&
+    const bool requestStop = conditionsAvailable &&
         C_GET_ARRAY(bool, 7, Vars.rage_auto_stop, weaponGroup);
     AddNativeCombatInput(requestAttack, requestCrouch, requestScope, requestStop);
 
@@ -2068,20 +2981,36 @@ void ApplyNativeRage(CGameEntitySystem* entities, CCSPlayerController* localCont
     const bool queued = QueueNativeAimAngles(destination, result.x, result.y, 0.f);
     native_aim_command_queued = queued;
 
-    if (C_GET(bool, Vars.rage_decision_overlay))
+    ImVec2 bestScreen{};
+    const bool bestOnScreen = D::WorldToScreen(best.point, bestScreen);
+    if (damagePreview && bestOnScreen)
     {
-        ImVec2 screen{};
-        if (D::WorldToScreen(best.point, screen))
-        {
-            char decision[160]{};
-            std::snprintf(decision, sizeof(decision),
-                "RAGE %s | HP %d | FOV %.2f | DMG/HC n/a%s",
-                ballisticsRequested ? "HOLD BALLISTICS" :
-                    (requestAttack ? "FIRE" : (requestScope ? "SCOPE" : "AIM")),
-                best.health, best.fov, TRACE::NativeReady() ? "" : " (trace offline)");
-            DrawOutlinedText(ImGui::GetBackgroundDrawList(), screen + ImVec2(8.f, -18.f),
-                decision, IM_COL32(255, 190, 80, 255), IM_COL32(0, 0, 0, 230));
-        }
+        char preview[48]{};
+        if (best.damageValid)
+            std::snprintf(preview, sizeof(preview), "DMG %.0f%s", best.shot.damage,
+                best.shot.penetrations > 0 ? " WALL" : "");
+        else
+            std::snprintf(preview, sizeof(preview), "DMG unavailable");
+        DrawOutlinedText(ImGui::GetBackgroundDrawList(), bestScreen + ImVec2(8.f, 2.f),
+            preview, best.damageValid ? IM_COL32(125, 235, 145, 255) :
+                IM_COL32(255, 120, 90, 255), IM_COL32(0, 0, 0, 230));
+    }
+    if (C_GET(bool, Vars.rage_decision_overlay) && bestOnScreen)
+    {
+        const char* decisionName = requestAttack ? "FIRE" : requestScope ? "SCOPE" :
+            !conditionsAvailable ? "HOLD DATA" : !hitchancePassed ? "HOLD HC" :
+            !centered ? "AIM" : "HOLD INPUT";
+        char decision[256]{};
+        std::snprintf(decision, sizeof(decision),
+            "RAGE %s | TGT #%d BONE %d | HP %d FOV %.2f | DMG %s%.0f | HC %s%.0f%% | VIS %s",
+            decisionName, best.entityIndex, best.bone, best.health, best.fov,
+            best.damageValid ? "" : "n/a ", best.damageValid ? best.shot.damage : 0.f,
+            hitchanceAvailable ? "" : "n/a ", hitchanceAvailable ? hitchance : 0.f,
+            best.damageValid && best.shot.penetrations > 0 ? "penetrated" :
+                best.damageValid ? "exposed" : "n/a");
+        DrawOutlinedText(ImGui::GetBackgroundDrawList(), bestScreen + ImVec2(8.f, -18.f),
+            decision, requestAttack ? IM_COL32(115, 240, 145, 255) :
+                IM_COL32(255, 190, 80, 255), IM_COL32(0, 0, 0, 230));
     }
 
     static std::uint64_t nextLog = 0;
@@ -2089,11 +3018,14 @@ void ApplyNativeRage(CGameEntitySystem* entities, CCSPlayerController* localCont
     if (C_GET(bool, Vars.rage_shot_logging) && now >= nextLog)
     {
         nextLog = now + 250;
-        LegitLog("[rage] decision=%s weapon=%s group=%d hitscan=%d multipoint=%d selection=%d pawns=%d points=%d target=%p bone=%d hp=%d fov=%.2f score=%.2f step=(%.2f,%.2f) requests=attack:%d crouch:%d scope:%d stop:%d hook=%d queued=%d",
-            ballisticsRequested ? "HOLD_BALLISTICS" :
-                (requestAttack ? "FIRE" : (requestScope ? "SCOPE" : "AIM")),
-            activeWeapon.c_str(), weaponGroup, hitscan, multipoint, selection, pawnsScanned,
-            pointsScanned, best.pawn, best.bone, best.health, best.fov, best.score,
+        LegitLog("[rage] decision=%s weapon=%s group=%d hitscan=%d multipoint=%d selection=%d hitbox_priority=%d pawns=%d points=%d candidates=%zu target=%p bone=%d hp=%d fov=%.2f score=%.2f damage=%.2f valid=%d penetrations=%d hitchance=%.2f hc_valid=%d hc_pass=%d step=(%.2f,%.2f) requests=attack:%d crouch:%d scope:%d stop:%d hook=%d queued=%d",
+            requestAttack ? "FIRE" : requestScope ? "SCOPE" :
+                !conditionsAvailable ? "HOLD_DATA" : !hitchancePassed ? "HOLD_HITCHANCE" : "AIM",
+            activeWeapon.c_str(), weaponGroup, hitscan, multipoint, selection,
+            hitboxPriority, pawnsScanned,
+            pointsScanned, candidates.size(), best.pawn, best.bone, best.health,
+            best.fov, best.score, best.shot.damage, best.damageValid,
+            best.shot.penetrations, hitchance, hitchanceAvailable, hitchancePassed,
             stepPitch, stepYaw, requestAttack,
             requestCrouch, requestScope, requestStop,
             IsNativeInputHookInstalled(), queued);
@@ -3003,6 +3935,20 @@ void LinuxNativeEsp::Render()
     // chams matching recycled entity addresses.
     NativeChams::UpdateTargets(nullptr, 0, nullptr);
     NativeChams::UpdateBombTarget(nullptr);
+    // Input requests are level-triggered atomics consumed by CreateMove. Clear
+    // them before any loading/disconnect early return so a request from the
+    // previous frame can never remain latched after the local pawn disappears.
+    ClearNativeAimDelta();
+    SetNativeCombatInput(false, false, false, false);
+    SetNativeBhopInput(false, false, false);
+    SetNativeStrafeInput(false, 0.f, 0.f);
+    SetNativeThirdPersonInput(false);
+    native_aim_command_queued = false;
+    // Do not leave the menu reporting a weapon/profile from the previous map
+    // while the resource service or local pawn is unavailable. ApplyNativeSkin
+    // replaces these defaults once a live weapon can actually be inspected.
+    active_skin_weapon_definition = 0;
+    native_skin_runtime_status = NativeSkinRuntimeStatus::WaitingForPlayer;
     static bool logged_entry = false;
     const bool enabled = C_GET(bool, Vars.bVisualOverlay);
     if (!logged_entry)
@@ -3054,14 +4000,12 @@ void LinuxNativeEsp::Render()
     ApplyCameraAndRemovals(local_pawn);
     ApplyNativeMovement(local_pawn);
     DrawLegitFov();
-    native_aim_command_queued = false;
-    SetNativeCombatInput(false, false, false, false);
     if (C_GET(bool, Vars.rage_enable))
         ApplyNativeRage(entities, local_controller, local_pawn);
     else
         ApplyLegitAim(entities, local_controller, local_pawn);
     ApplyNativeTriggerAndRecoil(entities, local_controller, local_pawn);
-    ApplyNativeAntiAim(local_pawn);
+    ApplyNativeAntiAim(entities, local_pawn);
     ApplyNativeSkin(entities, local_controller, local_pawn);
     NativeChams::UpdateColors(
         C_GET(ColorPickerVar_t, Vars.colVisualChams).colValue,
@@ -3209,12 +4153,12 @@ void LinuxNativeEsp::Render()
 
         if (const auto& nameConfig = C_GET(TextOverlayVar_t, Vars.overlayName); nameConfig.bEnable)
         {
-            const char* playerName = controller->GetPlayerName();
-            if (playerName != nullptr)
+            std::string playerName;
+            if (SafeReadPlayerName(controller, playerName))
             {
-                const ImVec2 textSize = ImGui::CalcTextSize(playerName);
+                const ImVec2 textSize = ImGui::CalcTextSize(playerName.c_str());
                 DrawOutlinedText(draw, ImVec2((min.x + max.x - textSize.x) * 0.5f, min.y - textSize.y - 2.f),
-                                 playerName, nameConfig.colPrimary.GetU32(), nameConfig.colOutline.GetU32());
+                                 playerName.c_str(), nameConfig.colPrimary.GetU32(), nameConfig.colOutline.GetU32());
             }
         }
 

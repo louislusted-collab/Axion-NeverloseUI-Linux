@@ -14,6 +14,10 @@
 #include <cstring>
 #include <mutex>
 
+#include <sys/syscall.h>
+#include <sys/uio.h>
+#include <unistd.h>
+
 namespace
 {
 using NativeTraceFn = bool(*)(void*, void*, const Vector_t*, const Vector_t*, void*, void*);
@@ -80,6 +84,17 @@ bool AddressHasPermissions(const void* address, std::size_t size, char permissio
 	}
 	std::fclose(maps);
 	return valid;
+}
+
+bool SafeAddressRead(const void* address, void* output, std::size_t size)
+{
+	if (address == nullptr || output == nullptr || size == 0)
+		return false;
+	iovec local{output, size};
+	iovec remote{const_cast<void*>(address), size};
+	const long read = ::syscall(SYS_process_vm_readv, ::getpid(), &local, 1UL,
+		&remote, 1UL, 0UL);
+	return read == static_cast<long>(size);
 }
 
 bool MatchBytes(const std::uint8_t* address, const std::uint8_t* bytes, std::size_t size)
@@ -235,7 +250,45 @@ bool ExecuteNativeTrace(const Vector_t& start, const Vector_t& end,
 	alignas(16) std::array<std::byte, 0xC0> nativeResult{};
 	const bool wrapperHit = nativeAbi.trace(manager, ray.data(), &start, &end,
 		filter.data(), nativeResult.data());
+	std::memcpy(&result.surface, nativeResult.data(), sizeof(result.surface));
 	std::memcpy(&result.entity, nativeResult.data() + 0x08, sizeof(result.entity));
+	void* hitboxData = nullptr;
+	std::memcpy(&hitboxData, nativeResult.data() + 0x10, sizeof(hitboxData));
+	if (hitboxData != nullptr)
+	{
+		int hitGroup = -1;
+		if (SafeAddressRead(static_cast<const std::byte*>(hitboxData) + 0x38,
+				&hitGroup, sizeof(hitGroup)) && hitGroup >= 0 && hitGroup <= 10)
+			result.hitGroup = hitGroup;
+	}
+	// The current build's surface-property record is 0x20 bytes. Its loader at
+	// libclient+0x1682200 writes bulletPenetrationDistanceModifier to +0x08,
+	// bulletPenetrationDamageModifier to +0x0C and gamematerial to +0x14.
+	// Keep these values independently range-gated so a changed trace result or
+	// surface layout closes ballistics without affecting ordinary visibility.
+	std::array<std::byte, 0x16> surfaceRecord{};
+	if (SafeAddressRead(result.surface, surfaceRecord.data(), surfaceRecord.size()))
+	{
+		std::memcpy(&result.penetrationModifier,
+			surfaceRecord.data() + 0x08,
+			sizeof(result.penetrationModifier));
+		std::memcpy(&result.damageModifier,
+			surfaceRecord.data() + 0x0C,
+			sizeof(result.damageModifier));
+		std::memcpy(&result.material,
+			surfaceRecord.data() + 0x14,
+			sizeof(result.material));
+		result.surfaceValid = std::isfinite(result.penetrationModifier) &&
+			std::isfinite(result.damageModifier) &&
+			result.penetrationModifier >= 0.05f && result.penetrationModifier <= 10.f &&
+			result.damageModifier >= 0.f && result.damageModifier <= 2.f;
+		if (!result.surfaceValid)
+		{
+			result.penetrationModifier = 0.f;
+			result.damageModifier = 0.f;
+			result.material = 0;
+		}
+	}
 	std::array<float, 3> vectorBytes{};
 	std::memcpy(vectorBytes.data(), nativeResult.data() + 0x78, sizeof(vectorBytes));
 	result.start = Vector_t(vectorBytes.data());

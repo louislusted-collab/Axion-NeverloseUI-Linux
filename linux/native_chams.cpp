@@ -40,6 +40,9 @@ constexpr std::size_t kColorOffset = 0x40;
 std::array<std::atomic<C_CSPlayerPawn*>, 128> targets{};
 std::atomic<C_CSPlayerPawn*> localTarget{};
 std::atomic<C_BaseEntity*> bombTarget{};
+std::atomic<std::uint64_t> enemyMeshMatches{0};
+std::atomic<std::uint64_t> knifeMeshMatches{0};
+std::atomic<std::uint64_t> bombMeshMatches{0};
 funchook_t* hook = nullptr;
 DrawArrayFn original = nullptr;
 struct MaterialPair
@@ -602,6 +605,20 @@ void DrawArray(void* descriptor, void* renderContext, void* meshArray, int count
         return;
     }
 
+    std::uint64_t enemyMatchesThisBatch = 0;
+    std::uint64_t knifeMatchesThisBatch = 0;
+    std::uint64_t bombMatchesThisBatch = 0;
+    for (const Backup& backup : changed)
+    {
+        enemyMatchesThisBatch += backup.targetKind == TargetKind::Enemy;
+        knifeMatchesThisBatch += backup.localKind == LocalMaterialKind::Knife;
+        bombMatchesThisBatch += backup.targetKind == TargetKind::Bomb ||
+            backup.localKind == LocalMaterialKind::Bomb;
+    }
+    enemyMeshMatches.fetch_add(enemyMatchesThisBatch, std::memory_order_relaxed);
+    knifeMeshMatches.fetch_add(knifeMatchesThisBatch, std::memory_order_relaxed);
+    bombMeshMatches.fetch_add(bombMatchesThisBatch, std::memory_order_relaxed);
+
     const int selectedStyle = std::clamp(C_GET(int, Vars.nVisualChamMaterial), 0,
         static_cast<int>(MaterialStyle::Count) - 1);
     const MaterialPair& selectedMaterials = materials[static_cast<std::size_t>(selectedStyle)];
@@ -759,6 +776,31 @@ void UpdateColors(const Color_t& visible, const Color_t& hidden)
         pendingColorSince = now;
         Log("material color rebuild failed; retaining previous generation");
     }
+}
+
+bool IsInstalled()
+{
+    return hook != nullptr && original != nullptr;
+}
+
+bool HasBombTarget()
+{
+    return bombTarget.load(std::memory_order_relaxed) != nullptr;
+}
+
+unsigned long long GetEnemyMeshMatches()
+{
+    return enemyMeshMatches.load(std::memory_order_relaxed);
+}
+
+unsigned long long GetKnifeMeshMatches()
+{
+    return knifeMeshMatches.load(std::memory_order_relaxed);
+}
+
+unsigned long long GetBombMeshMatches()
+{
+    return bombMeshMatches.load(std::memory_order_relaxed);
 }
 }
 

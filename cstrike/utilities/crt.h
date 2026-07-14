@@ -233,6 +233,8 @@ namespace CRT
 	/// @returns: pointer to the @a'pDestination'
 	CS_INLINE void* MemorySet(void* pDestination, const std::uint8_t uByte, std::size_t nCount)
 	{
+		if (pDestination == nullptr)
+			return nullptr;
 #ifdef CS_COMPILER_MSC
 		// @test: clang always tries to detect 'memset' like instructions and replace them with CRT's function call
 		if (const std::size_t nCountAlign = (nCount & 3U); nCountAlign == 0U)
@@ -481,7 +483,9 @@ namespace CRT
 	{
 		std::size_t i = 0U;
 
-		while (tszSource[i] != C('\0') && i < nMaxLength)
+		// Check the bound before dereferencing. The previous order read one
+		// element past the permitted range when no terminator was present.
+		while (i < nMaxLength && tszSource[i] != C('\0'))
 			++i;
 
 		return i;
@@ -1486,7 +1490,7 @@ namespace CRT
 		int nOctetCount = 0;
 
 		// go through each character until terminating null up to end if given
-		while (*tszBegin != C('\0') && (tszEnd == nullptr || tszBegin < tszEnd))
+		while ((tszEnd == nullptr || tszBegin < tszEnd) && *tszBegin != C('\0'))
 		{
 			if (const std::uint32_t uChar = static_cast<std::uint32_t>(*tszBegin++); uChar < 0x80)
 				nOctetCount += 1;
@@ -1508,7 +1512,7 @@ namespace CRT
 		int nCharCount = 0;
 
 		std::uint32_t uChar = 0U;
-		while (*tszBegin != C('\0') && tszBegin < tszEnd)
+		while (tszBegin < tszEnd && *tszBegin != C('\0'))
 		{
 			tszBegin += CharMultiByteToUTF32(tszBegin, tszEnd, &uChar);
 
@@ -1776,8 +1780,15 @@ namespace CRT
 
 		/// converted from multibyte data
 		void FromMultiByte(const wchar_t* wszData)
-		{ 
-			StringUnicodeToMultiByte(this->szBuffer, this->Length(), wszData, wszData + this->Length());
+		{
+			if (wszData == nullptr)
+			{
+				this->szBuffer[0] = '\0';
+				return;
+			}
+			const std::size_t sourceLength = StringLength(wszData);
+			StringUnicodeToMultiByte(this->szBuffer, this->Size(),
+				wszData, wszData + sourceLength);
 		}
 
 		void Clear() noexcept
@@ -1785,7 +1796,7 @@ namespace CRT
 			MemorySet(szBuffer, 0U, sizeof(szBuffer));
 		}
 
-		char szBuffer[SIZE];
+		char szBuffer[SIZE]{};
 	};
 
 	// wrapper for wchar_t string
@@ -1914,9 +1925,16 @@ namespace CRT
 		/// conveted from multibyte data
 		void FromUnicode(const char* szStr)
 		{
-			StringMultiByteToUnicode(this->wszBuffer, this->Length(), szStr, szStr + this->Length());
+			if (szStr == nullptr)
+			{
+				this->wszBuffer[0] = L'\0';
+				return;
+			}
+			const std::size_t sourceLength = StringLength(szStr);
+			StringMultiByteToUnicode(this->wszBuffer, this->Size(),
+				szStr, szStr + sourceLength);
 		}
 
-		wchar_t wszBuffer[SIZE];
+		wchar_t wszBuffer[SIZE]{};
 	};
 }

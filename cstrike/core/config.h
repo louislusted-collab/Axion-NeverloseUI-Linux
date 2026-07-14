@@ -1,4 +1,5 @@
 #pragma once
+#include <bit>
 // used: [stl] vector
 #include <vector>
 // used: [stl] type_info
@@ -149,10 +150,22 @@ namespace C
 	// member of user-defined custom serialization structure
 	struct UserDataMember_t
 	{
-		// @todo: not sure is it possible and how todo this with projections, so currently done with pointer-to-member thing, probably could be optimized
 		template <typename T, typename C>
-		constexpr UserDataMember_t(const FNV1A_t uNameHash, const FNV1A_t uTypeHash, const T C::*pMember) :
-			uNameHash(uNameHash), uTypeHash(uTypeHash), nDataSize(sizeof(std::remove_pointer_t<T>)), uBaseOffset(reinterpret_cast<std::size_t>(std::addressof(static_cast<C*>(nullptr)->*pMember))) { } // @test: 'CS_OFFSETOF' must expand to the same result but for some reason it doesn't
+		static std::size_t GetMemberOffset(const T C::*pMember)
+		{
+			static_assert(std::is_standard_layout_v<C>,
+				"serialized configuration types must have a stable standard layout");
+			static_assert(sizeof(pMember) == sizeof(std::ptrdiff_t),
+				"unsupported data-member pointer representation");
+			const std::ptrdiff_t offset = std::bit_cast<std::ptrdiff_t>(pMember);
+			return offset >= 0 ? static_cast<std::size_t>(offset) : 0U;
+		}
+
+		template <typename T, typename C>
+		UserDataMember_t(const FNV1A_t uNameHash, const FNV1A_t uTypeHash, const T C::*pMember) :
+			uNameHash(uNameHash), uTypeHash(uTypeHash),
+			nDataSize(sizeof(std::remove_pointer_t<T>)),
+			uBaseOffset(GetMemberOffset(pMember)) { }
 
 		// hash of custom variable name
 		FNV1A_t uNameHash = 0U;

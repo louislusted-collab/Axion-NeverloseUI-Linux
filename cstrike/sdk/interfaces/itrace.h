@@ -28,6 +28,12 @@ namespace TRACE
 		Vector_t normal{};
 		float fraction = 1.0f;
 		C_BaseEntity* entity = nullptr;
+		void* surface = nullptr;
+		int hitGroup = -1;
+		std::uint16_t material = 0;
+		float penetrationModifier = 0.f;
+		float damageModifier = 0.f;
+		bool surfaceValid = false;
 		bool hit = false;
 		bool allSolid = false;
 	};

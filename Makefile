@@ -112,6 +112,7 @@ OBJ_FILES += $(IMGUI)/backends/imgui_impl_vulkan.cpp.o
 
 OBJDIR = obj/$(BUILD)
 OBJS = $(addprefix $(OBJDIR)/, $(OBJ_FILES))
+DEP_FILES = $(OBJS:.o=.d)
 BIN  = cs2_axion.so
 LOADER = axion_loader
 GTK_CFLAGS = $(shell pkg-config --cflags gtk4)
@@ -121,11 +122,11 @@ GTK_LIBS = $(shell pkg-config --libs gtk4)
 
 all: debug loader
 
-debug: BUILD = debug
-debug: $(BIN)
+debug:
+	$(MAKE) BUILD=debug $(BIN)
 
-release: BUILD = release
-release: $(BIN)
+release:
+	$(MAKE) BUILD=release $(BIN)
 
 loader: $(LOADER)
 
@@ -147,8 +148,10 @@ $(BIN): $(OBJS)
 
 $(OBJDIR)/%.cpp.o: %.cpp
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
 
 $(OBJDIR)/%.cpp.o: /%.cpp
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
+
+-include $(DEP_FILES)

@@ -27,6 +27,12 @@ bool QueueNativeAimAngles(void* requestToken, float pitch, float yaw, float roll
 unsigned long long GetNativeCreateMoveCalls();
 unsigned long long GetNativeAimAngleApplications();
 bool IsNativeInputHookInstalled();
+unsigned long long GetVulkanSwapchainRebuilds();
+unsigned long long GetVulkanSwapchainRebuildFailures();
+unsigned long long GetVulkanRendererRetirements();
+unsigned long long GetVulkanPresentFaults();
+unsigned int GetVulkanRuntimeWidth();
+unsigned int GetVulkanRuntimeHeight();
 
 // Keeps CS2's native third-person input flag synchronized during the game's
 // SDL input sample. Writing this only from Vulkan present is too late for the

@@ -10,10 +10,12 @@ The native library includes the repair paths described by this guide. CS2 is
 currently closed, so runtime-dependent rows remain `live verification` in
 `SELECTED_FEATURES.md` until a new process loads this rebuild.
 
-Clean debug and optimized release builds pass without project warnings. The
-release ELF passes `ldd -r`, and debug/release objects now live in separate
-directories so switching build modes cannot reuse objects compiled with the
-wrong flags.
+Clean debug and optimized release builds pass. Targeted Clang analysis of the
+modified renderer, ESP, chams, trace, menu and memory paths reports no project
+defects (only a vendored ImGui dead-store warning), and `ldd -r` reports no
+unresolved symbols. Debug/release objects live in separate directories so
+switching build modes cannot reuse objects compiled with the wrong flags;
+generated dependency files also force rebuilds after header changes.
 
 - `CCSGOInput::CreateMove` is hooked at the current primary vtable index 26
   with the native `void(this, slot, CUserCmd*)` ABI. Command sequence, protobuf
@@ -34,14 +36,25 @@ wrong flags.
   reads live throw strength/velocity and `sv_gravity`, integrates at the game
   tick interval, reflects velocity on collision normals and records bounce and
   landing points.
-- Smoke gates currently use the local pawn's validated smoke-overlay state.
-  They are marked partial because this is not yet a smoke-density test across
-  the complete eye-to-target segment.
-- Rage minimum damage, hitchance, autowall, penetration preview, lethal-body,
-  highest-damage preference and delay-until-accurate remain blocked. They must
-  not open until weapon spread/inaccuracy, surface data, trace-to-exit and
-  damage falloff are implemented and validated; geometric or distance guesses
-  are not acceptable substitutes.
+- Smoke gates retain the local pawn's validated smoke-overlay state and also
+  scan live `smokegrenade_projectile` entities through checked identity, effect
+  tick and scene-origin reads. A cached active-volume test rejects every aim or
+  trigger point whose complete eye-to-target segment intersects the cloud; an
+  unavailable schema/timing state fails closed instead of allowing the shot.
+- Artificial humanized overshoot is opt-in and bounded to one event per target
+  lock. It records the incoming angular direction, crosses by the configured
+  small offset, releases after one short input interval and returns through the
+  existing time-based recovery response; changing or releasing the lock clears
+  all phase state.
+- Rage ballistics now reads current schema weapon damage, head/armor ratios,
+  penetration, range falloff, two-mode spread and movement/air/penalty
+  inaccuracy. Damage scaling reads the live team head/body CVars and validated
+  armor/helmet/heavy-armor state. The exact-build trace result supplies
+  hitgroup and surface penetration/damage modifiers; a bounded trace-to-exit
+  loop applies thickness, surface, penetration and range losses. Hitchance
+  performs 128 deterministic live collision samples. Minimum damage, autowall,
+  damage preview, lethal body, highest damage and delay-until-accurate consume
+  those results and fail closed when any required source is unavailable.
 - Post-injection resize now hooks swapchain creation even on a late attach,
   retains the ImGui context and SDL backend, rebuilds only Vulkan resources,
   binds rendering to the actual present queue/family and checks every relevant
@@ -50,9 +63,15 @@ wrong flags.
 - Bomb chams track the live planted-C4 entity instead of the planter or carrier,
   so planter death cannot remove the effect. Knife models are classified before
   generic held weapons and use an independent toggle and color.
-- Unsupported Rage ballistics options no longer cause an unexplained complete
-  early exit: target acquisition and bounded aim can continue, while every fire,
-  scope, crouch and stop input is held and diagnostics report `HOLD_BALLISTICS`.
+- Rage target selection also exposes per-weapon head/neck, torso and limb
+  priority groups. Its decision overlay/log includes target index, bone,
+  visibility/penetration state, damage, hitchance and the fire/hold reason.
+- Render-frame input/chams/skin state is cleared before every loading or
+  disconnect early return, preventing commands or raw entity identities from a
+  prior map from staying latched. Anti-aim also checks the grenade pin/throw
+  transition after attack release instead of redirecting the throw.
+- The `make release` target now recursively selects the release object tree;
+  the previous target could silently relink debug objects despite its name.
 
 ## Reference projects
 

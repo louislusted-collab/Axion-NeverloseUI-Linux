@@ -29,6 +29,7 @@
 #ifdef __linux__
 #include "../../linux/vulkan_hook.h"
 #include "../../linux/native_esp.h"
+#include "../../linux/native_chams.h"
 #include "../sdk/interfaces/itrace.h"
 #endif
 #pragma region menu_array_entries
@@ -280,8 +281,12 @@ void MENU::RenderMainWindow()
 
 						int& targetSelection = C_GET_ARRAY(int, 7, Vars.rage_target_select, current_weapon);
 						targetSelection = std::clamp(targetSelection, 0, 2);
-						const char* targets_select[3]{ CS_XOR("Distance"), CS_XOR("Damage (blocked)"),CS_XOR("Crosshair") };
+						const char* targets_select[3]{ CS_XOR("Distance"), CS_XOR("Damage"),CS_XOR("Crosshair") };
 						edited::Combo(CS_XOR("Target selection"), CS_XOR("Select target based on conditions"), &C_GET_ARRAY(int, 7, Vars.rage_target_select, current_weapon), targets_select, IM_ARRAYSIZE(targets_select), 6);
+						const char* hitbox_priorities[4]{ CS_XOR("Automatic"), CS_XOR("Head / neck"), CS_XOR("Torso"), CS_XOR("Limbs") };
+						int& hitboxPriority = C_GET_ARRAY(int, 7, Vars.rage_hitbox_priority, current_weapon);
+						hitboxPriority = std::clamp(hitboxPriority, 0, 3);
+						edited::Combo(CS_XOR("Hitbox priority"), CS_XOR("Prefer one enabled hitbox group before normal scoring"), &hitboxPriority, hitbox_priorities, IM_ARRAYSIZE(hitbox_priorities), 6);
 
 						if (current_weapon > 3)
 							edited::Checkbox("Auto scope", "Scope a sniper after a valid target is acquired", &C_GET_ARRAY(bool, 7, Vars.rage_auto_scope, current_weapon));
@@ -298,7 +303,7 @@ void MENU::RenderMainWindow()
 
 						ImGui::TextColored(ImColor(ImGui::GetColorU32(c::elements::text)), "Accuracy");
 						#ifdef __linux__
-						ImGui::TextWrapped("Damage, hitchance, penetration, lethal-body, prefer-damage, and delay-until-accurate remain fail-closed until native ballistics validates. Enabling a saved option holds firing, but no longer disables aiming.");
+						ImGui::TextWrapped("Native ballistics uses live weapon, armor, surface and trace data. A client-build or schema mismatch holds the shot and reports the unavailable condition.");
 						#endif
 
 						edited::Checkbox("Hitchance", "Allows you to hit players with more accuracy", &C_GET_ARRAY(bool, 7, Vars.rage_hitchance, current_weapon));
@@ -422,7 +427,10 @@ void MENU::RenderMainWindow()
 							edited::SliderFloat("Smoothness (ms)", "Time used to settle onto the target", &C_GET(float, Vars.legit_ui_smoothness), 1.f, 500.f, "%.0f ms");
 					edited::SliderFloat("Acceleration (ms)", "Time to ramp from a gentle start to full aim speed; 0 disables the ramp", &C_GET(float, Vars.legit_ui_acceleration_ms), 0.f, 500.f, "%.0f ms");
 					edited::SliderFloat("Deceleration zone", "Start slowing this many degrees before the target; 0 disables it", &C_GET(float, Vars.legit_ui_deceleration_degrees), 0.f, 10.f, "%.1f deg");
-					edited::SliderFloat("Recovery (ms)", "Correction time after naturally crossing the target; this does not add artificial overshoot", &C_GET(float, Vars.legit_ui_recovery_ms), 5.f, 250.f, "%.0f ms");
+					edited::Checkbox("Artificial overshoot", "Once per target lock, continue a small bounded distance past the target before recovering", &C_GET(bool, Vars.legit_ui_artificial_overshoot));
+					if (C_GET(bool, Vars.legit_ui_artificial_overshoot))
+						edited::SliderFloat("Overshoot amount", "Maximum angular distance past the target", &C_GET(float, Vars.legit_ui_overshoot_degrees), 0.05f, 1.50f, "%.2f deg");
+					edited::SliderFloat("Recovery (ms)", "Correction time after crossing the target naturally or through artificial overshoot", &C_GET(float, Vars.legit_ui_recovery_ms), 5.f, 250.f, "%.0f ms");
 					edited::Checkbox("Draw FoV", "Draw the active aim field of view", &C_GET(bool, Vars.legit_ui_draw_fov));
 						if (C_GET(bool, Vars.legit_ui_per_weapon))
 							edited::SliderFloat("FoV Size", "Field of view size", &C_GET_ARRAY(float, 7, Vars.legit_profile_fov, legitProfile), 5.f, 60.f, "%.0f°");
@@ -444,7 +452,7 @@ void MENU::RenderMainWindow()
 							edited::Combo("Target selection", "How enemies are ranked", &C_GET_ARRAY(int, 7, Vars.legit_profile_target_selection, legitProfile), legitTargets, IM_ARRAYSIZE(legitTargets), 3);
 							edited::Combo("Hitbox selection", "Priority follows the toggles above; nearest chooses the smallest angular delta", &C_GET_ARRAY(int, 7, Vars.legit_profile_hitbox_mode, legitProfile), legitHitboxModes, IM_ARRAYSIZE(legitHitboxModes), 2);
 							edited::Checkbox("Visibility check", "Ignore points blocked by world geometry", &C_GET_ARRAY(bool, 7, Vars.legit_profile_visibility_check, legitProfile));
-							edited::Checkbox("Smoke check", "Do not acquire while the local view is inside smoke", &C_GET_ARRAY(bool, 7, Vars.legit_profile_smoke_check, legitProfile));
+							edited::Checkbox("Smoke check", "Reject a target when active smoke intersects the complete eye-to-target segment", &C_GET_ARRAY(bool, 7, Vars.legit_profile_smoke_check, legitProfile));
 							edited::Checkbox("Flash check", "Pause aim while flashed", &C_GET_ARRAY(bool, 7, Vars.legit_profile_flash_check, legitProfile));
 							edited::SliderFloat("Reaction delay", "Wait after acquiring a new target", &C_GET_ARRAY(float, 7, Vars.legit_profile_reaction_ms, legitProfile), 0.f, 500.f, "%.0f ms");
 						}
@@ -453,7 +461,7 @@ void MENU::RenderMainWindow()
 							edited::Combo("Target selection", "How enemies are ranked", &C_GET(int, Vars.legit_ui_target_selection), legitTargets, IM_ARRAYSIZE(legitTargets), 3);
 							edited::Combo("Hitbox selection", "Priority follows the toggles above; nearest chooses the smallest angular delta", &C_GET(int, Vars.legit_ui_hitbox_mode), legitHitboxModes, IM_ARRAYSIZE(legitHitboxModes), 2);
 							edited::Checkbox("Visibility check", "Ignore points blocked by world geometry", &C_GET(bool, Vars.legit_ui_visibility_check));
-							edited::Checkbox("Smoke check", "Do not acquire while the local view is inside smoke", &C_GET(bool, Vars.legit_ui_smoke_check));
+							edited::Checkbox("Smoke check", "Reject a target when active smoke intersects the complete eye-to-target segment", &C_GET(bool, Vars.legit_ui_smoke_check));
 							edited::Checkbox("Flash check", "Pause aim while flashed", &C_GET(bool, Vars.legit_ui_flash_check));
 							edited::SliderFloat("Reaction delay", "Wait after acquiring a new target", &C_GET(float, Vars.legit_ui_reaction_ms), 0.f, 500.f, "%.0f ms");
 						}
@@ -467,7 +475,7 @@ void MENU::RenderMainWindow()
 							edited::SliderFloat("Trigger delay", "Wait before firing a stable target", &C_GET(float, Vars.trigger_ui_delay_ms), 0.f, 500.f, "%.0f ms");
 							edited::MultiCombo("Trigger hitboxes", &C_GET(unsigned int, Vars.trigger_ui_hitboxes), arrTriggerHitboxes, CS_ARRAYSIZE(arrTriggerHitboxes));
 							edited::Checkbox("Trigger visibility", "Require an exposed target", &C_GET(bool, Vars.trigger_ui_visibility_check));
-							edited::Checkbox("Trigger smoke check", "Pause while the local view is in smoke", &C_GET(bool, Vars.trigger_ui_smoke_check));
+							edited::Checkbox("Trigger smoke check", "Reject points whose complete eye-to-target segment intersects active smoke", &C_GET(bool, Vars.trigger_ui_smoke_check));
 							edited::Checkbox("Scoped only", "Require scope for sniper groups", &C_GET(bool, Vars.trigger_ui_scoped_only));
 							edited::Checkbox("Trigger diagnostics", "Log acquisition, delay and command decisions", &C_GET(bool, Vars.trigger_ui_diagnostics));
 						}
@@ -668,9 +676,6 @@ void MENU::RenderMainWindow()
 
 					ImGuiStyle& style = ImGui::GetStyle();
 					// @note: call this function inside rendermainwindow, else expect a crash...
-					const ImVec2 vecMenuPos = ImGui::GetWindowPos();
-					const ImVec2 vecMenuSize = ImGui::GetWindowSize();
-
 					const ImVec2 vecOverlayPadding = ImVec2(65 * dpi, 58 * dpi);  // Adjusted the Y position
 
 					const ImVec2 vecWindowPos = ImGui::GetWindowPos();
@@ -800,6 +805,14 @@ void MENU::RenderMainWindow()
 						IsNativeInputHookInstalled() ? "ready" : "waiting",
 						GetNativeCreateMoveCalls(), GetNativeAimAngleApplications());
 					ImGui::Text("Trace/collision: %s", TRACE::NativeReady() ? "self-test passed" : "fail-closed / waiting");
+					ImGui::Text("Swapchain: %ux%u | rebuilds: %llu | failures: %llu | retirements: %llu | present faults: %llu",
+						GetVulkanRuntimeWidth(), GetVulkanRuntimeHeight(),
+						GetVulkanSwapchainRebuilds(), GetVulkanSwapchainRebuildFailures(),
+						GetVulkanRendererRetirements(), GetVulkanPresentFaults());
+					ImGui::Text("Chams: %s | enemy meshes: %llu | knife meshes: %llu | bomb meshes: %llu | bomb target: %s",
+						NativeChams::IsInstalled() ? "ready" : "waiting",
+						NativeChams::GetEnemyMeshMatches(), NativeChams::GetKnifeMeshMatches(),
+						NativeChams::GetBombMeshMatches(), NativeChams::HasBombTarget() ? "tracked" : "none");
 					ImGui::TextWrapped("Runtime-only rows in SELECTED_FEATURES.md still require an actual match test before they are marked verified.");
 					#endif
 
@@ -864,7 +877,7 @@ void MENU::RenderMainWindow()
 					if (ImGui::Button(CS_XOR("create"), ImVec2(-1, 15 * MENU::flDpiScale)) || createOnEnter)
 					{
 						// check if the filename isn't empty
-						if (const std::size_t nConfigFileLength = CRT::StringLength(szConfigFile); nConfigFileLength > 0U)
+						if (const std::size_t nConfigFileLength = CRT::StringLengthN(szConfigFile, sizeof(szConfigFile)); nConfigFileLength > 0U)
 						{
 							wchar_t wszConfigFile[65] = {};
 							const std::size_t wideLength = std::min(nConfigFileLength, CS_ARRAYSIZE(wszConfigFile) - 1U);
@@ -899,10 +912,12 @@ void MENU::RenderMainWindow()
 					ImGui::BeginDisabled(!hasSelectedConfig);
 					if (ImGui::Button(CS_XOR("rename"), ImVec2(-1, 15 * MENU::flDpiScale)))
 					{
-						if (CRT::StringLength(szConfigFile) > 0U)
+						if (CRT::StringLengthN(szConfigFile, sizeof(szConfigFile)) > 0U)
 						{
 							wchar_t newName[65] = {};
-							const std::size_t nameLength = std::min(CRT::StringLength(szConfigFile), CS_ARRAYSIZE(newName) - 1U);
+							const std::size_t nameLength = std::min(
+								CRT::StringLengthN(szConfigFile, sizeof(szConfigFile)),
+								CS_ARRAYSIZE(newName) - 1U);
 							for (std::size_t index = 0; index < nameLength; ++index)
 								newName[index] = static_cast<unsigned char>(szConfigFile[index]);
 							if (C::RenameFile(nSelectedConfig, newName))

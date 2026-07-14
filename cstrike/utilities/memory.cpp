@@ -42,8 +42,9 @@ bool MEM::Setup()
 					}
 				}
 			}
-			fclose(f); fclose(out);
 		}
+		if (f) fclose(f);
+		if (out) fclose(out);
 	}
 #endif
 

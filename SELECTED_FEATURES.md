@@ -32,14 +32,14 @@ safe implementation exists but does not meet the full acceptance condition;
 | 5 | Closest-distance targeting | live verification |
 | 6 | Lowest-health targeting | live verification |
 | 10 | Visibility check | live verification |
-| 11 | Smoke check | partial/live verification |
+| 11 | Smoke check | live verification |
 | 12 | Flash check | live verification |
 | 16 | Hitbox priority | live verification |
 | 17 | Nearest-hitbox selection | live verification |
 | 18 | Reaction delay | live verification |
 | 25 | Acceleration control | live verification |
 | 26 | Deceleration control | live verification |
-| 34 | Artificial humanized overshoot | deferred |
+| 34 | Artificial humanized overshoot | live verification |
 | 35 | Natural overshoot recovery | live verification |
 
 ## Triggerbot and recoil
@@ -50,7 +50,7 @@ safe implementation exists but does not meet the full acceptance condition;
 | 42 | Trigger delay | live verification |
 | 47 | Trigger hitbox filter | live verification |
 | 48 | Trigger visibility check | live verification |
-| 49 | Trigger smoke check | partial/live verification |
+| 49 | Trigger smoke check | live verification |
 | 50 | Trigger scoped-only mode | live verification |
 | 51 | Standalone recoil control | live verification |
 | 55 | Recoil smoothing | live verification |
@@ -65,23 +65,23 @@ safe implementation exists but does not meet the full acceptance condition;
 | 63 | Hitbox selection | live verification |
 | 64 | Hitbox priority groups | live verification |
 | 65 | Multipoint | live verification |
-| 69 | Minimum damage | blocked: native ballistics |
-| 71 | Hitchance | blocked: native ballistics |
-| 73 | Autowall | blocked: native ballistics |
-| 74 | Penetration-damage preview | blocked: native ballistics |
+| 69 | Minimum damage | live verification |
+| 71 | Hitchance | live verification |
+| 73 | Autowall | live verification |
+| 74 | Penetration-damage preview | live verification |
 | 75 | Auto-stop | live verification |
 | 76 | Auto-crouch | live verification |
 | 77 | Auto-scope | live verification |
 | 78 | Force-body bind | live verification |
 | 79 | Force-head bind | live verification |
-| 81 | Lethal-body preference | blocked: native ballistics |
+| 81 | Lethal-body preference | live verification |
 | 82 | Prefer exposed hitboxes | live verification |
 | 83 | Prefer low-health enemies | live verification |
-| 86 | Prefer highest damage | blocked: native ballistics |
-| 89 | Delay shot until accurate | blocked: native ballistics |
+| 86 | Prefer highest damage | live verification |
+| 89 | Delay shot until accurate | live verification |
 | 90 | Delay shot until visible | live verification |
 | 98 | Per-weapon Rage profiles | live verification |
-| 99 | Rage decision overlay | partial/live verification |
+| 99 | Rage decision overlay | live verification |
 | 100 | Shot-reason logging | live verification |
 
 ## Anti-Aim
@@ -217,12 +217,17 @@ prerequisite even though their original list numbers were not repeated.
 The user report above describes a previously injected binary. CS2 is currently
 closed, so the rebuilt `cs2_axion.so` has not been live-verified. It contains the
 native CreateMove hook, typed CVar readback/restoration, build-gated trace
-self-test, crash-hardened weapon ESP, repaired ESP/chams/config paths, world
+self-test, crash-hardened weapon ESP, bounded one-shot overshoot/recovery,
+full eye-to-target active-smoke intersection, repaired ESP/chams/config paths, world
 entities/timers, swept-hull grenade prediction, swapchain-recreation handling,
 planted-C4 lifetime tracking and independent knife chams. Restart and inject
 the new library before promoting any `live verification` row to `user verified`
-or `done`. Real damage, spread/hitchance and penetration remain explicitly
-blocked instead of being approximated and mislabeled as native ballistics.
-Clean debug and optimized release builds pass without project warnings; the
-release ELF also passes `ldd -r`. These checks prove build/link integrity, not
-the runtime acceptance conditions above.
+or `done`. The current-build native ballistics path reads live weapon damage,
+armor, spread/inaccuracy and damage-scale CVars; consumes gated trace hitgroups
+and surface modifiers; performs bounded trace-to-exit penetration and range
+falloff; and evaluates a complete 128-seed hitchance set. A missing/mismatched
+schema, CVar, surface layout or trace ABI holds the affected shot. Clean debug
+and optimized release builds pass, the modified runtime sources pass Clang's
+static analyzer with only a vendored ImGui warning, and `ldd -r` reports no
+unresolved symbols. Build checks prove integrity, not the runtime acceptance
+conditions above.

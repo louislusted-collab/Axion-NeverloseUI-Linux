@@ -1,9 +1,44 @@
 AXION NATIVE-LINUX CS2 HANDOFF — 2026-07-14
 ============================================
 
+2026-07-14 FEATURE-COMPLETION ADDENDUM
+--------------------------------------
+The previously blocked feature work is now implemented in this continuation.
+Legit/trigger use complete active-smoke segment checks and
+Legit has bounded one-shot artificial overshoot. Rage now has current-schema
+weapon damage/spread/inaccuracy, typed damage-scale CVars, armor scaling,
+exact-build trace hitgroup/surface extraction, bounded trace-to-exit and
+penetration loss, range falloff, full 128-seed hitchance, minimum damage,
+damage preview, lethal-body/highest-damage preferences, accuracy delay,
+per-weapon hitbox priority groups, and complete decision/log output. Every one
+of these remains `live verification` because CS2 is closed; an invalid trace,
+surface, schema or CVar source holds the affected shot.
+
+The latest debug build passes. Do the requested stability/optimization audit,
+then clean debug/release/static/link verification before committing/pushing.
+The last pushed commit before this continuation is
+049993d4637e699aaddf4e0798f83512b44142f1 (`HUGE FIXES AND ALOT MORE FEATURES`).
+
+2026-07-14 FINAL STATIC-VERIFICATION ADDENDUM
+---------------------------------------------
+The requested post-feature audit is complete. It additionally clears combat,
+movement, aim, chams-target and skin-status state before loading/disconnect
+returns; bounds player-name reads; suspends anti-aim during the grenade
+pin/throw transition; fixes CRT/config/memory safety findings; and replaces
+per-trace `/proc/self/maps` scans with fault-safe in-process reads. The Makefile
+now emits header dependency files, separates build-mode objects and makes the
+release target actually compile with `-O2 -DNDEBUG`.
+
+Clean debug and optimized release builds pass. Targeted Clang analysis of the
+modified native paths reports only the existing vendored ImGui dead-store
+warning, `ldd -r` has no unresolved symbols, `git diff --check` passes and all
+repository shell scripts pass `bash -n`. CS2 remains closed, so every gameplay
+or rendering acceptance condition still marked `live verification` must stay
+that way until a fresh injected session exercises it.
+
 2026-07-14 STABILITY ADDENDUM
 -----------------------------
-CS2 is now closed. The current worktree adds synchronized Vulkan swapchain
+CS2 is now closed. This continuation adds synchronized Vulkan swapchain
 recreation for post-injection resize, actual present-queue family tracking,
 planted-C4 chams independent of the planter, and independent knife chams. It
 also hardens config object copy/move ownership, skin refresh behavior and menu
@@ -26,8 +61,9 @@ modulation, dropped weapons/timers, and swept-hull grenade prediction.
 CS2 is closed. A fresh launch/injection is required before any runtime claim can
 be updated. See
 SELECTED_FEATURES.md and AXION_IMPLEMENTATION_GUIDE.md for the authoritative
-status. Real native ballistics (damage, spread/hitchance and penetration) and a
-full line smoke-density test remain explicit blockers; they are not faked.
+status. The former native-ballistics and full smoke-segment blockers are
+implemented in the newer feature-completion addendum above; they still require
+fresh injected runtime verification.
 
 USER / ENVIRONMENT
 ------------------
@@ -373,3 +409,19 @@ USER STYLE / EXPECTATIONS
 - Fix crashes and shared foundations before adding more surface controls.
 
 END HANDOFF
+2026-07-14 CONTINUATION AUDIT
+=============================
+
+- Feature #34 is no longer deferred. Native legit aim now has an opt-in,
+  one-shot-per-lock artificial overshoot phase with a 0.05-1.50 degree bound,
+  crossing detection, a short hold and time-based recovery. It is disabled by
+  default and still requires injected runtime verification.
+- Legit #11 and trigger #49 now test the complete eye-to-target segment against
+  cached active smoke volumes derived from checked smoke projectile identity,
+  effect tick and scene origin. Missing schema/timing state rejects the point.
+- A later exact-build trace audit added range-gated hitgroup and surface
+  material extraction plus bounded trace-to-exit. The Rage consumers remain
+  fail-closed until the new result path validates in a fresh injected process;
+  the Windows-only legacy penetration ABI remains disabled.
+- Clean debug/release builds, targeted static analysis and link verification
+  subsequently pass as recorded in the final static-verification addendum.

@@ -34,10 +34,12 @@ public:
 	// Swaps fields for the templated type to the output buffer.
 	template<typename T> inline void SwapFieldsToTargetEndian(T* pOutputBuffer, void* pBaseData, unsigned int objectCount = 1)
 	{
+		auto* pCurrentData = static_cast<unsigned char*>(pBaseData);
 		for (unsigned int i = 0; i < objectCount; ++i, ++pOutputBuffer)
 		{
-			SwapFieldsToTargetEndian((void*)pOutputBuffer, pBaseData, &T::m_DataMap);
-			pBaseData = pBaseData + sizeof(T);
+			SwapFieldsToTargetEndian(static_cast<void*>(pOutputBuffer),
+				static_cast<void*>(pCurrentData), &T::m_DataMap);
+			pCurrentData += sizeof(T);
 		}
 	}
 

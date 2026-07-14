@@ -70,6 +70,12 @@ static bool              vk_imgui_inited    = false;
 static bool              vk_sdl_inited      = false;
 static VkSwapchainKHR    vk_bound_swapchain = VK_NULL_HANDLE;
 static uint32_t          vk_frame_count     = 0;
+static std::atomic<std::uint64_t> vk_swapchain_rebuilds{0};
+static std::atomic<std::uint64_t> vk_swapchain_rebuild_failures{0};
+static std::atomic<std::uint64_t> vk_renderer_retirements{0};
+static std::atomic<std::uint64_t> vk_present_faults{0};
+static std::atomic<std::uint32_t> vk_runtime_width{0};
+static std::atomic<std::uint32_t> vk_runtime_height{0};
 // Queue-present and swapchain creation are allowed to run on different game
 // threads. Keep our renderer resources alive until the present call that uses
 // them has returned, and serialize replacement of the swapchain-dependent set.
@@ -836,6 +842,11 @@ static void DestroyFrameResources()
 
 static void InvalidateVulkanRenderer(bool wait_for_device)
 {
+    const bool hadRenderer = vk_bound_swapchain != VK_NULL_HANDLE || vk_frame_count != 0 ||
+        vk_render_pass != VK_NULL_HANDLE || vk_descriptor_pool != VK_NULL_HANDLE ||
+        vk_imgui_inited;
+    if (hadRenderer)
+        vk_renderer_retirements.fetch_add(1, std::memory_order_relaxed);
     if (wait_for_device && vk_device != VK_NULL_HANDLE)
         vkDeviceWaitIdle(vk_device);
 
@@ -849,6 +860,8 @@ static void InvalidateVulkanRenderer(bool wait_for_device)
         ImGui_ImplVulkan_Shutdown();
     vk_imgui_inited = false;
     DestroyFrameResources();
+    vk_runtime_width.store(0, std::memory_order_relaxed);
+    vk_runtime_height.store(0, std::memory_order_relaxed);
 }
 
 static bool EnsureFrameResources(VkSwapchainKHR swapchain)
@@ -866,6 +879,7 @@ static bool EnsureFrameResources(VkSwapchainKHR swapchain)
         return false;
 
     auto fail = [](const char* operation) {
+        vk_swapchain_rebuild_failures.fetch_add(1, std::memory_order_relaxed);
         PreviewDebug("[VULKAN] swapchain renderer rebuild failed at %s", operation);
         InvalidateVulkanRenderer(true);
         return false;
@@ -873,7 +887,7 @@ static bool EnsureFrameResources(VkSwapchainKHR swapchain)
 
     uint32_t img_count = 0;
     if (vkGetSwapchainImagesKHR(vk_device, swapchain, &img_count, nullptr) != VK_SUCCESS || img_count == 0)
-        return false;
+        return fail("vkGetSwapchainImagesKHR count");
     if (img_count > 8)
         return fail("unsupported image count");
 
@@ -1023,6 +1037,9 @@ static bool EnsureFrameResources(VkSwapchainKHR swapchain)
     }
     vk_bound_swapchain = swapchain;
     vk_frame_count = img_count;
+    vk_runtime_width.store(vk_extent.width, std::memory_order_relaxed);
+    vk_runtime_height.store(vk_extent.height, std::memory_order_relaxed);
+    vk_swapchain_rebuilds.fetch_add(1, std::memory_order_relaxed);
     PreviewDebug("[VULKAN] renderer bound to swapchain=%p images=%u extent=%ux%u",
                  reinterpret_cast<void*>(swapchain), img_count, vk_extent.width, vk_extent.height);
     return vk_imgui_inited;
@@ -1238,6 +1255,7 @@ static VkResult Hooked_QueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pI
     const VkResult result = orig_vkQueuePresentKHR(queue, &hooked_present);
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_ERROR_SURFACE_LOST_KHR ||
         result == VK_ERROR_DEVICE_LOST) {
+        vk_present_faults.fetch_add(1, std::memory_order_relaxed);
         VulkanDebug("[VULKAN] present reported unusable swapchain/device; retiring overlay resources");
         InvalidateVulkanRenderer(true);
     } else if (result == VK_SUBOPTIMAL_KHR) {
@@ -1750,6 +1768,36 @@ unsigned long long GetNativeAimAngleApplications()
 bool IsNativeInputHookInstalled()
 {
     return native_input_hooks != nullptr;
+}
+
+unsigned long long GetVulkanSwapchainRebuilds()
+{
+    return vk_swapchain_rebuilds.load(std::memory_order_relaxed);
+}
+
+unsigned long long GetVulkanSwapchainRebuildFailures()
+{
+    return vk_swapchain_rebuild_failures.load(std::memory_order_relaxed);
+}
+
+unsigned long long GetVulkanRendererRetirements()
+{
+    return vk_renderer_retirements.load(std::memory_order_relaxed);
+}
+
+unsigned long long GetVulkanPresentFaults()
+{
+    return vk_present_faults.load(std::memory_order_relaxed);
+}
+
+unsigned int GetVulkanRuntimeWidth()
+{
+    return vk_runtime_width.load(std::memory_order_relaxed);
+}
+
+unsigned int GetVulkanRuntimeHeight()
+{
+    return vk_runtime_height.load(std::memory_order_relaxed);
 }
 
 void SetNativeThirdPersonInput(bool enabled)
